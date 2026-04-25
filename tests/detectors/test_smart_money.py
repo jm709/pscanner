@@ -182,6 +182,55 @@ def test_compute_metrics_empty_returns_zeroed() -> None:
     assert metrics.total_stake_usd == 0.0
 
 
+def test_compute_metrics_skips_zero_pnl_zero_value_artifacts() -> None:
+    """Split/merge/convert artifacts (realized_pnl == 0 AND current_value == 0) are skipped."""
+    closed = [
+        # Real winning trade: kept.
+        _closed_position(won=True, avg_price=0.4, size=100.0, realized_pnl=60.0),
+        # Artifact: zero pnl + zero current value -> dropped.
+        ClosedPosition.model_validate(
+            {
+                "proxyWallet": "0xabc",
+                "asset": "tok",
+                "conditionId": "0xartifact",
+                "outcome": "Yes",
+                "outcomeIndex": 0,
+                "size": 999.0,
+                "avgPrice": 0.5,
+                "currentValue": 0.0,
+                "realizedPnl": 0.0,
+            },
+        ),
+        # Real losing trade: kept (negative pnl is a real signal).
+        _closed_position(won=False, avg_price=0.5, size=100.0, realized_pnl=-50.0),
+    ]
+    metrics = _compute_metrics(closed)
+    assert metrics.count == 2
+    assert metrics.wins == 1
+    assert metrics.winrate == pytest.approx(0.5)
+    # mean_edge = ((1 - 0.4) + (0 - 0.5)) / 2 = (0.6 - 0.5) / 2 = 0.05.
+    assert metrics.mean_edge == pytest.approx(0.05)
+    # excess_pnl_usd ignores the artifact.
+    assert metrics.excess_pnl_usd == pytest.approx(10.0)
+
+
+def test_compute_metrics_mixed_wins_losses_bounds_winrate_and_edge() -> None:
+    """Mixed wins/losses must yield winrate < 1.0 and a bounded (non-inflated) mean_edge."""
+    closed = [
+        _closed_position(won=True, avg_price=0.4, size=100.0, realized_pnl=60.0),
+        _closed_position(won=True, avg_price=0.5, size=100.0, realized_pnl=50.0),
+        _closed_position(won=False, avg_price=0.6, size=100.0, realized_pnl=-60.0),
+        _closed_position(won=False, avg_price=0.7, size=100.0, realized_pnl=-70.0),
+    ]
+    metrics = _compute_metrics(closed)
+    assert 0.0 < metrics.winrate < 1.0
+    assert metrics.winrate == pytest.approx(0.5)
+    # mean_edge = ((1-0.4) + (1-0.5) + (0-0.6) + (0-0.7)) / 4 = (0.6+0.5-0.6-0.7)/4 = -0.05.
+    assert metrics.mean_edge == pytest.approx(-0.05)
+    # Far below the inflated 0.885 value the legacy /v1/closed-positions endpoint produced.
+    assert metrics.mean_edge < 0.5
+
+
 def test_compute_metrics_weighted_edge_differs_with_uneven_stakes() -> None:
     """Bigger losers should drag the weighted edge below the mean edge."""
     closed = [
@@ -216,7 +265,7 @@ async def test_refresh_upserts_qualifying_wallet() -> None:
     data_client = AsyncMock()
     data_client.get_leaderboard.return_value = [_leaderboard_entry()]
     # 5 resolved positions, 4 winners, avg_price=0.5 each, size=100, realized_pnl=±50.
-    data_client.get_closed_positions.return_value = [
+    data_client.get_settled_positions.return_value = [
         _closed_position(won=True, realized_pnl=500.0),
         _closed_position(won=True, realized_pnl=500.0),
         _closed_position(won=True, realized_pnl=500.0),
@@ -244,7 +293,7 @@ async def test_refresh_upserts_qualifying_wallet() -> None:
 async def test_refresh_skips_wallet_below_count_threshold() -> None:
     data_client = AsyncMock()
     data_client.get_leaderboard.return_value = [_leaderboard_entry()]
-    data_client.get_closed_positions.return_value = [
+    data_client.get_settled_positions.return_value = [
         _closed_position(won=True),
         _closed_position(won=True),
     ]  # Only 2 resolved (< min 5)
@@ -262,7 +311,7 @@ async def test_refresh_skips_wallet_below_edge_threshold() -> None:
     data_client.get_leaderboard.return_value = [_leaderboard_entry()]
     # avg_price=0.95 won True -> edge=0.05; avg_price=0.95 won False -> edge=-0.95.
     # Construct mean_edge ≈ 0.0 with plenty of resolved positions.
-    data_client.get_closed_positions.return_value = [
+    data_client.get_settled_positions.return_value = [
         _closed_position(won=True, avg_price=0.5, realized_pnl=50.0),
         _closed_position(won=False, avg_price=0.5, realized_pnl=-50.0),
         _closed_position(won=True, avg_price=0.5, realized_pnl=50.0),
@@ -286,7 +335,7 @@ async def test_refresh_skips_wallet_below_excess_pnl_threshold() -> None:
     data_client = AsyncMock()
     data_client.get_leaderboard.return_value = [_leaderboard_entry()]
     # 5 winners at avg_price=0.4, realized_pnl=10 each -> excess_pnl = 50 (< 1000).
-    data_client.get_closed_positions.return_value = [
+    data_client.get_settled_positions.return_value = [
         _closed_position(won=True, avg_price=0.4, size=10.0, realized_pnl=10.0),
         _closed_position(won=True, avg_price=0.4, size=10.0, realized_pnl=10.0),
         _closed_position(won=True, avg_price=0.4, size=10.0, realized_pnl=10.0),
@@ -312,7 +361,7 @@ async def test_refresh_handles_empty_leaderboard() -> None:
     await detector._refresh_tracked_wallets()
 
     tracked.upsert.assert_not_called()
-    data_client.get_closed_positions.assert_not_called()
+    data_client.get_settled_positions.assert_not_called()
 
 
 @pytest.mark.asyncio

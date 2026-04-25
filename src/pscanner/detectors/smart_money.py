@@ -60,6 +60,10 @@ def _compute_metrics(closed: list[ClosedPosition]) -> _WalletMetrics:
     """Compute edge-based skill metrics from a wallet's closed positions.
 
     Skips degenerate positions where avg_price <= 0 or >= 1 (no information).
+    Also skips split/merge/convert artifacts — positions where realized_pnl
+    and current_value are both zero — because the wallet only shuffled token
+    shares (no trade resolved). Those rows have no skill signal and would
+    otherwise drag mean_edge toward zero.
     excess_pnl_usd is realized PnL summed: market-rate expected PnL is 0 by
     construction, so realized PnL IS the dollar alpha.
     """
@@ -70,6 +74,9 @@ def _compute_metrics(closed: list[ClosedPosition]) -> _WalletMetrics:
     wins = 0
     for p in closed:
         if p.avg_price <= 0 or p.avg_price >= 1:
+            continue
+        # Split/merge/convert artifact: no actual resolved trade, no signal.
+        if (p.realized_pnl or 0.0) == 0.0 and p.current_value == 0.0:
             continue
         outcome = 1.0 if p.won else 0.0
         edge = outcome - p.avg_price
@@ -190,7 +197,7 @@ class SmartMoneyDetector:
         Args:
             entry: Leaderboard row to score against the configured thresholds.
         """
-        closed = await self._data_client.get_closed_positions(entry.proxy_wallet)
+        closed = await self._data_client.get_settled_positions(entry.proxy_wallet)
         metrics = _compute_metrics(closed)
         if metrics.count < self._config.min_resolved_positions:
             return

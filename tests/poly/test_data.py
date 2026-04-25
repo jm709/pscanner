@@ -172,6 +172,80 @@ async def test_get_closed_positions_won_is_false_when_pnl_negative(
     assert closed[0].won is False
 
 
+async def test_get_settled_positions_hits_positions_endpoint_with_closed_filter(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    """``get_settled_positions`` must call ``/positions?closed=true`` not the legacy v1 path."""
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    # Realistic mix of wins, losses, and a zero-pnl artifact (split/merge/convert).
+    data_http.get.return_value = [
+        {
+            "proxyWallet": "0xabc",
+            "asset": "1",
+            "conditionId": "0xc1",
+            "outcome": "Yes",
+            "outcomeIndex": 0,
+            "size": 100.0,
+            "avgPrice": 0.4,
+            "currentValue": 0.0,
+            "realizedPnl": 60.0,
+            "redeemable": True,
+        },
+        {
+            "proxyWallet": "0xabc",
+            "asset": "2",
+            "conditionId": "0xc2",
+            "outcome": "No",
+            "outcomeIndex": 1,
+            "size": 50.0,
+            "avgPrice": 0.6,
+            "currentValue": 0.0,
+            "realizedPnl": -30.0,
+            "redeemable": False,
+        },
+        {
+            "proxyWallet": "0xabc",
+            "asset": "3",
+            "conditionId": "0xc3",
+            "outcome": "Yes",
+            "outcomeIndex": 0,
+            "size": 25.0,
+            "avgPrice": 0.5,
+            "currentValue": 0.0,
+            "realizedPnl": 0.0,
+            "redeemable": False,
+        },
+    ]
+
+    settled = await client.get_settled_positions("0xabc", limit=500)
+
+    data_http.get.assert_awaited_once_with(
+        "/positions",
+        params={"user": "0xabc", "closed": "true", "limit": 500},
+    )
+    assert len(settled) == 3
+    assert all(isinstance(c, ClosedPosition) for c in settled)
+    # Field roundtrip on the mixed payload.
+    assert settled[0].won is True
+    assert settled[1].won is False
+    assert settled[2].won is False
+    assert settled[0].avg_price == pytest.approx(0.4)
+    assert settled[1].realized_pnl == pytest.approx(-30.0)
+    assert settled[2].realized_pnl == pytest.approx(0.0)
+
+
+async def test_get_settled_positions_rejects_non_list_response(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    data_http.get.return_value = {"error": "oops"}
+
+    with pytest.raises(TypeError, match="expected list"):
+        await client.get_settled_positions("0xabc")
+
+
 async def test_get_activity_parses_fixture(
     fake_http_factory: list[_FakePolyHttpClient],
     sample_activity_json: list[dict[str, Any]],

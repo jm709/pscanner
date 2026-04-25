@@ -122,6 +122,32 @@ class DataClient:
         items = _ensure_list(payload, endpoint="/v1/closed-positions")
         return [ClosedPosition.model_validate(item) for item in items]
 
+    async def get_settled_positions(
+        self,
+        address: str,
+        *,
+        limit: int = 500,
+    ) -> list[ClosedPosition]:
+        """Return ALL of a wallet's settled positions (wins + losses).
+
+        Hits ``GET /positions?user={address}&closed=true&limit={limit}`` on the
+        data API. Returns ALL settled positions (wins + losses), unlike the
+        legacy ``/v1/closed-positions`` which only returns redeemed winners
+        (and is hard-capped at 50 rows server-side regardless of ``limit``).
+
+        Args:
+            address: 0x-prefixed proxy wallet address.
+            limit: Max number of positions to fetch.
+
+        Returns:
+            A list of ``ClosedPosition`` models. The response shape matches the
+            standard ``/positions`` payload, so the existing model parses it.
+        """
+        params: dict[str, Any] = {"user": address, "closed": "true", "limit": limit}
+        payload = await self._data_http.get("/positions", params=params)
+        items = _ensure_list(payload, endpoint="/positions?closed=true")
+        return [ClosedPosition.model_validate(item) for item in items]
+
     async def get_activity(
         self,
         address: str,
