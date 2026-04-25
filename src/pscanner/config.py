@@ -160,6 +160,35 @@ class EventsConfig(_Section):
     snapshot_max: int = 2000
 
 
+class TicksConfig(_Section):
+    """Cadence + scope for the WS-driven market-tick collector.
+
+    The collector subscribes to the union of (assets held by watched wallets)
+    and (markets above ``tick_volume_floor_usd``), capped at ``max_assets``,
+    and persists one row per asset per ``tick_interval_seconds``.
+    """
+
+    enabled: bool = True
+    tick_interval_seconds: float = 30.0
+    subscription_refresh_seconds: float = 300.0
+    tick_volume_floor_usd: float = 10000.0
+    max_assets: int = 1000
+
+
+class VelocityConfig(_Section):
+    """Thresholds + cadence for the price-velocity detector.
+
+    Polls the tick collector for recent mid-price history and alerts when
+    ``(end - start) / start`` over ``velocity_window_seconds`` exceeds
+    ``velocity_threshold_pct`` in either direction.
+    """
+
+    enabled: bool = True
+    velocity_threshold_pct: float = 0.05
+    velocity_window_seconds: int = 60
+    poll_interval_seconds: float = 5.0
+
+
 class Config(BaseModel):
     """Root pscanner config aggregating every section."""
 
@@ -175,6 +204,8 @@ class Config(BaseModel):
     activity: ActivityConfig = Field(default_factory=ActivityConfig)
     markets: MarketsConfig = Field(default_factory=MarketsConfig)
     events: EventsConfig = Field(default_factory=EventsConfig)
+    ticks: TicksConfig = Field(default_factory=TicksConfig)
+    velocity: VelocityConfig = Field(default_factory=VelocityConfig)
 
     @classmethod
     def load(cls, path: Path | None = None) -> Config:

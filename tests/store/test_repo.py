@@ -19,6 +19,8 @@ from pscanner.store.repo import (
     MarketCacheRepo,
     MarketSnapshot,
     MarketSnapshotsRepo,
+    MarketTick,
+    MarketTicksRepo,
     PositionSnapshotsRepo,
     TrackedWalletCategoriesRepo,
     TrackedWalletsRepo,
@@ -1337,3 +1339,177 @@ def test_tracked_wallet_categories_list_for_unknown_wallet_returns_empty(
 ) -> None:
     repo = TrackedWalletCategoriesRepo(tmp_db)
     assert repo.list_for_wallet("0xnone") == []
+
+
+def _make_market_tick(
+    *,
+    asset_id: str = "asset-1",
+    condition_id: str = "cond-1",
+    snapshot_at: int = 1_700_000_000,
+    mid_price: float | None = 0.5,
+    best_bid: float | None = 0.49,
+    best_ask: float | None = 0.51,
+    spread: float | None = 0.02,
+    bid_depth_top5: float | None = 1500.0,
+    ask_depth_top5: float | None = 1700.0,
+    last_trade_price: float | None = 0.495,
+) -> MarketTick:
+    return MarketTick(
+        asset_id=asset_id,
+        condition_id=condition_id,
+        snapshot_at=snapshot_at,
+        mid_price=mid_price,
+        best_bid=best_bid,
+        best_ask=best_ask,
+        spread=spread,
+        bid_depth_top5=bid_depth_top5,
+        ask_depth_top5=ask_depth_top5,
+        last_trade_price=last_trade_price,
+    )
+
+
+def test_market_ticks_insert_round_trips_all_fields(tmp_db: sqlite3.Connection) -> None:
+    repo = MarketTicksRepo(tmp_db)
+    tick = _make_market_tick()
+    assert repo.insert(tick) is True
+
+    rows = repo.recent_for_asset("asset-1")
+    assert len(rows) == 1
+    assert rows[0] == tick
+
+
+def test_market_ticks_insert_round_trips_none_optionals(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = MarketTicksRepo(tmp_db)
+    tick = _make_market_tick(
+        mid_price=None,
+        best_bid=None,
+        best_ask=None,
+        spread=None,
+        bid_depth_top5=None,
+        ask_depth_top5=None,
+        last_trade_price=None,
+    )
+    assert repo.insert(tick) is True
+
+    got = repo.recent_for_asset("asset-1")[0]
+    assert got.mid_price is None
+    assert got.best_bid is None
+    assert got.best_ask is None
+    assert got.spread is None
+    assert got.bid_depth_top5 is None
+    assert got.ask_depth_top5 is None
+    assert got.last_trade_price is None
+
+
+def test_market_ticks_insert_pk_collision_returns_false(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = MarketTicksRepo(tmp_db)
+    tick = _make_market_tick()
+    assert repo.insert(tick) is True
+    assert repo.insert(tick) is False
+
+
+def test_market_ticks_recent_for_asset_orders_desc_and_limits(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = MarketTicksRepo(tmp_db)
+    repo.insert(_make_market_tick(snapshot_at=100))
+    repo.insert(_make_market_tick(snapshot_at=300))
+    repo.insert(_make_market_tick(snapshot_at=200))
+
+    rows = repo.recent_for_asset("asset-1")
+    assert [r.snapshot_at for r in rows] == [300, 200, 100]
+
+    limited = repo.recent_for_asset("asset-1", limit=2)
+    assert [r.snapshot_at for r in limited] == [300, 200]
+
+
+def test_market_ticks_recent_for_asset_isolates_assets(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = MarketTicksRepo(tmp_db)
+    repo.insert(_make_market_tick(asset_id="asset-1", snapshot_at=100))
+    repo.insert(_make_market_tick(asset_id="asset-2", snapshot_at=200))
+
+    assert [r.asset_id for r in repo.recent_for_asset("asset-1")] == ["asset-1"]
+    assert [r.asset_id for r in repo.recent_for_asset("asset-2")] == ["asset-2"]
+    assert repo.recent_for_asset("asset-missing") == []
+
+
+def test_market_ticks_recent_mids_in_window_filters_time_and_orders_asc(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = MarketTicksRepo(tmp_db)
+    now = 1_700_000_000
+    # Outside window (older than now - 60).
+    repo.insert(_make_market_tick(snapshot_at=now - 120, mid_price=0.30))
+    # Inside window — three points, inserted out of order.
+    repo.insert(_make_market_tick(snapshot_at=now - 30, mid_price=0.42))
+    repo.insert(_make_market_tick(snapshot_at=now - 10, mid_price=0.55))
+    repo.insert(_make_market_tick(snapshot_at=now - 50, mid_price=0.40))
+    # Future point past now (must be excluded by upper bound).
+    repo.insert(_make_market_tick(snapshot_at=now + 5, mid_price=0.60))
+
+    pairs = repo.recent_mids_in_window(
+        "asset-1",
+        window_seconds=60,
+        now_ts=now,
+    )
+    assert pairs == [(now - 50, 0.40), (now - 30, 0.42), (now - 10, 0.55)]
+
+
+def test_market_ticks_recent_mids_in_window_drops_null_mid_rows(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = MarketTicksRepo(tmp_db)
+    now = 1_700_000_000
+    repo.insert(_make_market_tick(snapshot_at=now - 30, mid_price=None))
+    repo.insert(_make_market_tick(snapshot_at=now - 20, mid_price=0.42))
+    repo.insert(_make_market_tick(snapshot_at=now - 10, mid_price=None))
+
+    pairs = repo.recent_mids_in_window(
+        "asset-1",
+        window_seconds=60,
+        now_ts=now,
+    )
+    assert pairs == [(now - 20, 0.42)]
+
+
+def test_market_ticks_recent_mids_in_window_isolates_assets(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = MarketTicksRepo(tmp_db)
+    now = 1_700_000_000
+    repo.insert(_make_market_tick(asset_id="asset-1", snapshot_at=now - 10, mid_price=0.5))
+    repo.insert(_make_market_tick(asset_id="asset-2", snapshot_at=now - 10, mid_price=0.7))
+
+    one = repo.recent_mids_in_window("asset-1", window_seconds=60, now_ts=now)
+    two = repo.recent_mids_in_window("asset-2", window_seconds=60, now_ts=now)
+    assert one == [(now - 10, 0.5)]
+    assert two == [(now - 10, 0.7)]
+
+
+def test_market_ticks_recent_mids_in_window_empty_when_no_match(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = MarketTicksRepo(tmp_db)
+    now = 1_700_000_000
+    repo.insert(_make_market_tick(snapshot_at=now - 1000, mid_price=0.5))
+
+    assert repo.recent_mids_in_window("asset-1", window_seconds=60, now_ts=now) == []
+    assert repo.recent_mids_in_window("asset-missing", window_seconds=60, now_ts=now) == []
+
+
+def test_market_ticks_distinct_count_and_count_by_asset(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = MarketTicksRepo(tmp_db)
+    repo.insert(_make_market_tick(asset_id="asset-1", snapshot_at=100))
+    repo.insert(_make_market_tick(asset_id="asset-2", snapshot_at=100))
+    repo.insert(_make_market_tick(asset_id="asset-1", snapshot_at=200))
+
+    assert repo.distinct_snapshot_count() == 2
+    assert repo.count_by_asset() == {"asset-1": 2, "asset-2": 1}

@@ -192,6 +192,24 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_market_cache_condition ON market_cache(condition_id)",
     "CREATE INDEX IF NOT EXISTS idx_market_cache_event_slug ON market_cache(event_slug)",
+    """
+    CREATE TABLE IF NOT EXISTS market_ticks (
+      asset_id TEXT NOT NULL,
+      condition_id TEXT NOT NULL,
+      snapshot_at INTEGER NOT NULL,
+      mid_price REAL,
+      best_bid REAL,
+      best_ask REAL,
+      spread REAL,
+      bid_depth_top5 REAL,
+      ask_depth_top5 REAL,
+      last_trade_price REAL,
+      PRIMARY KEY (asset_id, snapshot_at)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_market_ticks_asset_ts "
+    "ON market_ticks(asset_id, snapshot_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_market_ticks_ts ON market_ticks(snapshot_at DESC)",
 )
 
 _MIGRATIONS: tuple[str, ...] = (

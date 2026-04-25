@@ -1651,3 +1651,165 @@ class EventTagCacheRepo:
             msg = f"event_tag_cache.tags_json must decode to list, got {type(decoded).__name__}"
             raise ValueError(msg)
         return [str(item) for item in decoded]
+
+
+@dataclass(frozen=True, slots=True)
+class MarketTick:
+    """One per-asset orderbook snapshot row in the ``market_ticks`` table.
+
+    All numeric fields beyond the composite primary key are nullable: an asset
+    with one-sided liquidity (no bids, only asks) will have a ``best_bid`` of
+    ``None``, propagating through ``mid_price``/``spread``. Detectors that read
+    these rows are expected to filter NULLs explicitly.
+    """
+
+    asset_id: str
+    condition_id: str
+    snapshot_at: int
+    mid_price: float | None
+    best_bid: float | None
+    best_ask: float | None
+    spread: float | None
+    bid_depth_top5: float | None
+    ask_depth_top5: float | None
+    last_trade_price: float | None
+
+
+class MarketTicksRepo:
+    """Append-only per-asset tick history.
+
+    Rows dedupe on the composite primary key ``(asset_id, snapshot_at)`` via
+    ``INSERT OR IGNORE`` — two snapshots of the same asset in the same second
+    collapse to one row, matching the idempotency contract used by the other
+    snapshot tables.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        """Bind the repo to an already-initialised connection."""
+        self._conn = conn
+
+    def insert(self, tick: MarketTick) -> bool:
+        """Insert ``tick`` if its composite PK is unseen.
+
+        Args:
+            tick: Fully-populated tick row to persist.
+
+        Returns:
+            ``True`` if the row was newly inserted, ``False`` on PK collision.
+        """
+        cur = self._conn.execute(
+            """
+            INSERT OR IGNORE INTO market_ticks (
+              asset_id, condition_id, snapshot_at, mid_price, best_bid, best_ask,
+              spread, bid_depth_top5, ask_depth_top5, last_trade_price
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                tick.asset_id,
+                tick.condition_id,
+                tick.snapshot_at,
+                tick.mid_price,
+                tick.best_bid,
+                tick.best_ask,
+                tick.spread,
+                tick.bid_depth_top5,
+                tick.ask_depth_top5,
+                tick.last_trade_price,
+            ),
+        )
+        self._conn.commit()
+        return cur.rowcount == 1
+
+    def recent_for_asset(self, asset_id: str, *, limit: int = 200) -> list[MarketTick]:
+        """Return the asset's most recent ticks, newest first.
+
+        Args:
+            asset_id: CLOB token id.
+            limit: Max rows to return.
+
+        Returns:
+            Tick rows ordered by ``snapshot_at DESC``.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT asset_id, condition_id, snapshot_at, mid_price, best_bid, best_ask,
+                   spread, bid_depth_top5, ask_depth_top5, last_trade_price
+              FROM market_ticks
+             WHERE asset_id = ?
+             ORDER BY snapshot_at DESC
+             LIMIT ?
+            """,
+            (asset_id, limit),
+        ).fetchall()
+        return [_row_to_market_tick(row) for row in rows]
+
+    def recent_mids_in_window(
+        self,
+        asset_id: str,
+        *,
+        window_seconds: int,
+        now_ts: int | None = None,
+    ) -> list[tuple[int, float]]:
+        """Return ``(snapshot_at, mid_price)`` pairs within the trailing window.
+
+        Filters out rows whose ``mid_price`` is NULL so callers can compute a
+        first/last delta without re-checking. Ordered ascending by
+        ``snapshot_at`` (oldest → newest).
+
+        Args:
+            asset_id: CLOB token id.
+            window_seconds: Inclusive trailing window length.
+            now_ts: Override for the upper bound (Unix seconds). ``None`` uses
+                the current wall-clock time. Tests pass an explicit value to
+                avoid sleep-induced flakes.
+
+        Returns:
+            Pairs ordered by ``snapshot_at`` ascending.
+        """
+        upper = _now_seconds() if now_ts is None else now_ts
+        lower = upper - window_seconds
+        rows = self._conn.execute(
+            """
+            SELECT snapshot_at, mid_price
+              FROM market_ticks
+             WHERE asset_id = ?
+               AND mid_price IS NOT NULL
+               AND snapshot_at > ?
+               AND snapshot_at <= ?
+             ORDER BY snapshot_at ASC
+            """,
+            (asset_id, lower, upper),
+        ).fetchall()
+        return [(int(row["snapshot_at"]), float(row["mid_price"])) for row in rows]
+
+    def distinct_snapshot_count(self) -> int:
+        """Return ``COUNT(DISTINCT snapshot_at)`` — total tick cycles recorded."""
+        row = self._conn.execute(
+            "SELECT COUNT(DISTINCT snapshot_at) AS c FROM market_ticks",
+        ).fetchone()
+        if row is None:
+            return 0
+        return int(row["c"])
+
+    def count_by_asset(self) -> dict[str, int]:
+        """Return ``{asset_id: tick_count}`` across the full table."""
+        rows = self._conn.execute(
+            "SELECT asset_id, COUNT(*) AS c FROM market_ticks GROUP BY asset_id",
+        ).fetchall()
+        return {row["asset_id"]: int(row["c"]) for row in rows}
+
+
+def _row_to_market_tick(row: sqlite3.Row) -> MarketTick:
+    """Convert a ``market_ticks`` row to a ``MarketTick`` dataclass."""
+    return MarketTick(
+        asset_id=row["asset_id"],
+        condition_id=row["condition_id"],
+        snapshot_at=int(row["snapshot_at"]),
+        mid_price=_optional_float(row["mid_price"]),
+        best_bid=_optional_float(row["best_bid"]),
+        best_ask=_optional_float(row["best_ask"]),
+        spread=_optional_float(row["spread"]),
+        bid_depth_top5=_optional_float(row["bid_depth_top5"]),
+        ask_depth_top5=_optional_float(row["ask_depth_top5"]),
+        last_trade_price=_optional_float(row["last_trade_price"]),
+    )

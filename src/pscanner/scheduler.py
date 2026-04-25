@@ -36,13 +36,16 @@ from pscanner.collectors.base import Collector
 from pscanner.collectors.events import EventCollector
 from pscanner.collectors.markets import MarketCollector
 from pscanner.collectors.positions import PositionCollector
+from pscanner.collectors.ticks import MarketTickCollector
 from pscanner.collectors.trades import TradeCollector
 from pscanner.collectors.watchlist import WatchlistRegistry, WatchlistSyncer
 from pscanner.config import Config
 from pscanner.detectors.convergence import ConvergenceDetector
 from pscanner.detectors.mispricing import MispricingDetector
 from pscanner.detectors.smart_money import SmartMoneyDetector
+from pscanner.detectors.velocity import PriceVelocityDetector
 from pscanner.detectors.whales import WhalesDetector
+from pscanner.poly.clob_ws import MarketWebSocket
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.http import PolyHttpClient
@@ -54,6 +57,7 @@ from pscanner.store.repo import (
     EventTagCacheRepo,
     MarketCacheRepo,
     MarketSnapshotsRepo,
+    MarketTicksRepo,
     PositionSnapshotsRepo,
     TrackedWalletCategoriesRepo,
     TrackedWalletsRepo,
@@ -89,6 +93,7 @@ class SchedulerClients:
     data_http: PolyHttpClient
     gamma_client: GammaClient
     data_client: DataClient
+    ticks_ws: MarketWebSocket
 
 
 class Scanner:
@@ -126,13 +131,14 @@ class Scanner:
         self._wallet_trades_repo = WalletTradesRepo(self._db)
         self._categories_repo = TrackedWalletCategoriesRepo(self._db)
         self._event_tag_cache_repo = EventTagCacheRepo(self._db)
+        self._ticks_repo = MarketTicksRepo(self._db)
         self._owns_clients = clients is None
         self._clients = clients or self._build_default_clients()
         self._renderer = TerminalRenderer()
         self._sink = AlertSink(self._alerts_repo, renderer=self._renderer)
         self._watchlist_registry = WatchlistRegistry(self._watchlist_repo)
-        self._detectors = self._build_detectors()
         self._collectors = self._build_collectors()
+        self._detectors = self._build_detectors()
         self._wire_trade_callbacks()
         self._collectors_stop = asyncio.Event()
         self._closed = False
@@ -172,6 +178,7 @@ class Scanner:
             data_http=data_http,
             gamma_client=GammaClient(http=gamma_http),
             data_client=DataClient(http=data_http),
+            ticks_ws=MarketWebSocket(),
         )
 
     def _build_collectors(self) -> dict[str, Collector]:
@@ -226,6 +233,15 @@ class Scanner:
                 snapshot_interval_seconds=self._config.events.snapshot_interval_seconds,
                 snapshot_max=self._config.events.snapshot_max,
             )
+        if self._config.ticks.enabled:
+            collectors["tick_collector"] = MarketTickCollector(
+                config=self._config.ticks,
+                ws=self._clients.ticks_ws,
+                gamma_client=self._clients.gamma_client,
+                data_client=self._clients.data_client,
+                registry=self._watchlist_registry,
+                ticks_repo=self._ticks_repo,
+            )
         return collectors
 
     def _build_detectors(self) -> dict[str, Any]:
@@ -264,7 +280,25 @@ class Scanner:
                 event_tag_cache=self._event_tag_cache_repo,
                 smart_money_config=self._config.smart_money,
             )
+        self._maybe_attach_velocity_detector(detectors)
         return detectors
+
+    def _maybe_attach_velocity_detector(self, detectors: dict[str, Any]) -> None:
+        """Attach the velocity detector if both ticks and velocity are enabled.
+
+        Velocity depends on the ``tick_collector`` being built (its frozen API
+        is the data source); skip silently when ticks are disabled.
+        """
+        if not self._config.velocity.enabled:
+            return
+        tick_collector = self._collectors.get("tick_collector")
+        if not isinstance(tick_collector, MarketTickCollector):
+            return
+        detectors["velocity"] = PriceVelocityDetector(
+            config=self._config.velocity,
+            ticks_collector=tick_collector,
+            market_cache=self._market_cache_repo,
+        )
 
     @property
     def sink(self) -> AlertSink:
@@ -392,6 +426,7 @@ class Scanner:
             "activity_events": collector_counts["activity_events"],
             "market_snapshots": collector_counts["market_snapshots"],
             "event_snapshots": collector_counts["event_snapshots"],
+            "tick_snapshots": collector_counts["tick_snapshots"],
         }
 
     async def _run_once_collectors(self) -> dict[str, int]:
@@ -405,9 +440,9 @@ class Scanner:
 
         Returns:
             Mapping with ``position_snapshots``, ``activity_events``,
-            ``market_snapshots``, ``event_snapshots`` keys. Each is 0 when
-            the corresponding collector is disabled or raises (Wave 1 stubs
-            always raise).
+            ``market_snapshots``, ``event_snapshots``, ``tick_snapshots`` keys.
+            Each is 0 when the corresponding collector is disabled or raises
+            (Wave 1 stubs always raise).
         """
         await self._run_once_watchlist_sync()
         await self._run_once_trade_collector()
@@ -416,6 +451,7 @@ class Scanner:
             "activity_events": await self._run_once_activity_collector(),
             "market_snapshots": await self._run_once_market_collector(),
             "event_snapshots": await self._run_once_event_collector(),
+            "tick_snapshots": await self._run_once_tick_collector(),
         }
 
     async def _run_once_watchlist_sync(self) -> None:
@@ -480,6 +516,17 @@ class Scanner:
             return await collector.snapshot_all_events()
         except Exception:
             _LOG.exception("scanner.run_once.events_failed")
+            return 0
+
+    async def _run_once_tick_collector(self) -> int:
+        """Single-shot snapshot of the WS-driven tick collector's in-memory state."""
+        collector = self._collectors.get("tick_collector")
+        if not isinstance(collector, MarketTickCollector):
+            return 0
+        try:
+            return await collector.snapshot_once()
+        except Exception:
+            _LOG.exception("scanner.run_once.ticks_failed")
             return 0
 
     async def _run_once_mispricing(self) -> int:
@@ -603,3 +650,5 @@ class Scanner:
             await self._clients.gamma_http.aclose()
         with contextlib.suppress(Exception):
             await self._clients.data_http.aclose()
+        with contextlib.suppress(Exception):
+            await self._clients.ticks_ws.close()

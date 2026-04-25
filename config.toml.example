@@ -68,3 +68,16 @@ snapshot_max = 5000
 enabled = true
 snapshot_interval_seconds = 900
 snapshot_max = 2000
+
+[ticks]
+enabled = true
+tick_interval_seconds = 30
+subscription_refresh_seconds = 300
+tick_volume_floor_usd = 10000
+max_assets = 1000
+
+[velocity]
+enabled = true
+velocity_threshold_pct = 0.05
+velocity_window_seconds = 60
+poll_interval_seconds = 5

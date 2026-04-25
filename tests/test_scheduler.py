@@ -20,6 +20,7 @@ from pscanner.collectors.activity import ActivityCollector
 from pscanner.collectors.events import EventCollector
 from pscanner.collectors.markets import MarketCollector
 from pscanner.collectors.positions import PositionCollector
+from pscanner.collectors.ticks import MarketTickCollector
 from pscanner.collectors.trades import TradeCollector
 from pscanner.collectors.watchlist import WatchlistSyncer
 from pscanner.config import (
@@ -33,9 +34,12 @@ from pscanner.config import (
     RatelimitConfig,
     ScannerConfig,
     SmartMoneyConfig,
+    TicksConfig,
+    VelocityConfig,
     WhalesConfig,
 )
 from pscanner.detectors.convergence import ConvergenceDetector
+from pscanner.detectors.velocity import PriceVelocityDetector
 from pscanner.poly.models import Event, LeaderboardEntry, Market, Position
 from pscanner.scheduler import Scanner, SchedulerClients
 
@@ -89,6 +93,8 @@ def _make_config(
     enable_activity: bool = True,
     enable_markets: bool = True,
     enable_events: bool = True,
+    enable_ticks: bool = True,
+    enable_velocity: bool = True,
 ) -> Config:
     return Config(
         scanner=ScannerConfig(),
@@ -101,6 +107,8 @@ def _make_config(
         activity=ActivityConfig(enabled=enable_activity),
         markets=MarketsConfig(enabled=enable_markets),
         events=EventsConfig(enabled=enable_events),
+        ticks=TicksConfig(enabled=enable_ticks),
+        velocity=VelocityConfig(enabled=enable_velocity),
     )
 
 
@@ -146,11 +154,15 @@ def _make_clients(
     data_client.get_activity = AsyncMock(return_value=[])
     data_client.aclose = AsyncMock()
 
+    ticks_ws = MagicMock()
+    ticks_ws.close = AsyncMock()
+
     return SchedulerClients(
         gamma_http=gamma_http,
         data_http=data_http,
         gamma_client=gamma_client,
         data_client=data_client,
+        ticks_ws=ticks_ws,
     )
 
 
@@ -191,6 +203,7 @@ async def test_run_once_with_no_data_returns_zero_counts(db_path: Path) -> None:
         "activity_events": 0,
         "market_snapshots": 0,
         "event_snapshots": 0,
+        "tick_snapshots": 0,
     }
 
 
@@ -620,3 +633,107 @@ async def test_run_once_dc3_stub_metrics_remain_zero(db_path: Path) -> None:
         await scanner.aclose()
     assert result["market_snapshots"] == 0
     assert result["event_snapshots"] == 0
+
+
+@pytest.mark.asyncio
+async def test_scanner_constructs_dc4_collector_and_detector_when_enabled(
+    db_path: Path,
+) -> None:
+    """DC-4 Wave 1: tick collector + velocity detector live in their dicts."""
+    config = _make_config(
+        enable_smart=False,
+        enable_misprice=False,
+        enable_whales=False,
+        enable_convergence=False,
+        enable_positions=False,
+        enable_activity=False,
+        enable_markets=False,
+        enable_events=False,
+        enable_ticks=True,
+        enable_velocity=True,
+    )
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    try:
+        assert "tick_collector" in scanner._collectors
+        assert isinstance(scanner._collectors["tick_collector"], MarketTickCollector)
+        assert "velocity" in scanner._detectors
+        assert isinstance(scanner._detectors["velocity"], PriceVelocityDetector)
+        assert scanner._ticks_repo is not None
+    finally:
+        await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_scanner_skips_dc4_collector_and_detector_when_disabled(
+    db_path: Path,
+) -> None:
+    """When ``ticks``/``velocity`` are disabled, neither is wired."""
+    config = _make_config(
+        enable_smart=False,
+        enable_misprice=False,
+        enable_whales=False,
+        enable_convergence=False,
+        enable_positions=False,
+        enable_activity=False,
+        enable_markets=False,
+        enable_events=False,
+        enable_ticks=False,
+        enable_velocity=False,
+    )
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    try:
+        assert "tick_collector" not in scanner._collectors
+        assert "velocity" not in scanner._detectors
+    finally:
+        await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_scanner_skips_velocity_when_ticks_disabled(db_path: Path) -> None:
+    """Velocity depends on tick_collector; with ticks off it must not be built."""
+    config = _make_config(
+        enable_smart=False,
+        enable_misprice=False,
+        enable_whales=False,
+        enable_convergence=False,
+        enable_positions=False,
+        enable_activity=False,
+        enable_markets=False,
+        enable_events=False,
+        enable_ticks=False,
+        enable_velocity=True,
+    )
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    try:
+        assert "tick_collector" not in scanner._collectors
+        assert "velocity" not in scanner._detectors
+    finally:
+        await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_run_once_includes_tick_snapshots_key(db_path: Path) -> None:
+    """``run_once`` returns the new ``tick_snapshots`` count (0 while stub raises)."""
+    config = _make_config(
+        enable_smart=False,
+        enable_misprice=False,
+        enable_whales=False,
+        enable_convergence=False,
+        enable_positions=False,
+        enable_activity=False,
+        enable_markets=False,
+        enable_events=False,
+        enable_ticks=True,
+        enable_velocity=False,
+    )
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    try:
+        result = await scanner.run_once()
+    finally:
+        await scanner.aclose()
+    assert "tick_snapshots" in result
+    assert result["tick_snapshots"] == 0
