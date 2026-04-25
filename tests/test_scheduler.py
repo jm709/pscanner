@@ -17,12 +17,16 @@ import pytest
 
 from pscanner.alerts.sink import AlertSink
 from pscanner.collectors.activity import ActivityCollector
+from pscanner.collectors.events import EventCollector
+from pscanner.collectors.markets import MarketCollector
 from pscanner.collectors.positions import PositionCollector
 from pscanner.collectors.trades import TradeCollector
 from pscanner.collectors.watchlist import WatchlistSyncer
 from pscanner.config import (
     ActivityConfig,
     Config,
+    EventsConfig,
+    MarketsConfig,
     MispricingConfig,
     PositionsConfig,
     RatelimitConfig,
@@ -80,6 +84,8 @@ def _make_config(
     enable_whales: bool = True,
     enable_positions: bool = True,
     enable_activity: bool = True,
+    enable_markets: bool = True,
+    enable_events: bool = True,
 ) -> Config:
     return Config(
         scanner=ScannerConfig(),
@@ -89,6 +95,8 @@ def _make_config(
         ratelimit=RatelimitConfig(),
         positions=PositionsConfig(enabled=enable_positions),
         activity=ActivityConfig(enabled=enable_activity),
+        markets=MarketsConfig(enabled=enable_markets),
+        events=EventsConfig(enabled=enable_events),
     )
 
 
@@ -177,6 +185,8 @@ async def test_run_once_with_no_data_returns_zero_counts(db_path: Path) -> None:
         "trades_recorded": 0,
         "position_snapshots": 0,
         "activity_events": 0,
+        "market_snapshots": 0,
+        "event_snapshots": 0,
     }
 
 
@@ -499,3 +509,71 @@ async def test_run_once_dc2_stub_metrics_remain_zero(db_path: Path) -> None:
         await scanner.aclose()
     assert result["position_snapshots"] == 0
     assert result["activity_events"] == 0
+
+
+@pytest.mark.asyncio
+async def test_scanner_constructs_dc3_collectors_when_enabled(db_path: Path) -> None:
+    """DC-3 Wave 1: market + event collectors live in ``_collectors``."""
+    config = _make_config(
+        enable_smart=False,
+        enable_misprice=False,
+        enable_whales=False,
+        enable_positions=False,
+        enable_activity=False,
+        enable_markets=True,
+        enable_events=True,
+    )
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    try:
+        assert "market_collector" in scanner._collectors
+        assert "event_collector" in scanner._collectors
+        assert isinstance(scanner._collectors["market_collector"], MarketCollector)
+        assert isinstance(scanner._collectors["event_collector"], EventCollector)
+        assert scanner._market_snapshots_repo is not None
+        assert scanner._event_snapshots_repo is not None
+    finally:
+        await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_scanner_skips_dc3_collectors_when_disabled(db_path: Path) -> None:
+    """When ``markets``/``events`` are disabled, neither collector is wired."""
+    config = _make_config(
+        enable_smart=False,
+        enable_misprice=False,
+        enable_whales=False,
+        enable_positions=False,
+        enable_activity=False,
+        enable_markets=False,
+        enable_events=False,
+    )
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    try:
+        assert "market_collector" not in scanner._collectors
+        assert "event_collector" not in scanner._collectors
+    finally:
+        await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_run_once_dc3_stub_metrics_remain_zero(db_path: Path) -> None:
+    """DC-3 Wave 1 stubs raise; ``run_once`` swallows so metrics stay 0."""
+    config = _make_config(
+        enable_smart=False,
+        enable_misprice=False,
+        enable_whales=False,
+        enable_positions=False,
+        enable_activity=False,
+        enable_markets=True,
+        enable_events=True,
+    )
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    try:
+        result = await scanner.run_once()
+    finally:
+        await scanner.aclose()
+    assert result["market_snapshots"] == 0
+    assert result["event_snapshots"] == 0

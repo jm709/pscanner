@@ -991,3 +991,238 @@ def _row_to_activity_event(row: sqlite3.Row) -> WalletActivityEvent:
         recorded_at=int(row["recorded_at"]),
         source=row["source"],
     )
+
+
+@dataclass(frozen=True, slots=True)
+class MarketSnapshot:
+    """One row per (market, snapshot_at) — full market state at point in time.
+
+    ``outcome_prices_json`` is a JSON-encoded ``list[float]`` (the same shape
+    used by ``market_cache``) preserved verbatim so callers can re-decode on
+    read without forcing this layer to know the ordering convention.
+    """
+
+    market_id: str
+    event_id: str | None
+    outcome_prices_json: str
+    liquidity_usd: float | None
+    volume_usd: float | None
+    active: bool
+    snapshot_at: int
+
+
+class MarketSnapshotsRepo:
+    """Append-only history of market state snapshots.
+
+    Inserts dedupe on the composite primary key ``(market_id, snapshot_at)``
+    via ``INSERT OR IGNORE`` — two snapshots of the same market in the same
+    second collapse to one row, which is the intended idempotency contract.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        """Bind the repo to an already-initialised connection."""
+        self._conn = conn
+
+    def insert(self, snapshot: MarketSnapshot) -> bool:
+        """Insert ``snapshot`` if its composite PK is unseen.
+
+        Args:
+            snapshot: Fully-populated market snapshot to persist.
+
+        Returns:
+            ``True`` if the row was newly inserted, ``False`` on PK collision.
+        """
+        cur = self._conn.execute(
+            """
+            INSERT OR IGNORE INTO market_snapshots (
+              market_id, event_id, outcome_prices_json, liquidity_usd,
+              volume_usd, active, snapshot_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                snapshot.market_id,
+                snapshot.event_id,
+                snapshot.outcome_prices_json,
+                snapshot.liquidity_usd,
+                snapshot.volume_usd,
+                1 if snapshot.active else 0,
+                snapshot.snapshot_at,
+            ),
+        )
+        self._conn.commit()
+        return cur.rowcount == 1
+
+    def recent_for_market(
+        self,
+        market_id: str,
+        *,
+        limit: int = 200,
+    ) -> list[MarketSnapshot]:
+        """Return the market's most-recent snapshots, newest first.
+
+        Args:
+            market_id: Polymarket market identifier.
+            limit: Max rows to return.
+
+        Returns:
+            Snapshots ordered by ``snapshot_at DESC``.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT market_id, event_id, outcome_prices_json, liquidity_usd,
+                   volume_usd, active, snapshot_at
+              FROM market_snapshots
+             WHERE market_id = ?
+             ORDER BY snapshot_at DESC
+             LIMIT ?
+            """,
+            (market_id, limit),
+        ).fetchall()
+        return [_row_to_market_snapshot(row) for row in rows]
+
+    def distinct_snapshot_count(self) -> int:
+        """Return ``COUNT(DISTINCT snapshot_at)`` — total sweeps recorded."""
+        row = self._conn.execute(
+            "SELECT COUNT(DISTINCT snapshot_at) AS c FROM market_snapshots",
+        ).fetchone()
+        if row is None:
+            return 0
+        return int(row["c"])
+
+    def count_by_market(self) -> dict[str, int]:
+        """Return ``{market_id: snapshot_count}`` across the full table."""
+        rows = self._conn.execute(
+            "SELECT market_id, COUNT(*) AS c FROM market_snapshots GROUP BY market_id",
+        ).fetchall()
+        return {row["market_id"]: int(row["c"]) for row in rows}
+
+
+def _row_to_market_snapshot(row: sqlite3.Row) -> MarketSnapshot:
+    """Convert a ``market_snapshots`` row to a ``MarketSnapshot`` dataclass."""
+    return MarketSnapshot(
+        market_id=row["market_id"],
+        event_id=row["event_id"],
+        outcome_prices_json=row["outcome_prices_json"],
+        liquidity_usd=_optional_float(row["liquidity_usd"]),
+        volume_usd=_optional_float(row["volume_usd"]),
+        active=bool(row["active"]),
+        snapshot_at=int(row["snapshot_at"]),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class EventSnapshot:
+    """One row per (event, snapshot_at) — event-level metadata at a point in time."""
+
+    event_id: str
+    title: str
+    slug: str
+    liquidity_usd: float | None
+    volume_usd: float | None
+    active: bool
+    closed: bool
+    market_count: int
+    snapshot_at: int
+
+
+class EventSnapshotsRepo:
+    """Append-only history of event-level state snapshots.
+
+    Inserts dedupe on the composite primary key ``(event_id, snapshot_at)``
+    via ``INSERT OR IGNORE`` — two snapshots of the same event in the same
+    second collapse to one row.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        """Bind the repo to an already-initialised connection."""
+        self._conn = conn
+
+    def insert(self, snapshot: EventSnapshot) -> bool:
+        """Insert ``snapshot`` if its composite PK is unseen.
+
+        Args:
+            snapshot: Fully-populated event snapshot to persist.
+
+        Returns:
+            ``True`` if the row was newly inserted, ``False`` on PK collision.
+        """
+        cur = self._conn.execute(
+            """
+            INSERT OR IGNORE INTO event_snapshots (
+              event_id, title, slug, liquidity_usd, volume_usd,
+              active, closed, market_count, snapshot_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                snapshot.event_id,
+                snapshot.title,
+                snapshot.slug,
+                snapshot.liquidity_usd,
+                snapshot.volume_usd,
+                1 if snapshot.active else 0,
+                1 if snapshot.closed else 0,
+                snapshot.market_count,
+                snapshot.snapshot_at,
+            ),
+        )
+        self._conn.commit()
+        return cur.rowcount == 1
+
+    def recent_for_event(
+        self,
+        event_id: str,
+        *,
+        limit: int = 200,
+    ) -> list[EventSnapshot]:
+        """Return the event's most-recent snapshots, newest first.
+
+        Args:
+            event_id: Polymarket event identifier.
+            limit: Max rows to return.
+
+        Returns:
+            Snapshots ordered by ``snapshot_at DESC``.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT event_id, title, slug, liquidity_usd, volume_usd,
+                   active, closed, market_count, snapshot_at
+              FROM event_snapshots
+             WHERE event_id = ?
+             ORDER BY snapshot_at DESC
+             LIMIT ?
+            """,
+            (event_id, limit),
+        ).fetchall()
+        return [_row_to_event_snapshot(row) for row in rows]
+
+    def distinct_snapshot_count(self) -> int:
+        """Return ``COUNT(DISTINCT snapshot_at)`` — total sweeps recorded."""
+        row = self._conn.execute(
+            "SELECT COUNT(DISTINCT snapshot_at) AS c FROM event_snapshots",
+        ).fetchone()
+        if row is None:
+            return 0
+        return int(row["c"])
+
+    def count_by_event(self) -> dict[str, int]:
+        """Return ``{event_id: snapshot_count}`` across the full table."""
+        rows = self._conn.execute(
+            "SELECT event_id, COUNT(*) AS c FROM event_snapshots GROUP BY event_id",
+        ).fetchall()
+        return {row["event_id"]: int(row["c"]) for row in rows}
+
+
+def _row_to_event_snapshot(row: sqlite3.Row) -> EventSnapshot:
+    """Convert an ``event_snapshots`` row to an ``EventSnapshot`` dataclass."""
+    return EventSnapshot(
+        event_id=row["event_id"],
+        title=row["title"],
+        slug=row["slug"],
+        liquidity_usd=_optional_float(row["liquidity_usd"]),
+        volume_usd=_optional_float(row["volume_usd"]),
+        active=bool(row["active"]),
+        closed=bool(row["closed"]),
+        market_count=int(row["market_count"]),
+        snapshot_at=int(row["snapshot_at"]),
+    )

@@ -33,6 +33,8 @@ from pscanner.alerts.sink import AlertSink
 from pscanner.alerts.terminal import TerminalRenderer
 from pscanner.collectors.activity import ActivityCollector
 from pscanner.collectors.base import Collector
+from pscanner.collectors.events import EventCollector
+from pscanner.collectors.markets import MarketCollector
 from pscanner.collectors.positions import PositionCollector
 from pscanner.collectors.trades import TradeCollector
 from pscanner.collectors.watchlist import WatchlistRegistry, WatchlistSyncer
@@ -46,7 +48,9 @@ from pscanner.poly.http import PolyHttpClient
 from pscanner.store.db import init_db
 from pscanner.store.repo import (
     AlertsRepo,
+    EventSnapshotsRepo,
     MarketCacheRepo,
+    MarketSnapshotsRepo,
     PositionSnapshotsRepo,
     TrackedWalletsRepo,
     WalletActivityEventsRepo,
@@ -111,6 +115,8 @@ class Scanner:
         self._alerts_repo = AlertsRepo(self._db)
         self._positions_repo = WalletPositionsHistoryRepo(self._db)
         self._activity_repo = WalletActivityEventsRepo(self._db)
+        self._market_snapshots_repo = MarketSnapshotsRepo(self._db)
+        self._event_snapshots_repo = EventSnapshotsRepo(self._db)
         self._watchlist_repo = WatchlistRepo(self._db)
         self._wallet_trades_repo = WalletTradesRepo(self._db)
         self._owns_clients = clients is None
@@ -187,6 +193,20 @@ class Scanner:
                 activity_repo=self._activity_repo,
                 poll_interval_seconds=self._config.activity.poll_interval_seconds,
                 activity_page_limit=self._config.activity.activity_page_limit,
+            )
+        if self._config.markets.enabled:
+            collectors["market_collector"] = MarketCollector(
+                gamma_client=self._clients.gamma_client,
+                markets_repo=self._market_snapshots_repo,
+                snapshot_interval_seconds=self._config.markets.snapshot_interval_seconds,
+                snapshot_max=self._config.markets.snapshot_max,
+            )
+        if self._config.events.enabled:
+            collectors["event_collector"] = EventCollector(
+                gamma_client=self._clients.gamma_client,
+                events_repo=self._event_snapshots_repo,
+                snapshot_interval_seconds=self._config.events.snapshot_interval_seconds,
+                snapshot_max=self._config.events.snapshot_max,
             )
         return collectors
 
@@ -316,7 +336,8 @@ class Scanner:
             Counts of work done in this pass — useful for the ``--once`` CLI:
             ``events_scanned``, ``alerts_emitted``, ``tracked_wallets``,
             ``markets_cached``, ``watched_wallets``, ``trades_recorded``,
-            ``position_snapshots``, ``activity_events``.
+            ``position_snapshots``, ``activity_events``, ``market_snapshots``,
+            ``event_snapshots``.
         """
         baseline_alerts = self._alerts_repo.recent(limit=10000)
         before = len(baseline_alerts)
@@ -324,7 +345,7 @@ class Scanner:
         events_scanned = await self._run_once_mispricing()
         await self._run_once_smart_money()
         await self._run_once_whales()
-        position_snapshots, activity_events = await self._run_once_collectors()
+        collector_counts = await self._run_once_collectors()
         after_alerts = self._alerts_repo.recent(limit=10000)
         markets = self._market_cache_repo.list_active()
         tracked = self._tracked_repo.list_all()
@@ -336,11 +357,13 @@ class Scanner:
             "markets_cached": len(markets),
             "watched_wallets": len(self._watchlist_registry.addresses()),
             "trades_recorded": trades_after - trades_before,
-            "position_snapshots": position_snapshots,
-            "activity_events": activity_events,
+            "position_snapshots": collector_counts["position_snapshots"],
+            "activity_events": collector_counts["activity_events"],
+            "market_snapshots": collector_counts["market_snapshots"],
+            "event_snapshots": collector_counts["event_snapshots"],
         }
 
-    async def _run_once_collectors(self) -> tuple[int, int]:
+    async def _run_once_collectors(self) -> dict[str, int]:
         """Drive a single iteration of each collector.
 
         ``WatchlistSyncer.sync_smart_money`` mirrors any tracked wallets the
@@ -350,15 +373,19 @@ class Scanner:
         it can finish, not bail on the first transient failure.
 
         Returns:
-            ``(position_snapshots, activity_events)`` — counts of new rows
-            inserted by the DC-2 collectors. Both are 0 when the collectors
-            are disabled or raise (Wave 1 stubs always raise).
+            Mapping with ``position_snapshots``, ``activity_events``,
+            ``market_snapshots``, ``event_snapshots`` keys. Each is 0 when
+            the corresponding collector is disabled or raises (Wave 1 stubs
+            always raise).
         """
         await self._run_once_watchlist_sync()
         await self._run_once_trade_collector()
-        position_snapshots = await self._run_once_position_collector()
-        activity_events = await self._run_once_activity_collector()
-        return position_snapshots, activity_events
+        return {
+            "position_snapshots": await self._run_once_position_collector(),
+            "activity_events": await self._run_once_activity_collector(),
+            "market_snapshots": await self._run_once_market_collector(),
+            "event_snapshots": await self._run_once_event_collector(),
+        }
 
     async def _run_once_watchlist_sync(self) -> None:
         """Single-shot mirror of tracked wallets into the watchlist registry."""
@@ -400,6 +427,28 @@ class Scanner:
             return await collector.poll_all_wallets()
         except Exception:
             _LOG.exception("scanner.run_once.activity_failed")
+            return 0
+
+    async def _run_once_market_collector(self) -> int:
+        """Single-shot snapshot of every active market."""
+        collector = self._collectors.get("market_collector")
+        if not isinstance(collector, MarketCollector):
+            return 0
+        try:
+            return await collector.snapshot_all_markets()
+        except Exception:
+            _LOG.exception("scanner.run_once.markets_failed")
+            return 0
+
+    async def _run_once_event_collector(self) -> int:
+        """Single-shot snapshot of every active event."""
+        collector = self._collectors.get("event_collector")
+        if not isinstance(collector, EventCollector):
+            return 0
+        try:
+            return await collector.snapshot_all_events()
+        except Exception:
+            _LOG.exception("scanner.run_once.events_failed")
             return 0
 
     async def _run_once_mispricing(self) -> int:

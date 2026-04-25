@@ -11,7 +11,11 @@ from pscanner.alerts.models import Alert
 from pscanner.poly.models import Market
 from pscanner.store.repo import (
     AlertsRepo,
+    EventSnapshot,
+    EventSnapshotsRepo,
     MarketCacheRepo,
+    MarketSnapshot,
+    MarketSnapshotsRepo,
     PositionSnapshotsRepo,
     TrackedWalletsRepo,
     WalletActivityEvent,
@@ -761,3 +765,175 @@ def test_activity_events_count_by_wallet_groups_correctly(
     repo.insert(_make_activity_event(wallet="0xb", timestamp=300))
 
     assert repo.count_by_wallet() == {"0xa": 2, "0xb": 1}
+
+
+def _make_market_snapshot(
+    *,
+    market_id: str = "m1",
+    event_id: str | None = "evt-1",
+    outcome_prices_json: str = "[0.42, 0.58]",
+    liquidity_usd: float | None = 5000.0,
+    volume_usd: float | None = 9000.0,
+    active: bool = True,
+    snapshot_at: int = 1_700_000_000,
+) -> MarketSnapshot:
+    return MarketSnapshot(
+        market_id=market_id,
+        event_id=event_id,
+        outcome_prices_json=outcome_prices_json,
+        liquidity_usd=liquidity_usd,
+        volume_usd=volume_usd,
+        active=active,
+        snapshot_at=snapshot_at,
+    )
+
+
+def test_market_snapshots_insert_round_trips_all_fields(tmp_db: sqlite3.Connection) -> None:
+    repo = MarketSnapshotsRepo(tmp_db)
+    snap = _make_market_snapshot()
+    assert repo.insert(snap) is True
+
+    rows = repo.recent_for_market("m1")
+    assert len(rows) == 1
+    assert rows[0] == snap
+
+
+def test_market_snapshots_insert_round_trips_none_optionals(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = MarketSnapshotsRepo(tmp_db)
+    snap = _make_market_snapshot(
+        event_id=None,
+        liquidity_usd=None,
+        volume_usd=None,
+        active=False,
+    )
+    assert repo.insert(snap) is True
+
+    got = repo.recent_for_market("m1")[0]
+    assert got.event_id is None
+    assert got.liquidity_usd is None
+    assert got.volume_usd is None
+    assert got.active is False
+
+
+def test_market_snapshots_pk_collision_returns_false(tmp_db: sqlite3.Connection) -> None:
+    repo = MarketSnapshotsRepo(tmp_db)
+    snap = _make_market_snapshot()
+    assert repo.insert(snap) is True
+    assert repo.insert(snap) is False
+
+
+def test_market_snapshots_two_snapshots_kept_and_ordered_desc(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = MarketSnapshotsRepo(tmp_db)
+    repo.insert(_make_market_snapshot(snapshot_at=100))
+    repo.insert(_make_market_snapshot(snapshot_at=300))
+    repo.insert(_make_market_snapshot(snapshot_at=200))
+
+    rows = repo.recent_for_market("m1")
+    assert [r.snapshot_at for r in rows] == [300, 200, 100]
+
+    limited = repo.recent_for_market("m1", limit=2)
+    assert [r.snapshot_at for r in limited] == [300, 200]
+
+
+def test_market_snapshots_distinct_count_and_count_by_market(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = MarketSnapshotsRepo(tmp_db)
+    repo.insert(_make_market_snapshot(market_id="m1", snapshot_at=100))
+    repo.insert(_make_market_snapshot(market_id="m2", snapshot_at=100))
+    repo.insert(_make_market_snapshot(market_id="m1", snapshot_at=200))
+
+    assert repo.distinct_snapshot_count() == 2
+    assert repo.count_by_market() == {"m1": 2, "m2": 1}
+
+
+def _make_event_snapshot(
+    *,
+    event_id: str = "evt-1",
+    title: str = "Test event",
+    slug: str = "test-event",
+    liquidity_usd: float | None = 25000.0,
+    volume_usd: float | None = 80000.0,
+    active: bool = True,
+    closed: bool = False,
+    market_count: int = 3,
+    snapshot_at: int = 1_700_000_000,
+) -> EventSnapshot:
+    return EventSnapshot(
+        event_id=event_id,
+        title=title,
+        slug=slug,
+        liquidity_usd=liquidity_usd,
+        volume_usd=volume_usd,
+        active=active,
+        closed=closed,
+        market_count=market_count,
+        snapshot_at=snapshot_at,
+    )
+
+
+def test_event_snapshots_insert_round_trips_all_fields(tmp_db: sqlite3.Connection) -> None:
+    repo = EventSnapshotsRepo(tmp_db)
+    snap = _make_event_snapshot()
+    assert repo.insert(snap) is True
+
+    rows = repo.recent_for_event("evt-1")
+    assert len(rows) == 1
+    assert rows[0] == snap
+
+
+def test_event_snapshots_insert_round_trips_none_optionals_and_closed(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = EventSnapshotsRepo(tmp_db)
+    snap = _make_event_snapshot(
+        liquidity_usd=None,
+        volume_usd=None,
+        active=False,
+        closed=True,
+    )
+    assert repo.insert(snap) is True
+
+    got = repo.recent_for_event("evt-1")[0]
+    assert got.liquidity_usd is None
+    assert got.volume_usd is None
+    assert got.active is False
+    assert got.closed is True
+
+
+def test_event_snapshots_pk_collision_returns_false(tmp_db: sqlite3.Connection) -> None:
+    repo = EventSnapshotsRepo(tmp_db)
+    snap = _make_event_snapshot()
+    assert repo.insert(snap) is True
+    assert repo.insert(snap) is False
+
+
+def test_event_snapshots_recent_for_event_orders_desc_and_limits(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = EventSnapshotsRepo(tmp_db)
+    repo.insert(_make_event_snapshot(snapshot_at=100))
+    repo.insert(_make_event_snapshot(snapshot_at=300))
+    repo.insert(_make_event_snapshot(snapshot_at=200))
+
+    rows = repo.recent_for_event("evt-1")
+    assert [r.snapshot_at for r in rows] == [300, 200, 100]
+
+    limited = repo.recent_for_event("evt-1", limit=2)
+    assert [r.snapshot_at for r in limited] == [300, 200]
+
+
+def test_event_snapshots_distinct_count_and_count_by_event(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = EventSnapshotsRepo(tmp_db)
+    repo.insert(_make_event_snapshot(event_id="evt-1", snapshot_at=100))
+    repo.insert(_make_event_snapshot(event_id="evt-2", snapshot_at=100))
+    repo.insert(_make_event_snapshot(event_id="evt-1", snapshot_at=200))
+
+    assert repo.distinct_snapshot_count() == 2
+    assert repo.count_by_event() == {"evt-1": 2, "evt-2": 1}

@@ -41,3 +41,13 @@ snapshot_interval_seconds = 300
 enabled = true
 poll_interval_seconds = 300
 activity_page_limit = 200
+
+[markets]
+enabled = true
+snapshot_interval_seconds = 300
+snapshot_max = 5000
+
+[events]
+enabled = true
+snapshot_interval_seconds = 900
+snapshot_max = 2000

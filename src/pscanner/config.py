@@ -89,6 +89,22 @@ class ActivityConfig(_Section):
     activity_page_limit: int = 200
 
 
+class MarketsConfig(_Section):
+    """Cadence + toggles for the market-snapshot collector."""
+
+    enabled: bool = True
+    snapshot_interval_seconds: float = 300.0
+    snapshot_max: int = 5000
+
+
+class EventsConfig(_Section):
+    """Cadence + toggles for the event-snapshot collector."""
+
+    enabled: bool = True
+    snapshot_interval_seconds: float = 900.0
+    snapshot_max: int = 2000
+
+
 class Config(BaseModel):
     """Root pscanner config aggregating every section."""
 
@@ -101,6 +117,8 @@ class Config(BaseModel):
     ratelimit: RatelimitConfig = Field(default_factory=RatelimitConfig)
     positions: PositionsConfig = Field(default_factory=PositionsConfig)
     activity: ActivityConfig = Field(default_factory=ActivityConfig)
+    markets: MarketsConfig = Field(default_factory=MarketsConfig)
+    events: EventsConfig = Field(default_factory=EventsConfig)
 
     @classmethod
     def load(cls, path: Path | None = None) -> Config:
