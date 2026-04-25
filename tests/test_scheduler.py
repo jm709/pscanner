@@ -126,17 +126,11 @@ def _make_clients(
     data_client.get_activity = AsyncMock(return_value=[])
     data_client.aclose = AsyncMock()
 
-    market_ws = MagicMock()
-    market_ws.connect = AsyncMock()
-    market_ws.subscribe = AsyncMock()
-    market_ws.close = AsyncMock()
-
     return SchedulerClients(
         gamma_http=gamma_http,
         data_http=data_http,
         gamma_client=gamma_client,
         data_client=data_client,
-        market_ws=market_ws,
     )
 
 
@@ -204,7 +198,6 @@ async def test_run_once_caches_markets_via_whales(db_path: Path) -> None:
     finally:
         await scanner.aclose()
     assert result["markets_cached"] == 2
-    cast("MagicMock", clients.market_ws).connect.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -260,7 +253,7 @@ async def test_shutdown_is_idempotent(db_path: Path) -> None:
     scanner = Scanner(config=config, db_path=db_path, clients=clients)
     await scanner.aclose()
     await scanner.aclose()
-    cast("MagicMock", clients.market_ws).close.assert_awaited()
+    assert scanner._closed is True
 
 
 @pytest.mark.asyncio
@@ -271,7 +264,6 @@ async def test_shutdown_closes_owned_clients(db_path: Path) -> None:
     mocked = _make_clients()
     scanner._clients = mocked
     await scanner.aclose()
-    cast("MagicMock", mocked.market_ws).close.assert_awaited()
     cast("MagicMock", mocked.gamma_http).aclose.assert_awaited()
     cast("MagicMock", mocked.data_http).aclose.assert_awaited()
 
@@ -405,3 +397,33 @@ async def test_aclose_sets_collectors_stop_event(db_path: Path) -> None:
     assert not scanner._collectors_stop.is_set()
     await scanner.aclose()
     assert scanner._collectors_stop.is_set()
+
+
+@pytest.mark.asyncio
+async def test_scanner_wires_whales_to_trade_collector_callback(db_path: Path) -> None:
+    """DC-1.5: whales detector's sink + trade-collector callback wired at init."""
+    config = _make_config()
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    try:
+        whales = scanner._detectors["whales"]
+        trades = scanner._collectors["trade_collector"]
+        assert isinstance(trades, TradeCollector)
+        assert whales._sink is scanner.sink
+        assert whales.handle_trade_sync in trades._new_trade_callbacks
+    finally:
+        await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_scanner_skips_whales_callback_when_disabled(db_path: Path) -> None:
+    """When whales is disabled, the trade collector has no whales callback."""
+    config = _make_config(enable_smart=False, enable_misprice=False, enable_whales=False)
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    try:
+        trades = scanner._collectors["trade_collector"]
+        assert isinstance(trades, TradeCollector)
+        assert trades._new_trade_callbacks == []
+    finally:
+        await scanner.aclose()

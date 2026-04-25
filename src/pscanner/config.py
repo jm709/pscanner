@@ -61,7 +61,6 @@ class WhalesConfig(_Section):
     small_market_max_liquidity_usd: float = 50000.0
     big_bet_min_pct_of_liquidity: float = 0.05
     big_bet_min_usd: float = 2000.0
-    ws_subscribe_batch_size: int = 50
     ws_resubscribe_interval_seconds: int = 1800
     subscription_max_markets: int = 2000
     subscription_min_volume_usd: float = 100.0

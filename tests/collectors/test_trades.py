@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from pscanner.collectors.trades import TradeCollector
-from pscanner.store.repo import WalletTradesRepo
+from pscanner.store.repo import WalletTrade, WalletTradesRepo
 
 _NOW = 1_700_000_000
 _WALLET = "0xwatched"
@@ -271,3 +271,72 @@ async def test_non_trade_activity_entries_are_dropped(
     assert inserted == 1
     rows = repo.recent_for_wallet(_WALLET)
     assert {row.transaction_hash for row in rows} == {"0xtrade"}
+
+
+@pytest.mark.asyncio
+async def test_subscribe_new_trade_fires_on_insert(tmp_db: sqlite3.Connection) -> None:
+    """A registered callback is invoked once per newly-inserted trade."""
+    events = [
+        _make_activity_event(transactionHash="0xa"),
+        _make_activity_event(transactionHash="0xb"),
+    ]
+    data = MagicMock()
+    data.get_activity = AsyncMock(return_value=events)
+    collector, _repo, _reg, _dc = _make_collector(tmp_db=tmp_db, data_client=data)
+
+    received: list[WalletTrade] = []
+    collector.subscribe_new_trade(received.append)
+
+    inserted = await collector.poll_all_wallets()
+
+    assert inserted == 2
+    assert len(received) == 2
+    assert {trade.transaction_hash for trade in received} == {"0xa", "0xb"}
+    assert all(trade.wallet == _WALLET for trade in received)
+
+
+@pytest.mark.asyncio
+async def test_subscribe_new_trade_skips_duplicates(tmp_db: sqlite3.Connection) -> None:
+    """Callbacks fire only on real inserts; PK collisions are silent."""
+    events = [_make_activity_event(transactionHash="0xa")]
+    data = MagicMock()
+    data.get_activity = AsyncMock(return_value=events)
+    collector, _repo, _reg, _dc = _make_collector(tmp_db=tmp_db, data_client=data)
+
+    received: list[WalletTrade] = []
+    collector.subscribe_new_trade(received.append)
+
+    first = await collector.poll_all_wallets()
+    second = await collector.poll_all_wallets()
+
+    assert first == 1
+    assert second == 0
+    # First poll fired once; the second poll's duplicate must NOT re-fire.
+    assert len(received) == 1
+    assert received[0].transaction_hash == "0xa"
+
+
+@pytest.mark.asyncio
+async def test_subscribe_new_trade_isolates_callback_failures(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """One callback raising must not prevent others from firing."""
+    events = [_make_activity_event(transactionHash="0xa")]
+    data = MagicMock()
+    data.get_activity = AsyncMock(return_value=events)
+    collector, _repo, _reg, _dc = _make_collector(tmp_db=tmp_db, data_client=data)
+
+    received: list[WalletTrade] = []
+
+    def _broken(_trade: WalletTrade) -> None:
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    collector.subscribe_new_trade(_broken)
+    collector.subscribe_new_trade(received.append)
+
+    inserted = await collector.poll_all_wallets()
+
+    assert inserted == 1
+    assert len(received) == 1
+    assert received[0].transaction_hash == "0xa"
