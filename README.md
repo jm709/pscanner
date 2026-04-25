@@ -4,15 +4,16 @@ Polymarket scanner — a persistent asyncio daemon that watches Polymarket and
 surfaces three actionable trading signals:
 
 1. **Smart money** — high-conviction positions from wallets with proven
-   winrate. The detector pulls the leaderboard, recomputes each candidate's
-   winrate from their closed-position history, retains those above
-   `min_winrate`, then polls their open positions for new entries clearing
-   `new_position_min_usd`.
+   *edge over the market*. For each candidate's closed positions we compute
+   `edge = outcome - implied_prob_at_entry`; wallets with `mean_edge` and
+   `excess_pnl_usd` above thresholds are tracked, and we then poll their
+   open positions for new entries clearing `new_position_min_usd`.
 2. **Mispricing** — mutex outcomes within an event whose YES prices don't
    sum to 1.0. A persistent deviation hints at either an arbitrage
    opportunity or a stale book.
 3. **Whales** — newly-active accounts placing outsized bets on illiquid
-   markets, joined live from the CLOB websocket trade feed.
+   markets. Fires on each newly-recorded `wallet_trades` row when the
+   trader is a new wallet, the market is small, and the bet is big.
 
 Output goes to a SQLite log at `./data/pscanner.sqlite3` and to a live
 `rich` terminal panel.
@@ -37,7 +38,8 @@ Edit `config.toml` to dial detector thresholds. The fields are:
 |---|---|---|
 | `scanner` | `db_path` | SQLite file location. |
 | `scanner` | `log_level` | `DEBUG`/`INFO`/`WARNING`/`ERROR`. |
-| `smart_money` | `min_winrate` | Minimum win-rate to track a wallet. |
+| `smart_money` | `min_edge` | Minimum mean edge (`outcome − implied_prob`) to track a wallet. |
+| `smart_money` | `min_excess_pnl_usd` | Minimum realized PnL in USD to track a wallet. |
 | `smart_money` | `new_position_min_usd` | Min USD delta to alert on. |
 | `mispricing` | `sum_deviation_threshold` | `\|Σ − 1\|` band before alerting. |
 | `mispricing` | `min_event_liquidity_usd` | Skip events thinner than this. |
