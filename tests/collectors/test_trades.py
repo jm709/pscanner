@@ -1,8 +1,6 @@
-"""Tests for ``TradeCollector``.
+"""Tests for ``TradeCollector`` (REST polling against ``/activity``).
 
-These exercise ``_record_trade``, ``_refresh_subscriptions``,
-``_on_watchlist_add``, and ``run`` directly with synthesised dependencies.
-The :class:`WatchlistRegistry` and websocket are fully mocked; the
+The watchlist registry is mocked; the data client is mocked; the
 :class:`WalletTradesRepo` runs against an in-memory SQLite to verify
 end-to-end persistence and dedupe behaviour.
 """
@@ -11,14 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from pscanner.collectors.trades import TradeCollector
-from pscanner.poly.models import Position, WsBookMessage, WsTradeMessage
 from pscanner.store.repo import WalletTradesRepo
 
 _NOW = 1_700_000_000
@@ -28,37 +24,21 @@ _ASSET_ID = "asset-1"
 _CONDITION_ID = "cond-1"
 
 
-def _make_trade(**overrides: Any) -> WsTradeMessage:
-    """Build a ``CONFIRMED`` trade message with sensible defaults."""
+def _make_activity_event(**overrides: Any) -> dict[str, Any]:
+    """Build one ``TRADE`` activity dict shaped like the real API response."""
     base: dict[str, Any] = {
-        "event_type": "trade",
-        "condition_id": _CONDITION_ID,
-        "asset_id": _ASSET_ID,
+        "type": "TRADE",
+        "transactionHash": "0xtx1",
+        "asset": _ASSET_ID,
         "side": "BUY",
         "size": 100.0,
         "price": 0.4,
-        "taker_proxy": _WALLET,
-        "status": "CONFIRMED",
-        "transaction_hash": "0xtx1",
+        "conditionId": _CONDITION_ID,
         "timestamp": _NOW,
+        "usdcSize": 40.0,
     }
     base.update(overrides)
-    return WsTradeMessage.model_validate(base)
-
-
-def _make_position(asset_id: str, *, address: str = _WALLET) -> Position:
-    """Build a ``Position`` with the given asset id."""
-    return Position.model_validate(
-        {
-            "proxyWallet": address,
-            "asset": asset_id,
-            "conditionId": _CONDITION_ID,
-            "outcome": "Yes",
-            "outcomeIndex": 0,
-            "size": 1.0,
-            "avgPrice": 0.5,
-        },
-    )
+    return base
 
 
 def _make_registry(addresses: set[str] | None = None) -> MagicMock:
@@ -68,17 +48,8 @@ def _make_registry(addresses: set[str] | None = None) -> MagicMock:
     registry.__contains__ = MagicMock(side_effect=lambda addr: addr in addrs)
     registry.addresses = MagicMock(side_effect=lambda: set(addrs))
     registry.subscribe = MagicMock()
-    registry._addrs = addrs  # exposed for tests that mutate it
+    registry._addrs = addrs
     return registry
-
-
-def _make_ws() -> MagicMock:
-    """Build a websocket mock with async ``connect``, ``subscribe``, ``close``."""
-    ws = MagicMock()
-    ws.connect = AsyncMock()
-    ws.subscribe = AsyncMock()
-    ws.close = AsyncMock()
-    return ws
 
 
 def _make_collector(
@@ -86,264 +57,144 @@ def _make_collector(
     tmp_db: sqlite3.Connection,
     registry: MagicMock | None = None,
     data_client: MagicMock | None = None,
-    ws: MagicMock | None = None,
-    refresh_seconds: float = 300.0,
-) -> tuple[TradeCollector, WalletTradesRepo, MagicMock, MagicMock, MagicMock]:
+    poll_interval_seconds: float = 60.0,
+) -> tuple[TradeCollector, WalletTradesRepo, MagicMock, MagicMock]:
     """Wire up a ``TradeCollector`` with default mocks plus a real repo."""
     repo = WalletTradesRepo(tmp_db)
     reg = registry or _make_registry({_WALLET})
     dc = data_client or MagicMock()
-    if not hasattr(dc, "get_positions") or not isinstance(dc.get_positions, AsyncMock):
-        dc.get_positions = AsyncMock(return_value=[])
-    socket = ws or _make_ws()
+    if not hasattr(dc, "get_activity") or not isinstance(dc.get_activity, AsyncMock):
+        dc.get_activity = AsyncMock(return_value=[])
     collector = TradeCollector(
         registry=reg,  # type: ignore[arg-type]
         data_client=dc,  # type: ignore[arg-type]
-        ws=socket,  # type: ignore[arg-type]
         trades_repo=repo,
-        subscription_refresh_seconds=refresh_seconds,
+        poll_interval_seconds=poll_interval_seconds,
     )
-    return collector, repo, reg, dc, socket
+    return collector, repo, reg, dc
 
 
 @pytest.mark.asyncio
-async def test_record_trade_inserts_row_for_watched_wallet(
-    tmp_db: sqlite3.Connection,
-) -> None:
-    collector, repo, _reg, _dc, _ws = _make_collector(tmp_db=tmp_db)
-
-    collector._record_trade(_make_trade(size=200.0, price=0.6))
-
-    rows = repo.recent_for_wallet(_WALLET)
-    assert len(rows) == 1
-    row = rows[0]
-    assert row.transaction_hash == "0xtx1"
-    assert row.asset_id == _ASSET_ID
-    assert row.side == "BUY"
-    assert row.wallet == _WALLET
-    assert row.condition_id == _CONDITION_ID
-    assert row.size == pytest.approx(200.0)
-    assert row.price == pytest.approx(0.6)
-    assert row.usd_value == pytest.approx(120.0)
-    assert row.status == "CONFIRMED"
-    assert row.source == "ws"
-    assert row.timestamp == _NOW
-
-
-@pytest.mark.asyncio
-async def test_consume_loop_skips_unwatched_wallet(tmp_db: sqlite3.Connection) -> None:
-    """A trade from a wallet outside the registry must not be persisted."""
-    registry = _make_registry({_WALLET})
-    ws = _make_ws()
-    trade = _make_trade(taker_proxy=_OTHER_WALLET, transaction_hash="0xtxOther")
-
-    async def _messages() -> AsyncIterator[Any]:
-        yield trade
-
-    ws.messages = _messages
-    collector, repo, _reg, _dc, _ws = _make_collector(
-        tmp_db=tmp_db,
-        registry=registry,
-        ws=ws,
-    )
-
-    stop_event = asyncio.Event()
-    await collector._consume_loop(stop_event)
-
-    assert repo.recent_for_wallet(_OTHER_WALLET) == []
-    assert repo.recent_for_wallet(_WALLET) == []
-
-
-@pytest.mark.asyncio
-async def test_consume_loop_persists_watched_trade(tmp_db: sqlite3.Connection) -> None:
-    """Trades from watched wallets flow through the consume loop into the repo."""
-    registry = _make_registry({_WALLET})
-    ws = _make_ws()
-    trade = _make_trade(transaction_hash="0xtxConsume")
-    book_msg = WsBookMessage.model_validate(
-        {"event_type": "book", "asset_id": "x", "data": {}},
-    )
-
-    async def _messages() -> AsyncIterator[Any]:
-        yield book_msg  # non-trade messages must be skipped, not crash
-        yield trade
-
-    ws.messages = _messages
-    collector, repo, _reg, _dc, _ws = _make_collector(
-        tmp_db=tmp_db,
-        registry=registry,
-        ws=ws,
-    )
-
-    await collector._consume_loop(asyncio.Event())
-
-    rows = repo.recent_for_wallet(_WALLET)
-    assert len(rows) == 1
-    assert rows[0].transaction_hash == "0xtxConsume"
-
-
-@pytest.mark.asyncio
-async def test_record_trade_dedupes_on_composite_key(
-    tmp_db: sqlite3.Connection,
-) -> None:
-    """Inserting the same (tx, asset, side) twice yields a single row."""
-    collector, repo, _reg, _dc, _ws = _make_collector(tmp_db=tmp_db)
-
-    trade = _make_trade(transaction_hash="0xdup")
-    collector._record_trade(trade)
-    collector._record_trade(trade)
-
-    rows = repo.recent_for_wallet(_WALLET)
-    assert len(rows) == 1
-
-
-@pytest.mark.asyncio
-async def test_record_trade_skips_when_tx_hash_missing(
-    tmp_db: sqlite3.Connection,
-) -> None:
-    """Without a tx_hash the dedupe key is unsafe; the row must not be written."""
-    collector, repo, _reg, _dc, _ws = _make_collector(tmp_db=tmp_db)
-
-    collector._record_trade(_make_trade(transaction_hash=None))
-
-    assert repo.recent_for_wallet(_WALLET) == []
-    assert repo.count_by_wallet() == {}
-
-
-@pytest.mark.asyncio
-async def test_refresh_subscriptions_unions_assets_across_wallets(
-    tmp_db: sqlite3.Connection,
-) -> None:
-    """``_refresh_subscriptions`` unions every wallet's open-position assets."""
-    registry = _make_registry({"0xaaa", "0xbbb"})
+async def test_poll_all_wallets_inserts_three_trades(tmp_db: sqlite3.Connection) -> None:
+    """A single watched wallet with 3 TRADE events yields 3 rows."""
+    events = [
+        _make_activity_event(transactionHash="0xa", size=10.0, price=0.5, usdcSize=5.0),
+        _make_activity_event(transactionHash="0xb", size=20.0, price=0.6, usdcSize=12.0),
+        _make_activity_event(transactionHash="0xc", size=30.0, price=0.7, usdcSize=21.0),
+    ]
     data = MagicMock()
+    data.get_activity = AsyncMock(return_value=events)
+    collector, repo, _reg, _dc = _make_collector(tmp_db=tmp_db, data_client=data)
 
-    async def _get_positions(address: str, **_kwargs: Any) -> list[Position]:
-        if address == "0xaaa":
-            return [_make_position("A1", address=address), _make_position("A2", address=address)]
-        return [_make_position("A3", address=address), _make_position("A4", address=address)]
+    inserted = await collector.poll_all_wallets()
 
-    data.get_positions = AsyncMock(side_effect=_get_positions)
-    ws = _make_ws()
-    collector, _repo, _reg, _dc, _ws = _make_collector(
+    assert inserted == 3
+    rows = repo.recent_for_wallet(_WALLET)
+    assert len(rows) == 3
+    hashes = {row.transaction_hash for row in rows}
+    assert hashes == {"0xa", "0xb", "0xc"}
+    assert all(row.source == "activity_api" for row in rows)
+    assert all(row.status == "CONFIRMED" for row in rows)
+    assert all(row.wallet == _WALLET for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_poll_all_wallets_dedupes_on_repeat_calls(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """Polling the same wallet twice with overlapping events does not double-count."""
+    events = [
+        _make_activity_event(transactionHash="0xa"),
+        _make_activity_event(transactionHash="0xb"),
+    ]
+    data = MagicMock()
+    data.get_activity = AsyncMock(return_value=events)
+    collector, repo, _reg, _dc = _make_collector(tmp_db=tmp_db, data_client=data)
+
+    first = await collector.poll_all_wallets()
+    second = await collector.poll_all_wallets()
+
+    assert first == 2
+    assert second == 0
+    assert len(repo.recent_for_wallet(_WALLET)) == 2
+
+
+@pytest.mark.asyncio
+async def test_poll_skips_event_with_empty_transaction_hash(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """An activity entry without a transaction hash is dropped, not persisted."""
+    events = [
+        _make_activity_event(transactionHash=""),
+        _make_activity_event(transactionHash="0xok"),
+    ]
+    data = MagicMock()
+    data.get_activity = AsyncMock(return_value=events)
+    collector, repo, _reg, _dc = _make_collector(tmp_db=tmp_db, data_client=data)
+
+    inserted = await collector.poll_all_wallets()
+
+    assert inserted == 1
+    rows = repo.recent_for_wallet(_WALLET)
+    assert {row.transaction_hash for row in rows} == {"0xok"}
+
+
+@pytest.mark.asyncio
+async def test_poll_only_fetches_for_watched_wallets(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """The collector calls ``get_activity`` only for addresses in the registry."""
+    registry = _make_registry({_WALLET})
+    data = MagicMock()
+    data.get_activity = AsyncMock(return_value=[])
+    collector, _repo, _reg, dc = _make_collector(
         tmp_db=tmp_db,
         registry=registry,
         data_client=data,
-        ws=ws,
     )
 
-    await collector._refresh_subscriptions()
+    await collector.poll_all_wallets()
 
-    subscribed = {aid for call in ws.subscribe.await_args_list for aid in call.args[0]}
-    assert subscribed == {"A1", "A2", "A3", "A4"}
-    assert collector._subscribed_assets == {"A1", "A2", "A3", "A4"}
+    called_wallets = {call.args[0] for call in dc.get_activity.await_args_list}
+    assert called_wallets == {_WALLET}
+    assert _OTHER_WALLET not in called_wallets
 
 
 @pytest.mark.asyncio
-async def test_refresh_subscriptions_batches_in_chunks_of_100(
-    tmp_db: sqlite3.Connection,
-) -> None:
-    """Asset ids are sent in batches of at most 100 per ``ws.subscribe`` call."""
-    registry = _make_registry({_WALLET})
-    data = MagicMock()
-    positions = [_make_position(f"asset-{i}") for i in range(250)]
-    data.get_positions = AsyncMock(return_value=positions)
-    ws = _make_ws()
-    collector, _repo, _reg, _dc, _ws = _make_collector(
-        tmp_db=tmp_db,
-        registry=registry,
-        data_client=data,
-        ws=ws,
-    )
-
-    await collector._refresh_subscriptions()
-
-    batch_sizes = [len(call.args[0]) for call in ws.subscribe.await_args_list]
-    assert batch_sizes == [100, 100, 50]
-    flat = [aid for call in ws.subscribe.await_args_list for aid in call.args[0]]
-    assert sorted(flat) == sorted({f"asset-{i}" for i in range(250)})
-
-
-@pytest.mark.asyncio
-async def test_refresh_subscriptions_caps_huge_wallet_at_500(
-    tmp_db: sqlite3.Connection,
-) -> None:
-    """A wallet with more than 500 positions is sliced to the cap (no crash)."""
-    registry = _make_registry({_WALLET})
-    data = MagicMock()
-    positions = [_make_position(f"asset-{i}") for i in range(600)]
-    data.get_positions = AsyncMock(return_value=positions)
-    ws = _make_ws()
-    collector, _repo, _reg, _dc, _ws = _make_collector(
-        tmp_db=tmp_db,
-        registry=registry,
-        data_client=data,
-        ws=ws,
-    )
-
-    await collector._refresh_subscriptions()
-
-    assert len(collector._subscribed_assets) == 500
-    flat = {aid for call in ws.subscribe.await_args_list for aid in call.args[0]}
-    assert flat == {f"asset-{i}" for i in range(500)}
-
-
-@pytest.mark.asyncio
-async def test_on_watchlist_add_subscribes_immediately(
-    tmp_db: sqlite3.Connection,
-) -> None:
-    """A new watchlist entry triggers an off-cycle subscribe for its assets."""
-    registry = _make_registry(set())
-    data = MagicMock()
+async def test_on_watchlist_add_polls_immediately(tmp_db: sqlite3.Connection) -> None:
+    """A new watchlist entry triggers an off-cycle poll for that wallet."""
     new_addr = "0xnew"
-    data.get_positions = AsyncMock(
-        return_value=[
-            _make_position("N1", address=new_addr),
-            _make_position("N2", address=new_addr),
-        ],
-    )
-    ws = _make_ws()
-    collector, _repo, _reg, _dc, _ws = _make_collector(
+    events = [_make_activity_event(transactionHash="0xnew1")]
+    data = MagicMock()
+    data.get_activity = AsyncMock(return_value=events)
+    collector, repo, _reg, _dc = _make_collector(
         tmp_db=tmp_db,
-        registry=registry,
+        registry=_make_registry(set()),
         data_client=data,
-        ws=ws,
     )
 
     collector._on_watchlist_add(new_addr)
-    # Yield until the spawned task has finished.
-    for _ in range(5):
+    for _ in range(10):
         await asyncio.sleep(0)
 
     assert not collector._pending_add_tasks
-    flat = {aid for call in ws.subscribe.await_args_list for aid in call.args[0]}
-    assert flat == {"N1", "N2"}
-    data.get_positions.assert_awaited_once_with(new_addr)
+    rows = repo.recent_for_wallet(new_addr)
+    assert len(rows) == 1
+    assert rows[0].transaction_hash == "0xnew1"
+    data.get_activity.assert_awaited()
 
 
 @pytest.mark.asyncio
 async def test_run_exits_cleanly_when_stop_event_set(
     tmp_db: sqlite3.Connection,
 ) -> None:
-    """``run`` returns within a few seconds once ``stop_event`` is set."""
-    registry = _make_registry({_WALLET})
+    """``run`` returns within the poll interval after ``stop_event`` is set."""
     data = MagicMock()
-    data.get_positions = AsyncMock(return_value=[])
-    ws = _make_ws()
-
-    async def _messages() -> AsyncIterator[Any]:
-        # Idle forever — the consume task should be cancelled on stop.
-        await asyncio.sleep(60)
-        if False:  # pragma: no cover  -- generator typing helper
-            yield None
-
-    ws.messages = _messages
-    collector, _repo, _reg, _dc, _ws = _make_collector(
+    data.get_activity = AsyncMock(return_value=[])
+    collector, _repo, registry, _dc = _make_collector(
         tmp_db=tmp_db,
-        registry=registry,
         data_client=data,
-        ws=ws,
-        refresh_seconds=60.0,
+        poll_interval_seconds=60.0,
     )
 
     stop_event = asyncio.Event()
@@ -357,36 +208,66 @@ async def test_run_exits_cleanly_when_stop_event_set(
         timeout=2.0,
     )
 
-    ws.connect.assert_awaited_once()
-    ws.close.assert_awaited_once()
     registry.subscribe.assert_called_once_with(collector._on_watchlist_add)
 
 
 @pytest.mark.asyncio
-async def test_consume_loop_continues_after_record_trade_exception(
+async def test_per_wallet_exception_does_not_crash_loop(
     tmp_db: sqlite3.Connection,
 ) -> None:
-    """If the repo raises on insert, the consume loop logs and keeps going."""
-    registry = _make_registry({_WALLET})
-    failing_repo = MagicMock()
-    failing_repo.insert = MagicMock(side_effect=[RuntimeError("boom"), True])
-    ws = _make_ws()
-    first = _make_trade(transaction_hash="0xtxFail", asset_id="A1")
-    second = _make_trade(transaction_hash="0xtxOk", asset_id="A2")
+    """A failing ``get_activity`` for one wallet does not stop the next."""
+    registry = _make_registry({"0xfail", "0xok"})
+    data = MagicMock()
 
-    async def _messages() -> AsyncIterator[Any]:
-        yield first
-        yield second
+    async def _get_activity(address: str, **_kwargs: Any) -> list[dict[str, Any]]:
+        if address == "0xfail":
+            msg = "boom"
+            raise RuntimeError(msg)
+        return [_make_activity_event(transactionHash="0xok1")]
 
-    ws.messages = _messages
-
-    collector = TradeCollector(
-        registry=registry,  # type: ignore[arg-type]
-        data_client=MagicMock(),  # type: ignore[arg-type]
-        ws=ws,  # type: ignore[arg-type]
-        trades_repo=failing_repo,  # type: ignore[arg-type]
+    data.get_activity = AsyncMock(side_effect=_get_activity)
+    collector, repo, _reg, _dc = _make_collector(
+        tmp_db=tmp_db,
+        registry=registry,
+        data_client=data,
     )
 
-    await collector._consume_loop(asyncio.Event())
+    inserted = await collector.poll_all_wallets()
 
-    assert failing_repo.insert.call_count == 2
+    assert inserted == 1
+    assert len(repo.recent_for_wallet("0xok")) == 1
+    assert repo.recent_for_wallet("0xfail") == []
+
+
+@pytest.mark.asyncio
+async def test_source_field_is_activity_api(tmp_db: sqlite3.Connection) -> None:
+    """Every persisted row has ``source='activity_api'`` (REST provenance)."""
+    events = [_make_activity_event(transactionHash=f"0x{i}") for i in range(3)]
+    data = MagicMock()
+    data.get_activity = AsyncMock(return_value=events)
+    collector, repo, _reg, _dc = _make_collector(tmp_db=tmp_db, data_client=data)
+
+    await collector.poll_all_wallets()
+
+    rows = repo.recent_for_wallet(_WALLET)
+    assert {row.source for row in rows} == {"activity_api"}
+
+
+@pytest.mark.asyncio
+async def test_non_trade_activity_entries_are_dropped(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """Activity entries with ``type != 'TRADE'`` are skipped defensively."""
+    events = [
+        {"type": "REWARD", "transactionHash": "0xreward", "asset": "x"},
+        _make_activity_event(transactionHash="0xtrade"),
+    ]
+    data = MagicMock()
+    data.get_activity = AsyncMock(return_value=events)
+    collector, repo, _reg, _dc = _make_collector(tmp_db=tmp_db, data_client=data)
+
+    inserted = await collector.poll_all_wallets()
+
+    assert inserted == 1
+    rows = repo.recent_for_wallet(_WALLET)
+    assert {row.transaction_hash for row in rows} == {"0xtrade"}

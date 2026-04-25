@@ -123,6 +123,7 @@ def _make_clients(
     data_client.get_leaderboard = AsyncMock(return_value=leaderboard or [])
     data_client.get_positions = AsyncMock(return_value=positions or [])
     data_client.get_closed_positions = AsyncMock(return_value=[])
+    data_client.get_activity = AsyncMock(return_value=[])
     data_client.aclose = AsyncMock()
 
     market_ws = MagicMock()
@@ -130,18 +131,12 @@ def _make_clients(
     market_ws.subscribe = AsyncMock()
     market_ws.close = AsyncMock()
 
-    trade_ws = MagicMock()
-    trade_ws.connect = AsyncMock()
-    trade_ws.subscribe = AsyncMock()
-    trade_ws.close = AsyncMock()
-
     return SchedulerClients(
         gamma_http=gamma_http,
         data_http=data_http,
         gamma_client=gamma_client,
         data_client=data_client,
         market_ws=market_ws,
-        trade_ws=trade_ws,
     )
 
 
@@ -347,24 +342,23 @@ async def test_run_once_reports_collector_metrics(db_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_run_once_drives_collectors_with_active_watchlist(db_path: Path) -> None:
-    """Pre-seeded watchlist drives ``refresh_subscriptions`` to fetch positions."""
+    """Pre-seeded watchlist drives ``poll_all_wallets`` to fetch /activity."""
     config = _make_config(enable_smart=False, enable_misprice=False, enable_whales=False)
-    positions = [
-        Position.model_validate(
-            {
-                "proxyWallet": "0xabc",
-                "asset": "asset-1",
-                "conditionId": "cond-1",
-                "size": 100.0,
-                "avgPrice": 0.4,
-                "currentValue": 50.0,
-                "outcome": "Yes",
-                "outcomeIndex": 0,
-                "title": "test market",
-            }
-        ),
+    activity = [
+        {
+            "type": "TRADE",
+            "transactionHash": "0xtxa",
+            "asset": "asset-1",
+            "side": "BUY",
+            "size": 100.0,
+            "price": 0.4,
+            "conditionId": "cond-1",
+            "timestamp": 1_700_000_000,
+            "usdcSize": 40.0,
+        },
     ]
-    clients = _make_clients(positions=positions)
+    clients = _make_clients()
+    cast("AsyncMock", clients.data_client.get_activity).return_value = activity
     scanner = Scanner(config=config, db_path=db_path, clients=clients)
     scanner._watchlist_repo.upsert(address="0xabc", source="manual", reason="test")
     scanner._watchlist_registry.reload()
@@ -373,8 +367,12 @@ async def test_run_once_drives_collectors_with_active_watchlist(db_path: Path) -
     finally:
         await scanner.aclose()
     assert result["watched_wallets"] == 1
-    cast("AsyncMock", clients.data_client.get_positions).assert_awaited_with("0xabc")
-    cast("AsyncMock", clients.trade_ws.subscribe).assert_awaited()
+    assert result["trades_recorded"] == 1
+    cast("AsyncMock", clients.data_client.get_activity).assert_awaited_with(
+        "0xabc",
+        type="TRADE",
+        limit=200,
+    )
 
 
 @pytest.mark.asyncio
@@ -396,17 +394,6 @@ async def test_run_once_mirrors_tracked_wallets_into_watchlist(db_path: Path) ->
         await scanner.aclose()
     assert result["tracked_wallets"] == 1
     assert "0xleader" in scanner._watchlist_registry.addresses()
-
-
-@pytest.mark.asyncio
-async def test_aclose_closes_trade_ws(db_path: Path) -> None:
-    """``aclose`` must close both ``market_ws`` and ``trade_ws``."""
-    config = _make_config()
-    clients = _make_clients()
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    await scanner.aclose()
-    cast("MagicMock", clients.market_ws).close.assert_awaited()
-    cast("MagicMock", clients.trade_ws).close.assert_awaited()
 
 
 @pytest.mark.asyncio

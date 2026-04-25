@@ -178,6 +178,75 @@ async def test_book_message_yielded_as_book(
     assert msg.data["bids"] == [["0.41", "10"]]
 
 
+async def test_real_polymarket_book_payload_parses(
+    server: tuple[str, ServerState],
+) -> None:
+    """Real Polymarket ``book`` payload (top-level asset_id, bids, asks) parses."""
+    url, state = server
+    client = MarketWebSocket(url=url, ping_interval_seconds=10.0)
+    book_payload = {
+        "market": "0xcccb9d5b1ad3f2d7ee65c0e0daadbf0da1f2e2aa1c2d2e3f4a5b6c7d8e9f0a1",
+        "asset_id": "84414000000000000000000000000000000000000000000000000000000000000",
+        "timestamp": "1714000000000",
+        "hash": "0xabc123",
+        "bids": [{"price": "0.989", "size": "100"}],
+        "asks": [{"price": "0.991", "size": "50"}],
+        "tick_size": "0.001",
+        "event_type": "book",
+        "last_trade_price": "0.991",
+    }
+    async with client:
+        msg = await _send_and_receive(client, state, book_payload)
+    assert isinstance(msg, WsBookMessage)
+    assert msg.event_type == "book"
+    assert msg.affected_asset_ids == [book_payload["asset_id"]]
+    assert msg.bids == [{"price": "0.989", "size": "100"}]
+    assert msg.tick_size == "0.001"
+
+
+async def test_real_polymarket_price_change_payload_parses(
+    server: tuple[str, ServerState],
+) -> None:
+    """Real Polymarket ``price_change`` payload (no top-level asset_id) parses."""
+    url, state = server
+    client = MarketWebSocket(url=url, ping_interval_seconds=10.0)
+    price_change_payload = {
+        "market": "0xbb57ac1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9",
+        "timestamp": "1714000005000",
+        "event_type": "price_change",
+        "price_changes": [
+            {
+                "asset_id": "9186316000000000000000000000000000000000000000000000000000000",
+                "price": "0.51",
+                "size": "493.44",
+                "side": "SELL",
+                "hash": "0xchg1",
+                "best_bid": "0.505",
+                "best_ask": "0.508",
+            },
+            {
+                "asset_id": "9186316000000000000000000000000000000000000000000000000000099",
+                "price": "0.49",
+                "size": "121.0",
+                "side": "BUY",
+                "hash": "0xchg2",
+                "best_bid": "0.485",
+                "best_ask": "0.498",
+            },
+        ],
+    }
+    async with client:
+        msg = await _send_and_receive(client, state, price_change_payload)
+    assert isinstance(msg, WsBookMessage)
+    assert msg.event_type == "price_change"
+    assert msg.asset_id is None
+    assert msg.market == price_change_payload["market"]
+    assert msg.affected_asset_ids == [
+        "9186316000000000000000000000000000000000000000000000000000000",
+        "9186316000000000000000000000000000000000000000000000000000099",
+    ]
+
+
 async def test_reconnect_restores_subscription(
     server: tuple[str, ServerState],
     monkeypatch: pytest.MonkeyPatch,

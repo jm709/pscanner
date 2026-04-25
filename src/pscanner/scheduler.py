@@ -79,7 +79,6 @@ class SchedulerClients:
     gamma_client: GammaClient
     data_client: DataClient
     market_ws: MarketWebSocket
-    trade_ws: MarketWebSocket
 
 
 class Scanner:
@@ -136,7 +135,6 @@ class Scanner:
             gamma_client=GammaClient(http=gamma_http),
             data_client=DataClient(http=data_http),
             market_ws=MarketWebSocket(),
-            trade_ws=MarketWebSocket(),
         )
 
     def _build_collectors(self) -> dict[str, Collector]:
@@ -157,7 +155,6 @@ class Scanner:
         trades = TradeCollector(
             registry=self._watchlist_registry,
             data_client=self._clients.data_client,
-            ws=self._clients.trade_ws,
             trades_repo=self._wallet_trades_repo,
         )
         return {syncer.name: syncer, trades.name: trades}
@@ -315,9 +312,9 @@ class Scanner:
 
         ``WatchlistSyncer.sync_smart_money`` mirrors any tracked wallets the
         smart-money detector just upserted into the watchlist, so the trade
-        collector's subsequent ``refresh_subscriptions`` covers them too.
-        Errors are logged and swallowed — single-shot mode should report
-        whatever it can finish, not bail on the first transient failure.
+        collector's subsequent ``poll_all_wallets`` covers them too. Errors
+        are logged and swallowed — single-shot mode should report whatever
+        it can finish, not bail on the first transient failure.
         """
         syncer = self._collectors.get("watchlist_sync")
         if isinstance(syncer, WatchlistSyncer):
@@ -328,7 +325,7 @@ class Scanner:
         trades = self._collectors.get("trade_collector")
         if isinstance(trades, TradeCollector):
             try:
-                await trades.refresh_subscriptions()
+                await trades.poll_all_wallets()
             except Exception:
                 _LOG.exception("scanner.run_once.trade_collector.failed")
 
@@ -439,8 +436,6 @@ class Scanner:
             await self._renderer.stop()
         with contextlib.suppress(Exception):
             await self._clients.market_ws.close()
-        with contextlib.suppress(Exception):
-            await self._clients.trade_ws.close()
         if self._owns_clients:
             await self._close_owned_clients()
         with contextlib.suppress(sqlite3.Error):

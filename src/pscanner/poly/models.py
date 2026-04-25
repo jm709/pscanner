@@ -246,10 +246,52 @@ class WsTradeMessage(BaseModel):
 
 
 class WsBookMessage(BaseModel):
-    """WebSocket book/price-change event — opaque payload kept as ``data``."""
+    """WebSocket book/price-change event from the public market channel.
+
+    Polymarket's public market channel (``wss://.../ws/market``) emits two
+    distinct shapes that both flow through this model:
+
+    * ``book`` / ``last_trade_price`` events carry a top-level ``asset_id`` and
+      the full order-book snapshot fields (``bids``, ``asks``, ``tick_size``,
+      ``last_trade_price``, ``hash``).
+    * ``price_change`` / ``tick_size_change`` events carry a top-level
+      ``market`` (condition_id) and a nested ``price_changes`` list, each
+      element of which references its own ``asset_id``.
+
+    Both shapes are accepted; consumers that need the touched asset ids should
+    use :attr:`affected_asset_ids` rather than reading ``asset_id`` directly.
+    """
 
     model_config = _BASE_MODEL_CONFIG
 
     event_type: Literal["book", "price_change", "tick_size_change", "last_trade_price"]
-    asset_id: str
+    asset_id: str | None = None
+    market: str | None = None
+    timestamp: str | None = None
+    hash: str | None = None
+    bids: list[Any] | None = None
+    asks: list[Any] | None = None
+    tick_size: str | None = None
+    last_trade_price: str | None = None
+    price_changes: list[dict[str, Any]] | None = None
     data: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def affected_asset_ids(self) -> list[str]:
+        """Return the asset ids touched by this event.
+
+        For ``book`` / ``last_trade_price`` events the result is the single
+        top-level ``asset_id`` (or empty if missing). For ``price_change`` /
+        ``tick_size_change`` events the result is the union of ``asset_id``
+        values inside ``price_changes`` (empty if the array is missing).
+        """
+        if self.event_type in ("book", "last_trade_price"):
+            return [self.asset_id] if self.asset_id else []
+        if not self.price_changes:
+            return []
+        ids: list[str] = []
+        for change in self.price_changes:
+            asset_id = change.get("asset_id")
+            if isinstance(asset_id, str) and asset_id:
+                ids.append(asset_id)
+        return ids

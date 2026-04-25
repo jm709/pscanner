@@ -1,56 +1,53 @@
-"""Trade collector — DC-1 Wave B.
+"""Trade collector — DC-1 Wave B (REST-polling rewrite).
 
-Records every CONFIRMED trade by a watched wallet to ``wallet_trades``. The
-collector owns its own websocket connection (separate from the whales
-detector) to keep its subscription set focused on the watchlist's open
-positions.
+Records trades by every watched wallet to ``wallet_trades``. The public
+Polymarket WS market channel does not emit per-wallet trade events (those
+live on the authenticated ``/ws/user`` channel only), so this collector
+polls the public ``/activity`` endpoint on a fixed cadence and inserts
+``CONFIRMED`` rows by composite primary key (``transaction_hash``,
+``asset_id``, ``side``).
 
-Subscription strategy:
+Polling strategy:
 
-* On startup and every ``subscription_refresh_seconds`` thereafter, fetch the
-  current open positions for every wallet in ``WatchlistRegistry`` and
-  subscribe the websocket to the union of asset ids encountered. New asset
-  ids are sent in batches of 100 (matches the whales-detector pattern).
-* When a wallet is added to the watchlist mid-run, the ``_on_watchlist_add``
-  callback schedules an immediate (off-cycle) subscribe for that wallet's
-  positions so we never miss the very first trade after enrolment.
+* On startup, and every ``poll_interval_seconds`` thereafter, iterate every
+  watched wallet sequentially and pull a single page of ``TRADE`` events from
+  ``DataClient.get_activity``. Sequential polling respects the data API
+  per-host rate limit.
+* When a wallet is added to the watchlist mid-run, ``_on_watchlist_add``
+  schedules an immediate (off-cycle) poll for that wallet so we capture its
+  recent history without waiting for the next cycle.
 
 Persistence:
 
-* Each ``CONFIRMED`` ``WsTradeMessage`` whose ``taker_proxy`` is in the
-  registry is converted to a :class:`WalletTrade` and inserted via
-  :class:`WalletTradesRepo`. The repo's composite primary key handles dedupe.
-* Trades arriving without a ``transaction_hash`` are dropped — the dedupe key
-  relies on the hash, so persisting them would risk silent duplicates.
+* Each ``TRADE`` activity entry is converted to a :class:`WalletTrade` and
+  inserted via :class:`WalletTradesRepo`. The repo's composite primary key
+  handles dedupe across overlapping polls.
+* Entries with no ``transactionHash`` are dropped — the dedupe key relies on
+  the hash, so persisting them would risk silent duplicates.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import time
-from collections.abc import Iterator
+from typing import Any
 
 import structlog
 
 from pscanner.collectors.watchlist import WatchlistRegistry
-from pscanner.poly.clob_ws import MarketWebSocket
 from pscanner.poly.data import DataClient
-from pscanner.poly.models import WsTradeMessage
 from pscanner.store.repo import WalletTrade, WalletTradesRepo
 
 _LOG = structlog.get_logger(__name__)
-_SUBSCRIBE_BATCH_SIZE = 100
-_MAX_POSITIONS_PER_WALLET = 500
 
 
 class TradeCollector:
-    """Records every CONFIRMED trade by a watched wallet to ``wallet_trades``.
+    """Polls the public ``/activity`` endpoint for trades by watched wallets.
 
-    Owns its own :class:`MarketWebSocket` connection. Subscribes to the union
-    of asset ids across watched wallets' open positions; refreshes that
-    subscription set when the watchlist changes or every
-    ``subscription_refresh_seconds``.
+    Replaces the earlier WS-driven collector: the public market WS channel
+    never emits per-wallet trade events (those are authenticated on
+    ``/ws/user`` only), so the collector now uses REST polling against the
+    same ``wallet_trades`` schema with ``source="activity_api"``.
     """
 
     name: str = "trade_collector"
@@ -60,200 +57,220 @@ class TradeCollector:
         *,
         registry: WatchlistRegistry,
         data_client: DataClient,
-        ws: MarketWebSocket,
         trades_repo: WalletTradesRepo,
-        subscription_refresh_seconds: float = 300.0,
+        poll_interval_seconds: float = 60.0,
+        activity_page_limit: int = 200,
     ) -> None:
-        """Wire the collector to the registry, data client, websocket, and repo.
+        """Wire the collector to the registry, data client, and repo.
 
         Args:
             registry: In-memory watchlist of wallet addresses to record.
-            data_client: REST client used to fetch each wallet's open positions.
-            ws: Market websocket. The collector owns the connection lifecycle.
+            data_client: REST client used to fetch each wallet's activity feed.
             trades_repo: Append-only repo for ``wallet_trades`` rows.
-            subscription_refresh_seconds: Interval between full subscription
-                refreshes.
+            poll_interval_seconds: Cadence for full-watchlist polling cycles.
+            activity_page_limit: Per-wallet ``/activity`` page size.
         """
         self._registry = registry
         self._data_client = data_client
-        self._ws = ws
         self._trades_repo = trades_repo
-        self._subscription_refresh_seconds = subscription_refresh_seconds
-        self._subscribed_assets: set[str] = set()
-        self._pending_add_tasks: set[asyncio.Task[None]] = set()
+        self._poll_interval_seconds = poll_interval_seconds
+        self._activity_page_limit = activity_page_limit
+        self._pending_add_tasks: set[asyncio.Task[int]] = set()
 
     async def run(self, stop_event: asyncio.Event) -> None:
-        """Run the collector until ``stop_event`` is set.
+        """Run the polling loop until ``stop_event`` is set.
 
-        Connects the websocket, registers the watchlist-add callback, and
-        runs the subscription-refresh loop and message-consume loop
-        concurrently. When ``stop_event`` fires, both loops are cancelled
-        and the websocket is closed.
+        On each iteration, polls every watched wallet once, then sleeps for
+        ``poll_interval_seconds`` (or returns early if the stop event fires).
+        Per-iteration exceptions are logged and swallowed so a transient
+        upstream hiccup does not kill the loop.
 
         Args:
             stop_event: Cooperative shutdown signal set by the scheduler.
         """
-        await self._ws.connect()
         self._registry.subscribe(self._on_watchlist_add)
-        refresh_task = asyncio.create_task(self._subscription_refresh_loop(stop_event))
-        consume_task = asyncio.create_task(self._consume_loop(stop_event))
-        worker_tasks = (refresh_task, consume_task)
-        try:
-            await stop_event.wait()
-        finally:
-            for task in worker_tasks:
-                task.cancel()
-            for task in worker_tasks:
-                with _suppress_cancelled():
-                    await task
-            await self._ws.close()
-
-    async def _subscription_refresh_loop(self, stop_event: asyncio.Event) -> None:
-        """Refresh asset subscriptions for every watched wallet on a cadence."""
         while not stop_event.is_set():
             try:
-                await self.refresh_subscriptions()
+                await self.poll_all_wallets()
             except Exception:
-                _LOG.exception("trades.subscription_refresh_failed")
-            await self._sleep_until_stop(self._subscription_refresh_seconds, stop_event)
-
-    async def refresh_subscriptions(self) -> None:
-        """Pull each watched wallet's positions and subscribe to new asset ids.
-
-        Public delegating wrapper invoked by the scheduler's single-shot
-        path and by :meth:`_subscription_refresh_loop`.
-        """
-        await self._refresh_subscriptions()
-
-    async def _consume_loop(self, stop_event: asyncio.Event) -> None:
-        """Consume websocket messages and persist trades by watched wallets."""
-        async for msg in self._ws.messages():
-            if stop_event.is_set():
+                _LOG.exception("trades.poll_iteration_failed")
+            if await self._wait_or_stop(stop_event, self._poll_interval_seconds):
                 return
-            if not isinstance(msg, WsTradeMessage):
-                continue
-            if msg.taker_proxy not in self._registry:
-                continue
-            try:
-                self._record_trade(msg)
-            except Exception:
-                _LOG.exception(
-                    "trades.record_failed",
-                    wallet=msg.taker_proxy,
-                    tx_hash=msg.transaction_hash,
-                )
 
-    async def _refresh_subscriptions(self) -> None:
-        """Pull each watched wallet's positions and subscribe to new asset ids."""
-        watched = self._registry.addresses()
-        new_ids: set[str] = set()
+    async def poll_all_wallets(self) -> int:
+        """Poll every watched wallet once; return total new rows inserted.
+
+        Sequential per-wallet to respect rate limits. Per-wallet exceptions
+        are caught inside :meth:`_poll_wallet`, so a single failing wallet
+        cannot break the broader cycle.
+
+        Returns:
+            Total number of newly-inserted ``wallet_trades`` rows across
+            every watched wallet.
+        """
+        watched = sorted(self._registry.addresses())
+        total = 0
         for wallet in watched:
-            asset_ids = await self._fetch_wallet_assets(wallet)
-            new_ids.update(asset_ids)
-        await self._subscribe_new(new_ids)
+            total += await self._poll_wallet(wallet)
         _LOG.info(
-            "trades.subscriptions.refreshed",
+            "trades.poll.completed",
             watched_wallets=len(watched),
-            assets=len(self._subscribed_assets),
+            inserted=total,
         )
+        return total
 
-    async def _fetch_wallet_assets(self, wallet: str) -> list[str]:
-        """Return the asset ids of a wallet's currently-open positions.
+    async def _poll_wallet(self, address: str) -> int:
+        """Poll one wallet's ``/activity`` feed and persist new TRADE rows.
 
-        Applies the ``_MAX_POSITIONS_PER_WALLET`` sanity cap so a single huge
-        wallet cannot blow through the websocket subscription budget.
+        Args:
+            address: 0x-prefixed proxy wallet to poll.
+
+        Returns:
+            Number of newly-inserted rows for this wallet (0 on error).
         """
         try:
-            positions = await self._data_client.get_positions(wallet)
-        except Exception:
-            _LOG.exception("trades.get_positions_failed", wallet=wallet)
-            return []
-        if len(positions) > _MAX_POSITIONS_PER_WALLET:
-            _LOG.warning(
-                "trades.positions.capped",
-                wallet=wallet,
-                seen=len(positions),
-                cap=_MAX_POSITIONS_PER_WALLET,
+            events = await self._data_client.get_activity(
+                address,
+                type="TRADE",
+                limit=self._activity_page_limit,
             )
-            positions = positions[:_MAX_POSITIONS_PER_WALLET]
-        return [position.asset for position in positions]
-
-    async def _subscribe_new(self, asset_ids: set[str]) -> None:
-        """Subscribe to ``asset_ids`` not yet in ``_subscribed_assets`` in batches."""
-        new_ids = sorted(asset_ids - self._subscribed_assets)
-        if not new_ids:
-            return
-        for start in range(0, len(new_ids), _SUBSCRIBE_BATCH_SIZE):
-            batch = new_ids[start : start + _SUBSCRIBE_BATCH_SIZE]
-            await self._ws.subscribe(batch)
-        self._subscribed_assets.update(new_ids)
+        except Exception:
+            _LOG.exception("trades.get_activity_failed", wallet=address)
+            return 0
+        inserted = 0
+        for event in events:
+            trade = _build_trade_from_activity(event, wallet=address)
+            if trade is None:
+                continue
+            try:
+                if self._trades_repo.insert(trade):
+                    inserted += 1
+            except Exception:
+                _LOG.exception(
+                    "trades.insert_failed",
+                    wallet=address,
+                    tx_hash=trade.transaction_hash,
+                )
+        return inserted
 
     def _on_watchlist_add(self, address: str) -> None:
-        """Schedule an immediate subscribe for ``address``'s positions.
+        """Schedule an immediate poll for ``address`` when it joins the watchlist.
 
         Called from inside :meth:`WatchlistRegistry.add`, so this must be
         non-blocking. We spawn a task and keep a strong reference to it so
         it isn't garbage-collected before completion.
         """
-        task = asyncio.create_task(self._subscribe_for_new_wallet(address))
+        try:
+            task = asyncio.create_task(self._poll_wallet(address))
+        except RuntimeError:
+            # No running event loop — caller is in a sync context where we
+            # cannot schedule the poll. The next periodic cycle will pick
+            # this wallet up.
+            _LOG.debug("trades.on_watchlist_add.no_loop", wallet=address)
+            return
         self._pending_add_tasks.add(task)
         task.add_done_callback(self._pending_add_tasks.discard)
 
-    async def _subscribe_for_new_wallet(self, address: str) -> None:
-        """Fetch ``address``'s open positions and subscribe to their assets."""
-        try:
-            asset_ids = await self._fetch_wallet_assets(address)
-            await self._subscribe_new(set(asset_ids))
-        except Exception:
-            _LOG.exception("trades.subscribe_for_new_wallet_failed", wallet=address)
-
-    def _record_trade(self, msg: WsTradeMessage) -> None:
-        """Persist a single ``CONFIRMED`` trade message via the repo."""
-        tx_hash = msg.transaction_hash or ""
-        if not tx_hash:
-            _LOG.warning(
-                "trades.skip_missing_tx_hash",
-                wallet=msg.taker_proxy,
-                asset_id=msg.asset_id,
-            )
-            return
-        trade = WalletTrade(
-            transaction_hash=tx_hash,
-            asset_id=msg.asset_id,
-            side=msg.side,
-            wallet=msg.taker_proxy,
-            condition_id=msg.condition_id,
-            size=msg.size,
-            price=msg.price,
-            usd_value=msg.size * msg.price,
-            status=msg.status,
-            source="ws",
-            timestamp=msg.timestamp,
-            recorded_at=int(time.time()),
-        )
-        inserted = self._trades_repo.insert(trade)
-        if not inserted:
-            _LOG.debug(
-                "trades.duplicate",
-                wallet=msg.taker_proxy,
-                tx_hash=tx_hash,
-                asset_id=msg.asset_id,
-                side=msg.side,
-            )
-
     @staticmethod
-    async def _sleep_until_stop(seconds: float, stop_event: asyncio.Event) -> None:
-        """Sleep ``seconds`` or until ``stop_event`` is set, whichever first."""
+    async def _wait_or_stop(stop_event: asyncio.Event, seconds: float) -> bool:
+        """Wait up to ``seconds`` for the stop event.
+
+        Returns:
+            ``True`` if the stop event was set during the wait, ``False`` if
+            the timeout elapsed first.
+        """
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=seconds)
         except TimeoutError:
-            return
+            return False
+        return True
 
 
-@contextlib.contextmanager
-def _suppress_cancelled() -> Iterator[None]:
-    """Swallow ``asyncio.CancelledError`` while joining a cancelled worker task."""
-    try:
-        yield
-    except asyncio.CancelledError:
-        return
+def _build_trade_from_activity(
+    event: dict[str, Any],
+    *,
+    wallet: str,
+) -> WalletTrade | None:
+    """Convert one ``/activity`` JSON event to a :class:`WalletTrade`.
+
+    The public activity API returns heterogeneous shapes (TRADE, REWARD,
+    SPLIT, MERGE, ...). This builder accepts only ``type == "TRADE"`` rows
+    that carry a non-empty transaction hash; everything else is dropped.
+
+    Args:
+        event: A single decoded JSON dict from ``DataClient.get_activity``.
+        wallet: The address we polled (canonical wallet for this row).
+
+    Returns:
+        A populated ``WalletTrade``, or ``None`` if the row is not a usable
+        TRADE event.
+    """
+    if event.get("type") != "TRADE":
+        return None
+    tx_hash = _coerce_str(event.get("transactionHash") or event.get("tx_hash"))
+    if not tx_hash:
+        return None
+    asset_id = _coerce_str(event.get("asset"))
+    side = _coerce_str(event.get("side")).upper()
+    condition_id = _coerce_str(event.get("conditionId"))
+    size = _coerce_float(event.get("size"))
+    price = _coerce_float(event.get("price"))
+    if size is None or price is None:
+        return None
+    usd_value = _coerce_float(event.get("usdcSize"))
+    if usd_value is None:
+        usd_value = size * price
+    timestamp = _coerce_int(event.get("timestamp")) or 0
+    return WalletTrade(
+        transaction_hash=tx_hash,
+        asset_id=asset_id,
+        side=side,
+        wallet=wallet,
+        condition_id=condition_id,
+        size=size,
+        price=price,
+        usd_value=usd_value,
+        status="CONFIRMED",
+        source="activity_api",
+        timestamp=timestamp,
+        recorded_at=int(time.time()),
+    )
+
+
+def _coerce_str(value: Any) -> str:
+    """Return ``value`` as a stripped string, or ``""`` if missing."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _coerce_float(value: Any) -> float | None:
+    """Return ``value`` as a float, or ``None`` if missing/unparseable."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _coerce_int(value: Any) -> int | None:
+    """Return ``value`` as an int, or ``None`` if missing/unparseable."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(float(value))
+        except ValueError:
+            return None
+    return None
