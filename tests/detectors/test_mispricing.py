@@ -47,17 +47,19 @@ def _event(
     title: str = "Event",
     liquidity: float | None = 50000.0,
     markets: Iterable[Market] | None = None,
+    tags: list[str] | None = None,
 ) -> Event:
-    """Build a synthetic Event with the provided markets."""
-    return Event.model_validate(
-        {
-            "id": event_id,
-            "title": title,
-            "slug": f"slug-{event_id}",
-            "liquidity": liquidity,
-            "markets": [m.model_dump(by_alias=True) for m in (markets or [])],
-        }
-    )
+    """Build a synthetic Event with the provided markets and optional tags."""
+    payload: dict[str, Any] = {
+        "id": event_id,
+        "title": title,
+        "slug": f"slug-{event_id}",
+        "liquidity": liquidity,
+        "markets": [m.model_dump(by_alias=True) for m in (markets or [])],
+    }
+    if tags is not None:
+        payload["tags"] = tags
+    return Event.model_validate(payload)
 
 
 def _async_iter(events: Iterable[Event]) -> AsyncIterator[Event]:
@@ -477,6 +479,165 @@ async def test_run_logs_and_continues_on_scan_exception(
         await detector.run(sink)
 
     assert len(calls) >= 2
+
+
+async def test_event_tagged_sports_is_skipped() -> None:
+    """Sports-tagged events skip even with arbitrary mutex-looking titles."""
+    markets = [
+        _market(market_id="m1", yes_price=0.5, group_item_title="Team A"),
+        _market(market_id="m2", yes_price=0.4, group_item_title="Team B"),
+        _market(market_id="m3", yes_price=0.2, group_item_title="Team C"),
+    ]
+    event = _event(markets=markets, tags=["Sports"])
+    detector, _ = _make_detector([event])
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert captured == []
+
+
+async def test_event_tagged_esports_is_skipped() -> None:
+    """Esports-tagged events are also skipped."""
+    markets = [
+        _market(market_id="m1", yes_price=0.5, group_item_title="Team Liquid"),
+        _market(market_id="m2", yes_price=0.4, group_item_title="Team Falcons"),
+    ]
+    event = _event(markets=markets, tags=["Esports", "Dota 2"])
+    detector, _ = _make_detector([event])
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert captured == []
+
+
+async def test_event_with_non_excluded_tags_remains_eligible() -> None:
+    """Events tagged with non-excluded labels still alert when mispriced."""
+    markets = [
+        _market(market_id="m1", yes_price=0.5, group_item_title="Trump"),
+        _market(market_id="m2", yes_price=0.4, group_item_title="Harris"),
+        _market(market_id="m3", yes_price=0.2, group_item_title="Other"),
+    ]
+    event = _event(markets=markets, tags=["Politics", "Election"])
+    detector, _ = _make_detector([event])
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert len(captured) == 1
+    assert captured[0].body["price_sum"] == pytest.approx(1.1)
+
+
+async def test_event_tag_match_is_case_insensitive() -> None:
+    """Lowercase ``sports`` still matches the excluded ``Sports`` tag."""
+    markets = [
+        _market(market_id="m1", yes_price=0.5, group_item_title="Team A"),
+        _market(market_id="m2", yes_price=0.4, group_item_title="Team B"),
+    ]
+    event = _event(markets=markets, tags=["sports"])
+    detector, _ = _make_detector([event])
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert captured == []
+
+
+async def test_event_with_no_tags_field_unchanged() -> None:
+    """Events without a tags field behave exactly as before."""
+    markets = [
+        _market(market_id="m1", yes_price=0.5, group_item_title="Trump"),
+        _market(market_id="m2", yes_price=0.4, group_item_title="Harris"),
+        _market(market_id="m3", yes_price=0.2, group_item_title="Other"),
+    ]
+    event = _event(markets=markets)
+    assert event.tags == []
+    detector, _ = _make_detector([event])
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert len(captured) == 1
+    assert captured[0].body["price_sum"] == pytest.approx(1.1)
+
+
+async def test_above_dollar_threshold_buckets_are_skipped() -> None:
+    """``Above $300M`` / ``Above $500M`` / ``Above $1B`` is a pure threshold layout."""
+    markets = [
+        _market(market_id="m1", yes_price=0.5, group_item_title="Above $300M"),
+        _market(market_id="m2", yes_price=0.4, group_item_title="Above $500M"),
+        _market(market_id="m3", yes_price=0.2, group_item_title="Above $1B"),
+    ]
+    event = _event(markets=markets)
+    detector, _ = _make_detector([event])
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert captured == []
+
+
+async def test_below_numeric_buckets_are_skipped() -> None:
+    """``Below 100`` / ``Below 200`` / ``Below 500`` is a pure threshold layout."""
+    markets = [
+        _market(market_id="m1", yes_price=0.5, group_item_title="Below 100"),
+        _market(market_id="m2", yes_price=0.4, group_item_title="Below 200"),
+        _market(market_id="m3", yes_price=0.2, group_item_title="Below 500"),
+    ]
+    event = _event(markets=markets)
+    detector, _ = _make_detector([event])
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert captured == []
+
+
+async def test_at_least_at_most_buckets_are_skipped() -> None:
+    """``At least 5`` / ``At most 10`` are recognised as range keywords."""
+    markets = [
+        _market(market_id="m1", yes_price=0.7, group_item_title="At least 5"),
+        _market(market_id="m2", yes_price=0.5, group_item_title="At most 10"),
+    ]
+    event = _event(markets=markets)
+    detector, _ = _make_detector([event])
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert captured == []
+
+
+async def test_unicode_inequality_buckets_are_skipped() -> None:
+    """``≥ 10`` and ``<= 5`` are recognised as range keywords."""
+    markets = [
+        _market(market_id="m1", yes_price=0.7, group_item_title="≥ 10"),
+        _market(market_id="m2", yes_price=0.5, group_item_title="<= 5"),
+    ]
+    event = _event(markets=markets)
+    detector, _ = _make_detector([event])
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert captured == []
+
+
+async def test_mixed_above_dollar_and_other_alerts() -> None:
+    """``Above $300M`` mixed with ``Other`` is not a pure range — eligible."""
+    markets = [
+        _market(market_id="m1", yes_price=0.6, group_item_title="Above $300M"),
+        _market(market_id="m2", yes_price=0.6, group_item_title="Other"),
+    ]
+    event = _event(markets=markets)
+    detector, _ = _make_detector([event])
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert len(captured) == 1
+    assert captured[0].body["price_sum"] == pytest.approx(1.2)
 
 
 class _StopLoop(BaseException):

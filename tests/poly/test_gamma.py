@@ -61,6 +61,28 @@ async def test_list_events_parses_fixture_and_calls_correct_path() -> None:
     )
 
 
+async def test_list_events_extracts_tag_labels_from_dict_payload() -> None:
+    """Gamma returns ``tags`` as a list of dicts; the model extracts ``label``."""
+    payload = {
+        "id": "42",
+        "title": "Tagged event",
+        "slug": "tagged-event",
+        "markets": [],
+        "tags": [
+            {"id": "1", "label": "Sports", "slug": "sports"},
+            {"id": "2", "label": "Esports", "slug": "esports"},
+            {"id": "3", "slug": "no-label"},
+        ],
+    }
+    http = _mock_http_returning([payload])
+    client = GammaClient(http=http)
+
+    events = await client.list_events()
+
+    assert len(events) == 1
+    assert events[0].tags == ["Sports", "Esports"]
+
+
 async def test_list_events_passes_filter_params() -> None:
     http = _mock_http_returning([])
     client = GammaClient(http=http)

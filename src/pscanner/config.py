@@ -51,6 +51,7 @@ class MispricingConfig(_Section):
     scan_interval_seconds: int = 300
     sum_deviation_threshold: float = 0.03
     min_event_liquidity_usd: float = 10000.0
+    excluded_tags: tuple[str, ...] = ("Sports", "Esports")
 
 
 class WhalesConfig(_Section):
