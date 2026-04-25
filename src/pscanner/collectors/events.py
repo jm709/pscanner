@@ -9,9 +9,15 @@ full sweep can be reconstructed as a point-in-time view.
 from __future__ import annotations
 
 import asyncio
+import time
+
+import structlog
 
 from pscanner.poly.gamma import GammaClient
-from pscanner.store.repo import EventSnapshotsRepo
+from pscanner.poly.models import Event
+from pscanner.store.repo import EventSnapshot, EventSnapshotsRepo
+
+_LOG = structlog.get_logger(__name__)
 
 
 class EventCollector:
@@ -33,7 +39,7 @@ class EventCollector:
         snapshot_interval_seconds: float = 900.0,
         snapshot_max: int = 2000,
     ) -> None:
-        """Build the collector. Wave 2 fills in the body.
+        """Build the collector.
 
         Args:
             gamma_client: Gamma REST client for ``/events`` queries.
@@ -49,15 +55,89 @@ class EventCollector:
     async def run(self, stop_event: asyncio.Event) -> None:
         """Loop: snapshot all active events every interval until stopped.
 
+        Per-iteration exceptions from :meth:`snapshot_all_events` are logged
+        and swallowed so a transient upstream hiccup does not kill the loop.
+
         Args:
             stop_event: Cooperative shutdown signal set by the scheduler.
         """
-        raise NotImplementedError("DC-3 Wave 2: events")
+        while not stop_event.is_set():
+            try:
+                await self.snapshot_all_events()
+            except Exception:
+                _LOG.exception("events.snapshot_iteration_failed")
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=self._interval)
+            except TimeoutError:
+                continue
+            return
 
     async def snapshot_all_events(self) -> int:
-        """Snapshot every active event once.
+        """Snapshot every active event once, bounded by ``snapshot_max``.
+
+        Iterates ``gamma.iter_events(active=True, closed=False)``, builds an
+        :class:`EventSnapshot` per row using a shared ``snapshot_at``, and
+        inserts via the repo. Per-row insert failures are logged and skipped
+        so a single broken row cannot break the sweep.
 
         Returns:
             Number of newly-inserted snapshot rows for this sweep.
         """
-        raise NotImplementedError("DC-3 Wave 2: events")
+        snapshot_at = int(time.time())
+        inserted = 0
+        async for event in self._gamma.iter_events(active=True, closed=False):
+            if inserted >= self._max:
+                break
+            if not event.id:
+                continue
+            snapshot = _build_snapshot(event, snapshot_at=snapshot_at)
+            if self._try_insert(snapshot):
+                inserted += 1
+        _LOG.info(
+            "events.snapshot_complete",
+            inserted=inserted,
+            snapshot_at=snapshot_at,
+        )
+        return inserted
+
+    def _try_insert(self, snapshot: EventSnapshot) -> bool:
+        """Insert one snapshot, swallowing per-row exceptions.
+
+        Args:
+            snapshot: Snapshot row to persist.
+
+        Returns:
+            ``True`` iff the repo reports the row was newly inserted.
+        """
+        try:
+            return self._repo.insert(snapshot)
+        except Exception:
+            _LOG.exception(
+                "events.insert_failed",
+                event_id=snapshot.event_id,
+                snapshot_at=snapshot.snapshot_at,
+            )
+            return False
+
+
+def _build_snapshot(event: Event, *, snapshot_at: int) -> EventSnapshot:
+    """Project a gamma ``Event`` into an :class:`EventSnapshot`.
+
+    Args:
+        event: Validated gamma event model.
+        snapshot_at: Shared sweep timestamp (unix seconds).
+
+    Returns:
+        A populated ``EventSnapshot`` ready for insertion.
+    """
+    return EventSnapshot(
+        event_id=event.id,
+        title=event.title or "",
+        slug=event.slug or "",
+        liquidity_usd=event.liquidity,
+        volume_usd=event.volume,
+        active=bool(event.active),
+        closed=bool(event.closed),
+        market_count=len(event.markets or []),
+        snapshot_at=snapshot_at,
+    )
