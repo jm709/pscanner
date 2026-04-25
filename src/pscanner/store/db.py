@@ -96,11 +96,35 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     "ON wallet_trades(condition_id, timestamp DESC)",
 )
 
+_MIGRATIONS: tuple[str, ...] = (
+    "ALTER TABLE tracked_wallets ADD COLUMN mean_edge REAL",
+    "ALTER TABLE tracked_wallets ADD COLUMN weighted_edge REAL",
+    "ALTER TABLE tracked_wallets ADD COLUMN excess_pnl_usd REAL",
+    "ALTER TABLE tracked_wallets ADD COLUMN total_stake_usd REAL",
+)
+
 _PRAGMAS: tuple[str, ...] = (
     "PRAGMA journal_mode=WAL",
     "PRAGMA synchronous=NORMAL",
     "PRAGMA foreign_keys=ON",
 )
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """Apply additive ALTER TABLE migrations. Idempotent.
+
+    SQLite has no IF NOT EXISTS for ADD COLUMN, so each migration is wrapped
+    in a try/except that swallows the "duplicate column name" OperationalError.
+    Other DatabaseErrors propagate.
+    """
+    for stmt in _MIGRATIONS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" in str(exc).lower():
+                continue
+            raise
+    conn.commit()
 
 
 def init_db(path: Path) -> sqlite3.Connection:
@@ -131,6 +155,7 @@ def init_db(path: Path) -> sqlite3.Connection:
         with conn:
             for statement in _SCHEMA_STATEMENTS:
                 conn.execute(statement)
+        _apply_migrations(conn)
     except sqlite3.DatabaseError:
         conn.close()
         raise

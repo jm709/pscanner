@@ -95,7 +95,8 @@ def test_config_load_defaults_when_absent(tmp_path, monkeypatch) -> None:
     assert isinstance(cfg.mispricing, MispricingConfig)
     assert isinstance(cfg.whales, WhalesConfig)
     assert isinstance(cfg.ratelimit, RatelimitConfig)
-    assert cfg.smart_money.min_winrate == 0.65
+    assert cfg.smart_money.min_edge == 0.05
+    assert cfg.smart_money.min_excess_pnl_usd == 1000.0
     assert cfg.mispricing.sum_deviation_threshold == 0.03
     assert cfg.whales.big_bet_min_usd == 2000.0
     assert cfg.ratelimit.gamma_rpm == 50
@@ -109,12 +110,12 @@ def test_config_load_from_explicit_path(tmp_path) -> None:
         log_level = "DEBUG"
 
         [smart_money]
-        min_winrate = 0.8
+        min_edge = 0.10
         """
     )
     cfg = Config.load(cfg_file)
     assert cfg.scanner.log_level == "DEBUG"
-    assert cfg.smart_money.min_winrate == 0.8
+    assert cfg.smart_money.min_edge == 0.10
 
 
 def test_init_db_creates_all_tables(tmp_db: sqlite3.Connection) -> None:

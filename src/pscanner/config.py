@@ -37,7 +37,8 @@ class SmartMoneyConfig(_Section):
     enabled: bool = True
     leaderboard_top_n: int = 200
     min_resolved_positions: int = 20
-    min_winrate: float = 0.65
+    min_edge: float = 0.05
+    min_excess_pnl_usd: float = 1000.0
     refresh_interval_seconds: int = 3600
     position_poll_interval_seconds: int = 300
     new_position_min_usd: float = 1000.0

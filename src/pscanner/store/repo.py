@@ -30,6 +30,10 @@ class TrackedWallet:
     winrate: float
     leaderboard_pnl: float | None
     last_refreshed_at: int
+    mean_edge: float | None = None
+    weighted_edge: float | None = None
+    excess_pnl_usd: float | None = None
+    total_stake_usd: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,11 +91,16 @@ class TrackedWalletsRepo:
 
     def upsert(
         self,
+        *,
         address: str,
         closed_position_count: int,
         closed_position_wins: int,
         winrate: float,
-        leaderboard_pnl: float | None,
+        leaderboard_pnl: float | None = None,
+        mean_edge: float | None = None,
+        weighted_edge: float | None = None,
+        excess_pnl_usd: float | None = None,
+        total_stake_usd: float | None = None,
     ) -> None:
         """Insert or update a tracked wallet, refreshing ``last_refreshed_at``.
 
@@ -101,20 +110,30 @@ class TrackedWalletsRepo:
             closed_position_wins: Resolved positions with PnL > 0.
             winrate: ``wins / count`` precomputed by the caller.
             leaderboard_pnl: All-time PnL from the leaderboard (may be ``None``).
+            mean_edge: Average per-position edge ``(outcome - avg_price)``.
+            weighted_edge: Stake-USD-weighted mean edge.
+            excess_pnl_usd: Realized PnL summed across resolved positions
+                (the wallet's dollar alpha versus market-rate expected PnL).
+            total_stake_usd: Sum of ``size * avg_price`` over scored positions.
         """
         now = _now_seconds()
         self._conn.execute(
             """
             INSERT INTO tracked_wallets (
               address, closed_position_count, closed_position_wins,
-              winrate, leaderboard_pnl, last_refreshed_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+              winrate, leaderboard_pnl, last_refreshed_at,
+              mean_edge, weighted_edge, excess_pnl_usd, total_stake_usd
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(address) DO UPDATE SET
               closed_position_count = excluded.closed_position_count,
               closed_position_wins = excluded.closed_position_wins,
               winrate = excluded.winrate,
               leaderboard_pnl = excluded.leaderboard_pnl,
-              last_refreshed_at = excluded.last_refreshed_at
+              last_refreshed_at = excluded.last_refreshed_at,
+              mean_edge = excluded.mean_edge,
+              weighted_edge = excluded.weighted_edge,
+              excess_pnl_usd = excluded.excess_pnl_usd,
+              total_stake_usd = excluded.total_stake_usd
             """,
             (
                 address,
@@ -123,29 +142,50 @@ class TrackedWalletsRepo:
                 winrate,
                 leaderboard_pnl,
                 now,
+                mean_edge,
+                weighted_edge,
+                excess_pnl_usd,
+                total_stake_usd,
             ),
         )
         self._conn.commit()
 
-    def list_active(self, min_winrate: float, min_resolved: int) -> list[TrackedWallet]:
+    def list_active(
+        self,
+        *,
+        min_edge: float,
+        min_excess_pnl_usd: float,
+        min_resolved: int,
+    ) -> list[TrackedWallet]:
         """Return wallets meeting the smart-money quality bar.
 
         Args:
-            min_winrate: Inclusive winrate threshold.
+            min_edge: Inclusive minimum ``mean_edge`` threshold. Wallets with
+                a NULL ``mean_edge`` are excluded.
+            min_excess_pnl_usd: Inclusive minimum ``excess_pnl_usd`` threshold.
+                Wallets with a NULL ``excess_pnl_usd`` are excluded.
             min_resolved: Inclusive minimum closed-position count.
 
         Returns:
-            Wallets passing both filters, ordered by winrate desc.
+            Wallets passing all filters, ordered by ``excess_pnl_usd`` desc.
         """
         rows = self._conn.execute(
             """
             SELECT address, closed_position_count, closed_position_wins,
-                   winrate, leaderboard_pnl, last_refreshed_at
+                   winrate, leaderboard_pnl, last_refreshed_at,
+                   mean_edge, weighted_edge, excess_pnl_usd, total_stake_usd
               FROM tracked_wallets
-             WHERE winrate >= ? AND closed_position_count >= ?
-             ORDER BY winrate DESC
+             WHERE closed_position_count >= :min_resolved
+               AND mean_edge IS NOT NULL AND mean_edge >= :min_edge
+               AND excess_pnl_usd IS NOT NULL
+               AND excess_pnl_usd >= :min_excess_pnl_usd
+             ORDER BY excess_pnl_usd DESC
             """,
-            (min_winrate, min_resolved),
+            {
+                "min_resolved": min_resolved,
+                "min_edge": min_edge,
+                "min_excess_pnl_usd": min_excess_pnl_usd,
+            },
         ).fetchall()
         return [_row_to_tracked_wallet(row) for row in rows]
 
@@ -154,7 +194,8 @@ class TrackedWalletsRepo:
         rows = self._conn.execute(
             """
             SELECT address, closed_position_count, closed_position_wins,
-                   winrate, leaderboard_pnl, last_refreshed_at
+                   winrate, leaderboard_pnl, last_refreshed_at,
+                   mean_edge, weighted_edge, excess_pnl_usd, total_stake_usd
               FROM tracked_wallets
              ORDER BY winrate DESC
             """,
@@ -171,6 +212,10 @@ def _row_to_tracked_wallet(row: sqlite3.Row) -> TrackedWallet:
         winrate=row["winrate"],
         leaderboard_pnl=row["leaderboard_pnl"],
         last_refreshed_at=row["last_refreshed_at"],
+        mean_edge=row["mean_edge"],
+        weighted_edge=row["weighted_edge"],
+        excess_pnl_usd=row["excess_pnl_usd"],
+        total_stake_usd=row["total_stake_usd"],
     )
 
 
