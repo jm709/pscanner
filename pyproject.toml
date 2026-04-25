@@ -1,0 +1,108 @@
+[project]
+name = "pscanner"
+version = "0.1.0"
+description = "Polymarket scanner: smart-money, mispricing, and whale signal daemon."
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+authors = [{ name = "pscanner authors" }]
+dependencies = [
+    "httpx==0.28.1",
+    "websockets==16.0",
+    "pydantic==2.13.3",
+    "tenacity==9.1.4",
+    "rich==15.0.0",
+    "structlog==25.5.0",
+]
+
+[project.scripts]
+pscanner = "pscanner.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.10,<0.11"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "pscanner"
+module-root = "src"
+
+[dependency-groups]
+dev = [{ include-group = "lint" }, { include-group = "test" }]
+lint = ["ruff==0.15.12", "ty==0.0.32"]
+test = ["pytest==9.0.3", "pytest-asyncio==1.3.0", "respx==0.23.1"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "B",     # flake8-bugbear
+    "C90",   # mccabe complexity
+    "N",     # pep8-naming
+    "UP",    # pyupgrade
+    "ASYNC", # flake8-async
+    "S",     # bandit
+    "A",     # flake8-builtins
+    "C4",    # flake8-comprehensions
+    "DTZ",   # flake8-datetimez
+    "T10",   # flake8-debugger
+    "T20",   # flake8-print
+    "PT",    # flake8-pytest-style
+    "RET",   # flake8-return
+    "SIM",   # flake8-simplify
+    "TID",   # flake8-tidy-imports
+    "PTH",   # flake8-use-pathlib
+    "ERA",   # eradicate (commented-out code)
+    "PL",    # pylint
+    "RUF",   # ruff-specific rules
+    "D",     # pydocstyle
+]
+ignore = [
+    "D203",   # incompatible with D211
+    "D212",   # incompatible with D213
+    "PLR0913", # we already cap positional params separately
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "S101",  # asserts in tests are fine
+    "D",     # don't require docstrings on test fns
+    "PLR2004", # magic numbers in test assertions are fine
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 8
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+docstring-code-format = true
+
+[tool.ty.environment]
+python-version = "3.13"
+
+[tool.ty.terminal]
+error-on-warning = true
+
+[tool.ty.rules]
+unused-ignore-comment = "warn"
+possibly-unresolved-reference = "error"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+filterwarnings = ["error"]

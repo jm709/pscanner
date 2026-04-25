@@ -1,0 +1,52 @@
+[
+  {
+    "proxyWallet": "0x56687bf447db6ffa42ffe2204a05edaa20f55839",
+    "amount": 22053933.752321757,
+    "pseudonym": "Theo4",
+    "name": "Theo4",
+    "bio": "",
+    "profileImage": "",
+    "profileImageOptimized": "",
+    "period": "all"
+  },
+  {
+    "proxyWallet": "0x1f2dd6d473f3e824cd2f8a89d9c69fb96f6ad0cf",
+    "amount": 16619506.631730152,
+    "pseudonym": "Fredi9999",
+    "name": "Fredi9999",
+    "bio": "",
+    "profileImage": "",
+    "profileImageOptimized": "",
+    "period": "all"
+  },
+  {
+    "proxyWallet": "0x6a72f61820b26b1fe4d956e17b6dc2a1ea3033ee",
+    "amount": 11972622.46630393,
+    "pseudonym": "kch123",
+    "name": "kch123",
+    "bio": "",
+    "profileImage": "",
+    "profileImageOptimized": "",
+    "period": "all"
+  },
+  {
+    "proxyWallet": "0x78b9ac44a6d7d7a076c14e0ad518b301b63c6b76",
+    "amount": 8709972.988069998,
+    "pseudonym": "Len9311238",
+    "name": "Len9311238",
+    "bio": "",
+    "profileImage": "",
+    "profileImageOptimized": "",
+    "period": "all"
+  },
+  {
+    "proxyWallet": "0xd235973291b2b75ff4070e9c0b01728c520b0f29",
+    "amount": 7807265.589240883,
+    "pseudonym": "zxgngl",
+    "name": "zxgngl",
+    "bio": "",
+    "profileImage": "",
+    "profileImageOptimized": "",
+    "period": "all"
+  }
+]

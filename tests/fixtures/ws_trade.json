@@ -1,0 +1,12 @@
+{
+  "event_type": "trade",
+  "condition_id": "0x9c1a953fe92c8357f1b646ba25d983aa83e90c525992db14fb726fa895cb5763",
+  "asset_id": "8501497159083948713316135768103773293754490207922884688769443031624417212426",
+  "side": "BUY",
+  "size": 250.0,
+  "price": 0.42,
+  "taker_proxy": "0x6a72f61820b26b1fe4d956e17b6dc2a1ea3033ee",
+  "status": "CONFIRMED",
+  "transaction_hash": "0x9d7f2b1e8c4a6f0d3b5a7c8e1f2d4b6a9c0e3f5d7b1a9c2e4f6d8b0a3c5e7f9d",
+  "timestamp": 1745539200
+}
