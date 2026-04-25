@@ -1,29 +1,37 @@
 """Position-snapshot collector — append-only history of watched-wallet positions.
 
-Wave 1 contract; Wave 2 fills in the implementation. The collector is wired
-into the scheduler so the orchestration plumbing — config flag, repo, run
-loop registration, and ``run_once`` invocation — can be exercised before the
-real polling logic lands. Construction succeeds and stores the dependencies;
-the async methods raise :class:`NotImplementedError` until Wave 2 lands.
+Records every watched wallet's open positions to ``wallet_positions_history``
+on a fixed cadence. Each cycle stamps a single ``snapshot_at`` timestamp so
+all rows from one poll share a clock and can be reconstructed as the wallet's
+position vector at that instant. The repo deduplicates on
+``(wallet, condition_id, outcome, snapshot_at)``, so two cycles in the same
+second collapse to one row — that is the intended idempotency behaviour.
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
+
+import structlog
 
 from pscanner.collectors.watchlist import WatchlistRegistry
 from pscanner.poly.data import DataClient
-from pscanner.store.repo import WalletPositionsHistoryRepo
+from pscanner.poly.models import Position
+from pscanner.store.repo import WalletPositionsHistoryRepo, WalletPositionsHistoryRow
+
+_LOG = structlog.get_logger(__name__)
 
 
 class PositionCollector:
     """Periodically snapshots every watched wallet's open positions.
 
-    Wave 2 will fetch ``data_client.get_positions(...)`` for each address in
-    the registry on a fixed cadence and append every row to
-    :class:`WalletPositionsHistoryRepo`. The composite primary key on
-    ``(wallet, condition_id, outcome, snapshot_at)`` provides idempotency for
-    overlapping polls.
+    Iterates :meth:`WatchlistRegistry.addresses` each cycle, calls
+    :meth:`DataClient.get_positions` for every address sequentially (rate-
+    limit safety), and appends rows to :class:`WalletPositionsHistoryRepo`.
+    Per-wallet exceptions are caught so a single bad poll does not break the
+    cycle, and per-iteration exceptions are caught so a transient hiccup does
+    not kill the loop.
     """
 
     name: str = "position_collector"
@@ -50,13 +58,127 @@ class PositionCollector:
         self._snapshot_interval_seconds = snapshot_interval_seconds
 
     async def run(self, stop_event: asyncio.Event) -> None:
-        """Loop: snapshot all wallets every interval until ``stop_event`` is set."""
-        raise NotImplementedError("DC-2 Wave 2: positions")
+        """Run the snapshot loop until ``stop_event`` is set.
+
+        On each iteration calls :meth:`snapshot_all_wallets`, then waits up to
+        ``snapshot_interval_seconds`` for the stop event. Per-iteration
+        exceptions are logged and swallowed so a transient upstream hiccup
+        does not kill the loop.
+
+        Args:
+            stop_event: Cooperative shutdown signal set by the scheduler.
+        """
+        while not stop_event.is_set():
+            try:
+                await self.snapshot_all_wallets()
+            except Exception:
+                _LOG.exception("positions.snapshot_iteration_failed")
+            if await self._wait_or_stop(stop_event, self._snapshot_interval_seconds):
+                return
 
     async def snapshot_all_wallets(self) -> int:
         """Snapshot every watched wallet once.
 
+        The watchlist is captured at the start of the cycle so a concurrent
+        change does not affect this iteration. Wallets are snapshotted
+        sequentially to respect the data-API per-host rate limit.
+
         Returns:
-            Number of newly-inserted history rows across every wallet.
+            Total number of newly-inserted history rows across every wallet.
         """
-        raise NotImplementedError("DC-2 Wave 2: positions")
+        watched = sorted(self._registry.addresses())
+        total = 0
+        for address in watched:
+            total += await self._snapshot_wallet(address)
+        _LOG.info(
+            "positions.snapshot.completed",
+            watched_wallets=len(watched),
+            inserted=total,
+        )
+        return total
+
+    async def _snapshot_wallet(self, address: str) -> int:
+        """Snapshot one wallet's open positions and append rows.
+
+        Args:
+            address: 0x-prefixed proxy wallet address.
+
+        Returns:
+            Number of newly-inserted rows for this wallet (0 on error).
+        """
+        try:
+            positions = await self._data_client.get_positions(address)
+        except Exception:
+            _LOG.exception("positions.get_positions_failed", wallet=address)
+            return 0
+        snapshot_at = int(time.time())
+        inserted = 0
+        for position in positions:
+            row = _build_history_row(position, wallet=address, snapshot_at=snapshot_at)
+            if row is None:
+                continue
+            try:
+                inserted_now = self._positions_repo.insert(row)
+            except Exception:
+                _LOG.exception(
+                    "positions.insert_failed",
+                    wallet=address,
+                    condition_id=row.condition_id,
+                    outcome=row.outcome,
+                )
+                continue
+            if inserted_now:
+                inserted += 1
+        _LOG.debug("positions.snapshot", wallet=address, rows=inserted)
+        return inserted
+
+    @staticmethod
+    async def _wait_or_stop(stop_event: asyncio.Event, seconds: float) -> bool:
+        """Wait up to ``seconds`` for the stop event.
+
+        Returns:
+            ``True`` if the stop event was set during the wait, ``False`` if
+            the timeout elapsed first.
+        """
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=seconds)
+        except TimeoutError:
+            return False
+        return True
+
+
+def _build_history_row(
+    position: Position,
+    *,
+    wallet: str,
+    snapshot_at: int,
+) -> WalletPositionsHistoryRow | None:
+    """Convert a :class:`Position` into a history row.
+
+    Defensive: returns ``None`` when ``condition_id`` or ``outcome`` is
+    empty, since those columns participate in the composite primary key
+    and an empty value would corrupt dedupe semantics.
+
+    Args:
+        position: Open-position model from ``DataClient.get_positions``.
+        wallet: Address polled (canonical wallet for this row).
+        snapshot_at: Unix-seconds timestamp shared across the cycle.
+
+    Returns:
+        A populated ``WalletPositionsHistoryRow``, or ``None`` if the
+        position is missing required identifying fields.
+    """
+    if not position.condition_id or not position.outcome:
+        return None
+    return WalletPositionsHistoryRow(
+        wallet=wallet,
+        condition_id=position.condition_id,
+        outcome=position.outcome,
+        size=position.size,
+        avg_price=position.avg_price,
+        current_value=position.current_value,
+        cash_pnl=position.cash_pnl,
+        realized_pnl=position.realized_pnl,
+        redeemable=position.redeemable,
+        snapshot_at=snapshot_at,
+    )
