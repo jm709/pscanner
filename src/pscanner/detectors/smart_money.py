@@ -29,10 +29,13 @@ from pscanner.alerts.models import Alert, Severity
 from pscanner.alerts.sink import AlertSink
 from pscanner.config import SmartMoneyConfig
 from pscanner.poly.data import DataClient
+from pscanner.poly.gamma import GammaClient
 from pscanner.poly.models import ClosedPosition, LeaderboardEntry, Position
 from pscanner.store.repo import (
+    EventTagCacheRepo,
     PositionSnapshotsRepo,
     TrackedWallet,
+    TrackedWalletCategoriesRepo,
     TrackedWalletsRepo,
 )
 
@@ -136,21 +139,31 @@ class SmartMoneyDetector:
         *,
         config: SmartMoneyConfig,
         data_client: DataClient,
+        gamma_client: GammaClient,
         tracked_repo: TrackedWalletsRepo,
         snapshots_repo: PositionSnapshotsRepo,
+        categories_repo: TrackedWalletCategoriesRepo,
+        event_tag_cache: EventTagCacheRepo,
     ) -> None:
         """Build a detector wired to its collaborators.
 
         Args:
             config: Smart-money thresholds (edge, USD floor, intervals).
             data_client: Async client for ``data-api.polymarket.com``.
-            tracked_repo: Repo holding qualified wallets.
+            gamma_client: Async client for ``gamma-api.polymarket.com`` —
+                used to fetch event tags on cache miss.
+            tracked_repo: Repo holding qualified wallets (overall metrics).
             snapshots_repo: Repo holding the last-seen size per (wallet, market, side).
+            categories_repo: Repo holding per-category edge metrics.
+            event_tag_cache: Repo caching event tag lists keyed by event id.
         """
         self._config = config
         self._data_client = data_client
+        self._gamma_client = gamma_client
         self._tracked_repo = tracked_repo
         self._snapshots_repo = snapshots_repo
+        self._categories_repo = categories_repo
+        self._event_tag_cache = event_tag_cache
 
     async def run(self, sink: AlertSink) -> None:
         """Run the refresh and poll loops concurrently until cancelled.
@@ -194,6 +207,14 @@ class SmartMoneyDetector:
     async def refresh_one_wallet(self, entry: LeaderboardEntry) -> None:
         """Evaluate a single leaderboard entry and upsert if it qualifies.
 
+        After upserting the overall metrics, the wallet's closed positions are
+        grouped by event category (``thesis`` / ``sports`` / ``esports``)
+        using the event tag cache (with gamma fallback on miss). Per-category
+        metrics are computed and upserted to ``tracked_wallet_categories``
+        for every category with at least ``min_resolved_positions`` resolved
+        positions. Category edge thresholds are applied at READ time, not
+        here, so all qualifying breakdowns persist for downstream filtering.
+
         Args:
             entry: Leaderboard row to score against the configured thresholds.
         """
@@ -216,6 +237,89 @@ class SmartMoneyDetector:
             excess_pnl_usd=metrics.excess_pnl_usd,
             total_stake_usd=metrics.total_stake_usd,
         )
+        await self._refresh_categories(entry.proxy_wallet, closed)
+
+    async def _refresh_categories(
+        self,
+        wallet: str,
+        closed: list[ClosedPosition],
+    ) -> None:
+        """Group ``closed`` by category and upsert per-category metrics.
+
+        Per-event categorisations are memoised across the wallet's full list
+        of closed positions: many wallets hold multiple positions on the same
+        event, so deduplicating before hitting the cache/gamma cuts the
+        lookup count from O(positions) to O(unique events).
+
+        Args:
+            wallet: 0x-prefixed proxy wallet address.
+            closed: The wallet's full list of closed positions.
+        """
+        unique_event_ids = {
+            event_id
+            for position in closed
+            if (event_id := _event_id_for_position(position)) is not None
+        }
+        category_by_event: dict[str, str | None] = {}
+        for event_id in unique_event_ids:
+            category_by_event[event_id] = await self._lookup_category(event_id)
+        buckets: dict[str, list[ClosedPosition]] = {}
+        for position in closed:
+            event_id = _event_id_for_position(position)
+            if event_id is None:
+                category: str | None = "thesis"
+            else:
+                category = category_by_event.get(event_id)
+            if category is None:
+                continue
+            buckets.setdefault(category, []).append(position)
+        for category, positions in buckets.items():
+            cat_metrics = _compute_metrics(positions)
+            if cat_metrics.count < self._config.min_resolved_positions:
+                continue
+            self._categories_repo.upsert(
+                wallet=wallet,
+                category=category,
+                position_count=cat_metrics.count,
+                win_count=cat_metrics.wins,
+                mean_edge=cat_metrics.mean_edge,
+                weighted_edge=cat_metrics.weighted_edge,
+                excess_pnl_usd=cat_metrics.excess_pnl_usd,
+                total_stake_usd=cat_metrics.total_stake_usd,
+            )
+
+    async def _lookup_category(self, event_id: str) -> str | None:
+        """Categorise an event by tags, hitting the cache then gamma on miss.
+
+        Args:
+            event_id: Event identifier (slug, since closed-position payloads
+                expose ``eventSlug`` rather than a numeric id).
+
+        Returns:
+            ``"sports"`` if the event carries the ``Sports`` tag,
+            ``"esports"`` if it carries the ``Esports`` tag, otherwise
+            ``"thesis"``. Returns ``None`` only when both the cache misses
+            and the gamma fetch fails or returns no event (the position is
+            then dropped from the per-category breakdown).
+        """
+        tags = self._event_tag_cache.get(event_id)
+        if tags is None:
+            try:
+                event = await self._gamma_client.get_event_by_slug(event_id)
+            except Exception:
+                _LOG.warning("smart_money.event_tag_fetch_failed", event_id=event_id)
+                return None
+            if event is None:
+                _LOG.warning("smart_money.event_tag_unknown_slug", event_id=event_id)
+                return None
+            tags = list(event.tags)
+            self._event_tag_cache.upsert(event_id, tags)
+            _LOG.debug(
+                "smart_money.event_tag_cache_miss",
+                event_id=event_id,
+                tag_count=len(tags),
+            )
+        return _categorize(tags)
 
     async def poll_positions(self, sink: AlertSink) -> None:
         """Diff every tracked wallet's open positions and emit alerts.
@@ -264,6 +368,37 @@ class SmartMoneyDetector:
             size=position.size,
             avg_price=position.avg_price,
         )
+
+
+def _event_id_for_position(position: ClosedPosition) -> str | None:
+    """Return the position's event identifier or ``None`` if missing/blank.
+
+    The data-api ``/closed-positions`` payload exposes ``eventSlug`` rather
+    than a numeric event id; the cache and gamma both treat slugs as valid
+    event identifiers. Returns ``None`` when the slug is missing or blank,
+    in which case the caller falls back to the ``thesis`` bucket.
+    """
+    raw = getattr(position, "event_slug", None)
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    return text
+
+
+def _categorize(tags: list[str]) -> str:
+    """Classify an event into ``sports`` / ``esports`` / ``thesis`` from its tags.
+
+    The check is case-insensitive. ``Sports`` wins over ``Esports`` when both
+    are present (most multi-tagged events lean sports first per gamma data).
+    """
+    lowered = {tag.lower() for tag in tags if isinstance(tag, str)}
+    if "sports" in lowered:
+        return "sports"
+    if "esports" in lowered:
+        return "esports"
+    return "thesis"
 
 
 def _build_alert(

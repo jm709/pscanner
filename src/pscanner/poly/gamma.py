@@ -118,6 +118,30 @@ class GammaClient:
             raise TypeError(msg)
         return Event.model_validate(payload)
 
+    async def get_event_by_slug(self, slug: str) -> Event | None:
+        """Fetch a single event by slug, or ``None`` if no event matches.
+
+        Polymarket's ``/events`` endpoint accepts a ``slug`` query parameter
+        and returns a (possibly empty) list. ``/events/{slug}`` only resolves
+        numeric ids on gamma, so callers with a slug must use this method.
+
+        Args:
+            slug: Event slug (e.g. ``"nba-okc-phx-2026-04-25"``).
+
+        Returns:
+            The matching event, or ``None`` if the slug is unknown to gamma.
+
+        Raises:
+            httpx.HTTPStatusError: On non-404 HTTP errors.
+        """
+        payload = await self._http.get("/events", params={"slug": slug})
+        if not isinstance(payload, list):
+            msg = f"expected JSON array for /events?slug={slug}, got {type(payload).__name__}"
+            raise TypeError(msg)
+        if not payload:
+            return None
+        return Event.model_validate(payload[0])
+
     async def list_markets(
         self,
         *,

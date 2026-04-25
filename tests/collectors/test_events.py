@@ -17,7 +17,7 @@ import pytest
 
 from pscanner.collectors.events import EventCollector
 from pscanner.poly.models import Event
-from pscanner.store.repo import EventSnapshotsRepo
+from pscanner.store.repo import EventSnapshotsRepo, EventTagCacheRepo
 
 _BASE_TS = 1_700_000_000
 
@@ -58,6 +58,7 @@ def _make_event(
     volume: float | None = 25_000.0,
     active: bool = True,
     closed: bool = False,
+    tags: list[str] | None = None,
 ) -> Event:
     """Build a validated ``Event`` with ``market_count`` synthetic markets."""
     payload: dict[str, Any] = {
@@ -69,6 +70,7 @@ def _make_event(
         "volume": volume,
         "active": active,
         "closed": closed,
+        "tags": tags if tags is not None else [],
     }
     return Event.model_validate(payload)
 
@@ -86,17 +88,19 @@ def _make_collector(
     events: list[Event],
     snapshot_max: int = 2000,
     snapshot_interval_seconds: float = 900.0,
-) -> tuple[EventCollector, EventSnapshotsRepo]:
+) -> tuple[EventCollector, EventSnapshotsRepo, EventTagCacheRepo]:
     """Wire up a collector with a mocked gamma client and a real repo."""
     repo = EventSnapshotsRepo(tmp_db)
+    tag_cache = EventTagCacheRepo(tmp_db)
     gamma = _make_gamma(events)
     collector = EventCollector(
         gamma_client=gamma,  # type: ignore[arg-type]
         events_repo=repo,
+        event_tag_cache=tag_cache,
         snapshot_interval_seconds=snapshot_interval_seconds,
         snapshot_max=snapshot_max,
     )
-    return collector, repo
+    return collector, repo, tag_cache
 
 
 @pytest.mark.asyncio
@@ -108,7 +112,7 @@ async def test_happy_path_four_events_persisted(tmp_db: sqlite3.Connection) -> N
         _make_event(event_id="e3", title="Event 3", slug="event-3", market_count=2),
         _make_event(event_id="e4", title="Event 4", slug="event-4", market_count=3),
     ]
-    collector, repo = _make_collector(tmp_db=tmp_db, events=events)
+    collector, repo, _tag_cache = _make_collector(tmp_db=tmp_db, events=events)
 
     inserted = await collector.snapshot_all_events()
 
@@ -136,15 +140,17 @@ async def test_two_consecutive_snapshots_yield_two_rows_per_event(
         _make_event(event_id="e1", market_count=1),
         _make_event(event_id="e2", market_count=2),
     ]
-    collector, repo = _make_collector(tmp_db=tmp_db, events=events)
+    collector, repo, _tag_cache = _make_collector(tmp_db=tmp_db, events=events)
 
-    timestamps = iter([_BASE_TS, _BASE_TS + 60])
+    sweep = {"index": 0}
+    timestamps = [_BASE_TS, _BASE_TS + 60]
     monkeypatch.setattr(
         "pscanner.collectors.events.time.time",
-        lambda: next(timestamps),
+        lambda: timestamps[sweep["index"]],
     )
 
     first = await collector.snapshot_all_events()
+    sweep["index"] = 1
     second = await collector.snapshot_all_events()
 
     assert first == 2
@@ -157,7 +163,11 @@ async def test_two_consecutive_snapshots_yield_two_rows_per_event(
 async def test_snapshot_max_caps_inserts(tmp_db: sqlite3.Connection) -> None:
     """Cap of 5 over 50 input events stops iteration after 5 inserts."""
     events = [_make_event(event_id=f"e{i}", market_count=1) for i in range(50)]
-    collector, repo = _make_collector(tmp_db=tmp_db, events=events, snapshot_max=5)
+    collector, repo, _tag_cache = _make_collector(
+        tmp_db=tmp_db,
+        events=events,
+        snapshot_max=5,
+    )
 
     inserted = await collector.snapshot_all_events()
 
@@ -175,7 +185,7 @@ async def test_events_with_empty_id_are_skipped(tmp_db: sqlite3.Connection) -> N
         _make_event(event_id="", market_count=1),
         _make_event(event_id="e3", market_count=2),
     ]
-    collector, repo = _make_collector(tmp_db=tmp_db, events=events)
+    collector, repo, _tag_cache = _make_collector(tmp_db=tmp_db, events=events)
 
     inserted = await collector.snapshot_all_events()
 
@@ -189,7 +199,7 @@ async def test_event_with_no_markets_serialises_market_count_zero(
 ) -> None:
     """An event with ``markets=[]`` writes ``market_count = 0``."""
     events = [_make_event(event_id="e1", market_count=0)]
-    collector, repo = _make_collector(tmp_db=tmp_db, events=events)
+    collector, repo, _tag_cache = _make_collector(tmp_db=tmp_db, events=events)
 
     inserted = await collector.snapshot_all_events()
 
@@ -209,10 +219,12 @@ async def test_per_row_insert_exception_does_not_break_sweep() -> None:
     ]
     repo = MagicMock()
     repo.insert.side_effect = [True, RuntimeError("disk error"), True]
+    tag_cache = MagicMock()
     gamma = _make_gamma(events)
     collector = EventCollector(
         gamma_client=gamma,  # type: ignore[arg-type]
         events_repo=repo,
+        event_tag_cache=tag_cache,
         snapshot_interval_seconds=900.0,
         snapshot_max=2000,
     )
@@ -229,7 +241,7 @@ async def test_run_exits_cleanly_when_stop_event_set(
 ) -> None:
     """``run`` exits within a second after ``stop_event.set()`` is called."""
     events = [_make_event(event_id="e1", market_count=1)]
-    collector, repo = _make_collector(
+    collector, repo, _tag_cache = _make_collector(
         tmp_db=tmp_db,
         events=events,
         snapshot_interval_seconds=0.05,
@@ -265,9 +277,11 @@ async def test_run_swallows_per_iteration_exceptions(
 
     gamma = AsyncMock()
     gamma.iter_events = _make_iter
+    tag_cache = EventTagCacheRepo(tmp_db)
     collector = EventCollector(
         gamma_client=gamma,  # type: ignore[arg-type]
         events_repo=repo,
+        event_tag_cache=tag_cache,
         snapshot_interval_seconds=0.05,
         snapshot_max=2000,
     )
@@ -285,3 +299,72 @@ async def test_run_swallows_per_iteration_exceptions(
 
     assert calls["n"] >= 2
     assert repo.distinct_snapshot_count() >= 1
+
+
+@pytest.mark.asyncio
+async def test_event_tag_cache_populated_per_event(tmp_db: sqlite3.Connection) -> None:
+    """Each event's tags are upserted to the cache (keyed on slug) during the sweep."""
+    events = [
+        _make_event(event_id="e1", slug="evt-1", market_count=1, tags=["Sports", "NFL"]),
+        _make_event(event_id="e2", slug="evt-2", market_count=1, tags=["Esports"]),
+        _make_event(event_id="e3", slug="evt-3", market_count=1, tags=[]),
+    ]
+    collector, _repo, tag_cache = _make_collector(tmp_db=tmp_db, events=events)
+
+    await collector.snapshot_all_events()
+
+    assert tag_cache.get("evt-1") == ["Sports", "NFL"]
+    assert tag_cache.get("evt-2") == ["Esports"]
+    assert tag_cache.get("evt-3") == []
+
+
+@pytest.mark.asyncio
+async def test_event_tag_cache_upsert_called_with_mock(tmp_db: sqlite3.Connection) -> None:
+    """The collector calls ``tag_cache.upsert`` once per event keyed on slug."""
+    events = [
+        _make_event(event_id="e1", slug="evt-1", market_count=1, tags=["Sports"]),
+        _make_event(event_id="e2", slug="evt-2", market_count=1, tags=["Politics"]),
+    ]
+    repo = EventSnapshotsRepo(tmp_db)
+    tag_cache = MagicMock()
+    gamma = _make_gamma(events)
+    collector = EventCollector(
+        gamma_client=gamma,  # type: ignore[arg-type]
+        events_repo=repo,
+        event_tag_cache=tag_cache,
+        snapshot_interval_seconds=900.0,
+        snapshot_max=2000,
+    )
+
+    await collector.snapshot_all_events()
+
+    assert tag_cache.upsert.call_count == 2
+    call_args = [call.args for call in tag_cache.upsert.call_args_list]
+    assert call_args == [("evt-1", ["Sports"]), ("evt-2", ["Politics"])]
+
+
+@pytest.mark.asyncio
+async def test_event_tag_cache_upsert_failure_does_not_break_sweep(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """A tag-cache upsert raising must not abort the snapshot loop."""
+    events = [
+        _make_event(event_id="e1", market_count=1, tags=["Sports"]),
+        _make_event(event_id="e2", market_count=1, tags=["Politics"]),
+    ]
+    repo = EventSnapshotsRepo(tmp_db)
+    tag_cache = MagicMock()
+    tag_cache.upsert.side_effect = [RuntimeError("disk full"), None]
+    gamma = _make_gamma(events)
+    collector = EventCollector(
+        gamma_client=gamma,  # type: ignore[arg-type]
+        events_repo=repo,
+        event_tag_cache=tag_cache,
+        snapshot_interval_seconds=900.0,
+        snapshot_max=2000,
+    )
+
+    inserted = await collector.snapshot_all_events()
+
+    assert inserted == 2
+    assert tag_cache.upsert.call_count == 2

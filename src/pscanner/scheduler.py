@@ -50,9 +50,11 @@ from pscanner.store.repo import (
     AlertsRepo,
     EventOutcomeSumRepo,
     EventSnapshotsRepo,
+    EventTagCacheRepo,
     MarketCacheRepo,
     MarketSnapshotsRepo,
     PositionSnapshotsRepo,
+    TrackedWalletCategoriesRepo,
     TrackedWalletsRepo,
     WalletActivityEventsRepo,
     WalletFirstSeenRepo,
@@ -121,6 +123,8 @@ class Scanner:
         self._sum_history_repo = EventOutcomeSumRepo(self._db)
         self._watchlist_repo = WatchlistRepo(self._db)
         self._wallet_trades_repo = WalletTradesRepo(self._db)
+        self._categories_repo = TrackedWalletCategoriesRepo(self._db)
+        self._event_tag_cache_repo = EventTagCacheRepo(self._db)
         self._owns_clients = clients is None
         self._clients = clients or self._build_default_clients()
         self._renderer = TerminalRenderer()
@@ -209,6 +213,7 @@ class Scanner:
             collectors["event_collector"] = EventCollector(
                 gamma_client=self._clients.gamma_client,
                 events_repo=self._event_snapshots_repo,
+                event_tag_cache=self._event_tag_cache_repo,
                 snapshot_interval_seconds=self._config.events.snapshot_interval_seconds,
                 snapshot_max=self._config.events.snapshot_max,
             )
@@ -221,8 +226,11 @@ class Scanner:
             detectors["smart_money"] = SmartMoneyDetector(
                 config=self._config.smart_money,
                 data_client=self._clients.data_client,
+                gamma_client=self._clients.gamma_client,
                 tracked_repo=self._tracked_repo,
                 snapshots_repo=self._snapshots_repo,
+                categories_repo=self._categories_repo,
+                event_tag_cache=self._event_tag_cache_repo,
             )
         if self._config.mispricing.enabled:
             detectors["mispricing"] = MispricingDetector(

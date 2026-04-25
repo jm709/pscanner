@@ -12,6 +12,11 @@ refresh_interval_seconds = 3600
 position_poll_interval_seconds = 300
 new_position_min_usd = 1000
 
+[smart_money.category_min_edge]
+thesis = 0.05
+sports = 0.10
+esports = 0.05
+
 [mispricing]
 enabled = true
 scan_interval_seconds = 300

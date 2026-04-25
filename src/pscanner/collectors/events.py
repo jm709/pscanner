@@ -15,7 +15,7 @@ import structlog
 
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.models import Event
-from pscanner.store.repo import EventSnapshot, EventSnapshotsRepo
+from pscanner.store.repo import EventSnapshot, EventSnapshotsRepo, EventTagCacheRepo
 
 _LOG = structlog.get_logger(__name__)
 
@@ -36,6 +36,7 @@ class EventCollector:
         *,
         gamma_client: GammaClient,
         events_repo: EventSnapshotsRepo,
+        event_tag_cache: EventTagCacheRepo,
         snapshot_interval_seconds: float = 900.0,
         snapshot_max: int = 2000,
     ) -> None:
@@ -44,11 +45,15 @@ class EventCollector:
         Args:
             gamma_client: Gamma REST client for ``/events`` queries.
             events_repo: Append-only, dedupe-on-PK repo for snapshots.
+            event_tag_cache: Tag cache; updated alongside each snapshot so
+                downstream detectors can categorise events without hitting
+                gamma.
             snapshot_interval_seconds: Cadence between full sweeps.
             snapshot_max: Hard cap on events fetched per sweep.
         """
         self._gamma = gamma_client
         self._repo = events_repo
+        self._event_tag_cache = event_tag_cache
         self._interval = snapshot_interval_seconds
         self._max = snapshot_max
 
@@ -93,6 +98,7 @@ class EventCollector:
             snapshot = _build_snapshot(event, snapshot_at=snapshot_at)
             if self._try_insert(snapshot):
                 inserted += 1
+            self._cache_tags(event)
         _LOG.info(
             "events.snapshot_complete",
             inserted=inserted,
@@ -118,6 +124,25 @@ class EventCollector:
                 snapshot_at=snapshot.snapshot_at,
             )
             return False
+
+    def _cache_tags(self, event: Event) -> None:
+        """Upsert ``event.tags`` into the tag cache, swallowing failures.
+
+        The cache is keyed on ``event.slug`` because closed-position payloads
+        expose ``eventSlug`` rather than a numeric event id; using slugs
+        means the smart-money categoriser can hit the cache without a
+        secondary id-lookup step.
+
+        Args:
+            event: Validated gamma event whose tags should be cached.
+        """
+        key = event.slug or event.id
+        if not key:
+            return
+        try:
+            self._event_tag_cache.upsert(key, list(event.tags))
+        except Exception:
+            _LOG.exception("events.tag_cache_upsert_failed", event_slug=event.slug)
 
 
 def _build_snapshot(event: Event, *, snapshot_at: int) -> EventSnapshot:

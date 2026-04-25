@@ -32,7 +32,13 @@ class ScannerConfig(_Section):
 
 
 class SmartMoneyConfig(_Section):
-    """Thresholds for the smart-money detector."""
+    """Thresholds for the smart-money detector.
+
+    ``category_min_edge`` keys (``thesis``, ``sports``, ``esports``) are the
+    minimum ``mean_edge`` values per category applied at READ time when the
+    convergence detector queries roster slices. Sports gets a higher bar
+    because Vegas-tight markets are harder to beat.
+    """
 
     enabled: bool = True
     leaderboard_top_n: int = 200
@@ -42,6 +48,9 @@ class SmartMoneyConfig(_Section):
     refresh_interval_seconds: int = 3600
     position_poll_interval_seconds: int = 300
     new_position_min_usd: float = 1000.0
+    category_min_edge: dict[str, float] = Field(
+        default_factory=lambda: {"thesis": 0.05, "sports": 0.10, "esports": 0.05},
+    )
 
 
 class MispricingConfig(_Section):

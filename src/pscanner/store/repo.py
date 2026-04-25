@@ -1358,3 +1358,232 @@ def _row_to_event_outcome_sum(row: sqlite3.Row) -> EventOutcomeSumRow:
         deviation=float(row["deviation"]),
         snapshot_at=int(row["snapshot_at"]),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class TrackedWalletCategory:
+    """Per-category edge metrics for a tracked wallet.
+
+    A wallet can have up to one row per category (``thesis``, ``sports``,
+    ``esports``). The metrics mirror the fields stored on ``tracked_wallets``
+    but are computed over the subset of closed positions that fall in the
+    given category. ``last_refreshed_at`` is set by the repo on every upsert.
+    """
+
+    wallet: str
+    category: str
+    position_count: int
+    win_count: int
+    mean_edge: float | None
+    weighted_edge: float | None
+    excess_pnl_usd: float | None
+    total_stake_usd: float | None
+    last_refreshed_at: int
+
+
+class TrackedWalletCategoriesRepo:
+    """CRUD for the ``tracked_wallet_categories`` table."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        """Bind the repo to an already-initialised connection."""
+        self._conn = conn
+
+    def upsert(
+        self,
+        *,
+        wallet: str,
+        category: str,
+        position_count: int,
+        win_count: int,
+        mean_edge: float | None,
+        weighted_edge: float | None,
+        excess_pnl_usd: float | None,
+        total_stake_usd: float | None,
+    ) -> None:
+        """Insert or update one ``(wallet, category)`` row.
+
+        Args:
+            wallet: 0x-prefixed proxy wallet address.
+            category: One of ``"thesis"``, ``"sports"``, ``"esports"``.
+            position_count: Resolved positions in the category.
+            win_count: Resolved positions with PnL > 0 in the category.
+            mean_edge: Average per-position edge over this category's
+                positions, or ``None`` if not computable.
+            weighted_edge: Stake-weighted mean edge, or ``None``.
+            excess_pnl_usd: Realized PnL summed for the category, or ``None``.
+            total_stake_usd: Sum of ``size * avg_price`` for the category,
+                or ``None``.
+        """
+        now = _now_seconds()
+        self._conn.execute(
+            """
+            INSERT INTO tracked_wallet_categories (
+              wallet, category, position_count, win_count,
+              mean_edge, weighted_edge, excess_pnl_usd, total_stake_usd,
+              last_refreshed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(wallet, category) DO UPDATE SET
+              position_count = excluded.position_count,
+              win_count = excluded.win_count,
+              mean_edge = excluded.mean_edge,
+              weighted_edge = excluded.weighted_edge,
+              excess_pnl_usd = excluded.excess_pnl_usd,
+              total_stake_usd = excluded.total_stake_usd,
+              last_refreshed_at = excluded.last_refreshed_at
+            """,
+            (
+                wallet,
+                category,
+                position_count,
+                win_count,
+                mean_edge,
+                weighted_edge,
+                excess_pnl_usd,
+                total_stake_usd,
+                now,
+            ),
+        )
+        self._conn.commit()
+
+    def list_by_category(
+        self,
+        category: str,
+        *,
+        min_edge: float,
+        min_excess_pnl_usd: float,
+        min_resolved: int,
+    ) -> list[TrackedWalletCategory]:
+        """Return rows for ``category`` passing the per-category quality bar.
+
+        Args:
+            category: Category to filter on.
+            min_edge: Inclusive minimum ``mean_edge``. Rows with NULL
+                ``mean_edge`` are excluded.
+            min_excess_pnl_usd: Inclusive minimum ``excess_pnl_usd``. Rows
+                with NULL ``excess_pnl_usd`` are excluded.
+            min_resolved: Inclusive minimum ``position_count``.
+
+        Returns:
+            Matching rows ordered by ``excess_pnl_usd`` desc.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT wallet, category, position_count, win_count,
+                   mean_edge, weighted_edge, excess_pnl_usd, total_stake_usd,
+                   last_refreshed_at
+              FROM tracked_wallet_categories
+             WHERE category = :category
+               AND position_count >= :min_resolved
+               AND mean_edge IS NOT NULL AND mean_edge >= :min_edge
+               AND excess_pnl_usd IS NOT NULL
+               AND excess_pnl_usd >= :min_excess_pnl_usd
+             ORDER BY excess_pnl_usd DESC
+            """,
+            {
+                "category": category,
+                "min_resolved": min_resolved,
+                "min_edge": min_edge,
+                "min_excess_pnl_usd": min_excess_pnl_usd,
+            },
+        ).fetchall()
+        return [_row_to_tracked_wallet_category(row) for row in rows]
+
+    def list_for_wallet(self, wallet: str) -> list[TrackedWalletCategory]:
+        """Return every category row for ``wallet``, ordered by category."""
+        rows = self._conn.execute(
+            """
+            SELECT wallet, category, position_count, win_count,
+                   mean_edge, weighted_edge, excess_pnl_usd, total_stake_usd,
+                   last_refreshed_at
+              FROM tracked_wallet_categories
+             WHERE wallet = ?
+             ORDER BY category ASC
+            """,
+            (wallet,),
+        ).fetchall()
+        return [_row_to_tracked_wallet_category(row) for row in rows]
+
+    def list_all(self) -> list[TrackedWalletCategory]:
+        """Return every row in the table (no filtering)."""
+        rows = self._conn.execute(
+            """
+            SELECT wallet, category, position_count, win_count,
+                   mean_edge, weighted_edge, excess_pnl_usd, total_stake_usd,
+                   last_refreshed_at
+              FROM tracked_wallet_categories
+             ORDER BY wallet ASC, category ASC
+            """,
+        ).fetchall()
+        return [_row_to_tracked_wallet_category(row) for row in rows]
+
+
+def _row_to_tracked_wallet_category(row: sqlite3.Row) -> TrackedWalletCategory:
+    """Convert a ``tracked_wallet_categories`` row to its dataclass."""
+    return TrackedWalletCategory(
+        wallet=row["wallet"],
+        category=row["category"],
+        position_count=int(row["position_count"]),
+        win_count=int(row["win_count"]),
+        mean_edge=_optional_float(row["mean_edge"]),
+        weighted_edge=_optional_float(row["weighted_edge"]),
+        excess_pnl_usd=_optional_float(row["excess_pnl_usd"]),
+        total_stake_usd=_optional_float(row["total_stake_usd"]),
+        last_refreshed_at=int(row["last_refreshed_at"]),
+    )
+
+
+class EventTagCacheRepo:
+    """CRUD for the ``event_tag_cache`` table.
+
+    Persists the gamma ``tags`` array per event so detectors can categorise
+    closed positions without re-fetching every event on every refresh.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        """Bind the repo to an already-initialised connection."""
+        self._conn = conn
+
+    def upsert(self, event_id: str, tags: list[str]) -> None:
+        """Persist ``tags`` for ``event_id`` as JSON, stamping ``cached_at``.
+
+        Args:
+            event_id: Polymarket event identifier.
+            tags: Tag labels (e.g. ``["Sports", "NFL"]``).
+        """
+        now = _now_seconds()
+        tags_json = json.dumps(list(tags))
+        self._conn.execute(
+            """
+            INSERT INTO event_tag_cache (event_id, tags_json, cached_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(event_id) DO UPDATE SET
+              tags_json = excluded.tags_json,
+              cached_at = excluded.cached_at
+            """,
+            (event_id, tags_json, now),
+        )
+        self._conn.commit()
+
+    def get(self, event_id: str) -> list[str] | None:
+        """Return cached tags for ``event_id``, or ``None`` if absent.
+
+        Args:
+            event_id: Polymarket event identifier.
+
+        Returns:
+            The decoded tag list, or ``None`` if no cached row exists.
+
+        Raises:
+            ValueError: If the stored JSON does not decode to a list.
+        """
+        row = self._conn.execute(
+            "SELECT tags_json FROM event_tag_cache WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        decoded = json.loads(row["tags_json"])
+        if not isinstance(decoded, list):
+            msg = f"event_tag_cache.tags_json must decode to list, got {type(decoded).__name__}"
+            raise ValueError(msg)
+        return [str(item) for item in decoded]

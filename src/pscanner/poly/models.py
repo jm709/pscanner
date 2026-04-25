@@ -205,6 +205,7 @@ class Position(BaseModel):
     mergeable: bool = False
     title: str | None = None
     slug: str | None = None
+    event_slug: Annotated[str | None, Field(alias="eventSlug", default=None)] = None
     end_date: Annotated[str | None, Field(alias="endDate", default=None)] = None
 
 

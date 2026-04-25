@@ -166,6 +166,28 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_eosh_ts ON event_outcome_sum_history(snapshot_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_eosh_deviation ON event_outcome_sum_history(deviation)",
+    """
+    CREATE TABLE IF NOT EXISTS tracked_wallet_categories (
+      wallet TEXT NOT NULL,
+      category TEXT NOT NULL,
+      position_count INTEGER NOT NULL,
+      win_count INTEGER NOT NULL,
+      mean_edge REAL,
+      weighted_edge REAL,
+      excess_pnl_usd REAL,
+      total_stake_usd REAL,
+      last_refreshed_at INTEGER NOT NULL,
+      PRIMARY KEY (wallet, category)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_twc_category ON tracked_wallet_categories(category)",
+    """
+    CREATE TABLE IF NOT EXISTS event_tag_cache (
+      event_id TEXT PRIMARY KEY,
+      tags_json TEXT NOT NULL,
+      cached_at INTEGER NOT NULL
+    )
+    """,
 )
 
 _MIGRATIONS: tuple[str, ...] = (

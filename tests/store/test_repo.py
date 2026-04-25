@@ -15,10 +15,12 @@ from pscanner.store.repo import (
     EventOutcomeSumRow,
     EventSnapshot,
     EventSnapshotsRepo,
+    EventTagCacheRepo,
     MarketCacheRepo,
     MarketSnapshot,
     MarketSnapshotsRepo,
     PositionSnapshotsRepo,
+    TrackedWalletCategoriesRepo,
     TrackedWalletsRepo,
     WalletActivityEvent,
     WalletActivityEventsRepo,
@@ -1027,3 +1029,227 @@ def test_event_outcome_sum_with_high_deviation_filters_and_orders(
 
     # Threshold above the largest magnitude returns empty.
     assert repo.with_high_deviation(min_abs_deviation=100.0) == []
+
+
+def test_event_tag_cache_upsert_round_trip(tmp_db: sqlite3.Connection) -> None:
+    repo = EventTagCacheRepo(tmp_db)
+    repo.upsert("evt-1", ["Sports", "NFL"])
+
+    tags = repo.get("evt-1")
+    assert tags == ["Sports", "NFL"]
+
+
+def test_event_tag_cache_upsert_overwrites_and_bumps_cached_at(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = EventTagCacheRepo(tmp_db)
+    repo.upsert("evt-1", ["Sports"])
+    first_row = tmp_db.execute(
+        "SELECT cached_at FROM event_tag_cache WHERE event_id = ?",
+        ("evt-1",),
+    ).fetchone()
+    assert first_row is not None
+    first_cached_at = int(first_row["cached_at"])
+
+    time.sleep(1.1)
+    repo.upsert("evt-1", ["Politics", "Elections"])
+
+    assert repo.get("evt-1") == ["Politics", "Elections"]
+    second_row = tmp_db.execute(
+        "SELECT cached_at FROM event_tag_cache WHERE event_id = ?",
+        ("evt-1",),
+    ).fetchone()
+    assert second_row is not None
+    assert int(second_row["cached_at"]) > first_cached_at
+
+
+def test_event_tag_cache_get_returns_none_when_unknown(tmp_db: sqlite3.Connection) -> None:
+    repo = EventTagCacheRepo(tmp_db)
+    assert repo.get("does-not-exist") is None
+
+
+def test_event_tag_cache_get_supports_empty_tag_list(tmp_db: sqlite3.Connection) -> None:
+    repo = EventTagCacheRepo(tmp_db)
+    repo.upsert("evt-1", [])
+    assert repo.get("evt-1") == []
+
+
+def _twc_upsert(
+    repo: TrackedWalletCategoriesRepo,
+    *,
+    wallet: str,
+    category: str,
+    position_count: int = 10,
+    win_count: int = 7,
+    mean_edge: float | None = 0.10,
+    weighted_edge: float | None = 0.12,
+    excess_pnl_usd: float | None = 1500.0,
+    total_stake_usd: float | None = 5000.0,
+) -> None:
+    """Convenience wrapper for ``TrackedWalletCategoriesRepo.upsert`` with defaults."""
+    repo.upsert(
+        wallet=wallet,
+        category=category,
+        position_count=position_count,
+        win_count=win_count,
+        mean_edge=mean_edge,
+        weighted_edge=weighted_edge,
+        excess_pnl_usd=excess_pnl_usd,
+        total_stake_usd=total_stake_usd,
+    )
+
+
+def test_tracked_wallet_categories_upsert_round_trip(tmp_db: sqlite3.Connection) -> None:
+    repo = TrackedWalletCategoriesRepo(tmp_db)
+    _twc_upsert(repo, wallet="0xabc", category="thesis")
+
+    rows = repo.list_for_wallet("0xabc")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.wallet == "0xabc"
+    assert row.category == "thesis"
+    assert row.position_count == 10
+    assert row.win_count == 7
+    assert row.mean_edge == 0.10
+    assert row.weighted_edge == 0.12
+    assert row.excess_pnl_usd == 1500.0
+    assert row.total_stake_usd == 5000.0
+    assert row.last_refreshed_at >= int(time.time()) - 5
+
+
+def test_tracked_wallet_categories_upsert_updates_in_place(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = TrackedWalletCategoriesRepo(tmp_db)
+    _twc_upsert(repo, wallet="0xabc", category="sports", position_count=10, win_count=5)
+    first = repo.list_for_wallet("0xabc")[0]
+
+    time.sleep(1.1)
+    _twc_upsert(
+        repo,
+        wallet="0xabc",
+        category="sports",
+        position_count=20,
+        win_count=15,
+        mean_edge=0.20,
+        excess_pnl_usd=4000.0,
+    )
+
+    rows = repo.list_for_wallet("0xabc")
+    assert len(rows) == 1
+    updated = rows[0]
+    assert updated.position_count == 20
+    assert updated.win_count == 15
+    assert updated.mean_edge == 0.20
+    assert updated.excess_pnl_usd == 4000.0
+    assert updated.last_refreshed_at > first.last_refreshed_at
+
+
+def test_tracked_wallet_categories_distinct_categories_per_wallet(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = TrackedWalletCategoriesRepo(tmp_db)
+    _twc_upsert(repo, wallet="0xabc", category="thesis")
+    _twc_upsert(repo, wallet="0xabc", category="sports")
+    _twc_upsert(repo, wallet="0xabc", category="esports")
+
+    rows = repo.list_for_wallet("0xabc")
+    assert {r.category for r in rows} == {"thesis", "sports", "esports"}
+
+
+def test_tracked_wallet_categories_list_by_category_filters(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = TrackedWalletCategoriesRepo(tmp_db)
+    # Different category — must not appear.
+    _twc_upsert(repo, wallet="0xother", category="thesis")
+    # Below resolved threshold.
+    _twc_upsert(
+        repo,
+        wallet="0xfew",
+        category="sports",
+        position_count=3,
+        win_count=2,
+        mean_edge=0.30,
+        excess_pnl_usd=5000.0,
+    )
+    # Below mean_edge threshold.
+    _twc_upsert(
+        repo,
+        wallet="0xlow_edge",
+        category="sports",
+        position_count=20,
+        win_count=10,
+        mean_edge=0.02,
+        excess_pnl_usd=5000.0,
+    )
+    # Below excess_pnl_usd threshold.
+    _twc_upsert(
+        repo,
+        wallet="0xlow_pnl",
+        category="sports",
+        position_count=20,
+        win_count=14,
+        mean_edge=0.20,
+        excess_pnl_usd=200.0,
+    )
+    # NULL metrics — must be excluded.
+    _twc_upsert(
+        repo,
+        wallet="0xnull",
+        category="sports",
+        position_count=20,
+        win_count=10,
+        mean_edge=None,
+        excess_pnl_usd=None,
+    )
+    # Two passing — assert ordering by excess_pnl_usd DESC.
+    _twc_upsert(
+        repo,
+        wallet="0xmid",
+        category="sports",
+        position_count=20,
+        win_count=14,
+        mean_edge=0.15,
+        excess_pnl_usd=2500.0,
+    )
+    _twc_upsert(
+        repo,
+        wallet="0xhi",
+        category="sports",
+        position_count=30,
+        win_count=22,
+        mean_edge=0.25,
+        excess_pnl_usd=9000.0,
+    )
+
+    rows = repo.list_by_category(
+        "sports",
+        min_edge=0.10,
+        min_excess_pnl_usd=1000.0,
+        min_resolved=10,
+    )
+    assert [r.wallet for r in rows] == ["0xhi", "0xmid"]
+
+
+def test_tracked_wallet_categories_list_all_returns_everything(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = TrackedWalletCategoriesRepo(tmp_db)
+    _twc_upsert(repo, wallet="0xabc", category="thesis")
+    _twc_upsert(repo, wallet="0xabc", category="sports")
+    _twc_upsert(repo, wallet="0xdef", category="esports")
+
+    rows = repo.list_all()
+    assert {(r.wallet, r.category) for r in rows} == {
+        ("0xabc", "thesis"),
+        ("0xabc", "sports"),
+        ("0xdef", "esports"),
+    }
+
+
+def test_tracked_wallet_categories_list_for_unknown_wallet_returns_empty(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = TrackedWalletCategoriesRepo(tmp_db)
+    assert repo.list_for_wallet("0xnone") == []
