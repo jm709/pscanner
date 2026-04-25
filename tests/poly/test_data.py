@@ -1,0 +1,328 @@
+"""Tests for ``pscanner.poly.data.DataClient``.
+
+The data API and leaderboard live on different hosts, so :class:`DataClient`
+always owns at least one underlying :class:`PolyHttpClient` instance. The
+sister-wave ``http-client`` agent owns ``PolyHttpClient``'s implementation, so
+these tests stub it out to keep this module under isolated test.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Literal, cast
+from unittest.mock import AsyncMock
+
+import pytest
+
+from pscanner.poly import data as data_module
+from pscanner.poly.data import DataClient
+from pscanner.poly.http import PolyHttpClient
+from pscanner.poly.models import ClosedPosition, LeaderboardEntry, Position
+
+_FIXTURE_DIR = Path(__file__).parent.parent / "fixtures"
+
+
+def _load(name: str) -> Any:
+    """Read a JSON fixture from ``tests/fixtures/``."""
+    return json.loads((_FIXTURE_DIR / name).read_text())
+
+
+class _FakePolyHttpClient:
+    """Minimal stand-in for ``PolyHttpClient`` exposing the methods we use.
+
+    Each instance records the ``base_url`` it was built with so tests can
+    assert how :class:`DataClient` routes calls between the data and
+    leaderboard hosts. ``get`` and ``aclose`` are :class:`AsyncMock` so call
+    arguments and counts are introspectable.
+    """
+
+    def __init__(self, *, base_url: str, rpm: int, timeout_seconds: float = 30.0) -> None:
+        """Capture constructor args and seed mock methods."""
+        self.base_url = base_url
+        self.rpm = rpm
+        self.timeout_seconds = timeout_seconds
+        self.get = AsyncMock()
+        self.aclose = AsyncMock()
+
+
+@pytest.fixture
+def fake_http_factory(monkeypatch: pytest.MonkeyPatch) -> list[_FakePolyHttpClient]:
+    """Patch ``PolyHttpClient`` in ``data`` module and capture every instance."""
+    instances: list[_FakePolyHttpClient] = []
+
+    def _build(*args: Any, **kwargs: Any) -> _FakePolyHttpClient:
+        client = _FakePolyHttpClient(*args, **kwargs)
+        instances.append(client)
+        return client
+
+    monkeypatch.setattr(data_module, "PolyHttpClient", _build)
+    return instances
+
+
+def _client_for_host(instances: list[_FakePolyHttpClient], host: str) -> _FakePolyHttpClient:
+    """Return the captured fake client whose base URL matches ``host``."""
+    for client in instances:
+        if host in client.base_url:
+            return client
+    msg = f"no fake client built for host containing {host!r}"
+    raise AssertionError(msg)
+
+
+def test_init_owns_both_clients_when_http_is_none(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    DataClient(rpm=42)
+
+    assert len(fake_http_factory) == 2
+    base_urls = {c.base_url for c in fake_http_factory}
+    assert "https://data-api.polymarket.com" in base_urls
+    assert "https://lb-api.polymarket.com" in base_urls
+    assert all(c.rpm == 42 for c in fake_http_factory)
+
+
+def test_init_reuses_passed_http_for_data_api(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    shared = _FakePolyHttpClient(base_url="https://data-api.polymarket.com", rpm=10)
+
+    client = DataClient(http=cast("PolyHttpClient", shared), rpm=99)
+
+    # Only the leaderboard client is constructed — the data client is reused.
+    assert len(fake_http_factory) == 1
+    lb = fake_http_factory[0]
+    assert "lb-api.polymarket.com" in lb.base_url
+    assert lb.rpm == 99
+    assert client._data_http is shared
+
+
+async def test_get_positions_parses_fixture(
+    fake_http_factory: list[_FakePolyHttpClient],
+    sample_position_json: list[dict[str, Any]],
+) -> None:
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    data_http.get.return_value = sample_position_json
+
+    positions = await client.get_positions(
+        "0x6a72f61820b26b1fe4d956e17b6dc2a1ea3033ee",
+        size_threshold=1.5,
+    )
+
+    data_http.get.assert_awaited_once_with(
+        "/positions",
+        params={"user": "0x6a72f61820b26b1fe4d956e17b6dc2a1ea3033ee", "sizeThreshold": 1.5},
+    )
+    assert len(positions) == len(sample_position_json)
+    assert all(isinstance(p, Position) for p in positions)
+    assert positions[0].size == sample_position_json[0]["size"]
+
+
+async def test_get_positions_rejects_non_list_response(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    data_http.get.return_value = {"error": "oops"}
+
+    with pytest.raises(TypeError, match="expected list"):
+        await client.get_positions("0xabc")
+
+
+async def test_get_closed_positions_parses_fixture_and_computes_won(
+    fake_http_factory: list[_FakePolyHttpClient],
+    sample_closed_positions_json: list[dict[str, Any]],
+) -> None:
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    data_http.get.return_value = sample_closed_positions_json
+
+    closed = await client.get_closed_positions("0xabc", limit=25)
+
+    data_http.get.assert_awaited_once_with(
+        "/v1/closed-positions",
+        params={"user": "0xabc", "limit": 25},
+    )
+    assert len(closed) == len(sample_closed_positions_json)
+    assert all(isinstance(c, ClosedPosition) for c in closed)
+    # Every fixture row has realizedPnl > 0 → won is True.
+    assert all(c.won for c in closed)
+
+
+async def test_get_closed_positions_won_is_false_when_pnl_negative(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    data_http.get.return_value = [
+        {
+            "proxyWallet": "0xabc",
+            "asset": "1",
+            "conditionId": "0xc",
+            "outcome": "Yes",
+            "outcomeIndex": 0,
+            "avgPrice": 0.5,
+            "realizedPnl": -100.0,
+            "redeemable": False,
+        },
+    ]
+
+    closed = await client.get_closed_positions("0xabc")
+
+    assert closed[0].won is False
+
+
+async def test_get_activity_parses_fixture(
+    fake_http_factory: list[_FakePolyHttpClient],
+    sample_activity_json: list[dict[str, Any]],
+) -> None:
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    data_http.get.return_value = sample_activity_json
+
+    events = await client.get_activity("0xabc", limit=50)
+
+    data_http.get.assert_awaited_once_with(
+        "/activity",
+        params={"user": "0xabc", "limit": 50},
+    )
+    assert len(events) == len(sample_activity_json)
+    assert events[0]["type"] == "TRADE"
+
+
+async def test_get_activity_passes_type_filter(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    data_http.get.return_value = []
+
+    await client.get_activity("0xabc", limit=10, type="TRADE")
+
+    data_http.get.assert_awaited_once_with(
+        "/activity",
+        params={"user": "0xabc", "limit": 10, "type": "TRADE"},
+    )
+
+
+async def test_get_first_activity_timestamp_returns_smallest(
+    fake_http_factory: list[_FakePolyHttpClient],
+    sample_activity_json: list[dict[str, Any]],
+) -> None:
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    # Single short page → the smallest timestamp on the page is the answer.
+    data_http.get.return_value = sample_activity_json
+
+    earliest = await client.get_first_activity_timestamp("0xabc")
+
+    expected = min(item["timestamp"] for item in sample_activity_json)
+    assert earliest == expected
+
+
+async def test_get_first_activity_timestamp_returns_none_for_empty(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    data_http.get.return_value = []
+
+    earliest = await client.get_first_activity_timestamp("0xabc")
+
+    assert earliest is None
+
+
+async def test_get_first_activity_timestamp_pages_until_short_page(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    full_page = [{"timestamp": 2_000_000_000 + i} for i in range(500)]
+    short_page = [{"timestamp": 100}, {"timestamp": 200}]
+    data_http.get.side_effect = [full_page, short_page]
+
+    earliest = await client.get_first_activity_timestamp("0xabc")
+
+    assert earliest == 100
+    assert data_http.get.await_count == 2
+    second_call_kwargs = data_http.get.await_args_list[1].kwargs
+    assert second_call_kwargs["params"]["offset"] == 500
+
+
+async def test_get_leaderboard_parses_fixture_and_injects_period(
+    fake_http_factory: list[_FakePolyHttpClient],
+    sample_leaderboard_json: list[dict[str, Any]],
+) -> None:
+    client = DataClient()
+    lb_http = _client_for_host(fake_http_factory, "lb-api")
+    # Strip ``period`` so we are sure it is the client that injects it.
+    wire = [{k: v for k, v in row.items() if k != "period"} for row in sample_leaderboard_json]
+    lb_http.get.return_value = wire
+
+    entries = await client.get_leaderboard(period="all", limit=50)
+
+    lb_http.get.assert_awaited_once_with("/profit", params={"window": "all", "limit": 50})
+    assert len(entries) == len(sample_leaderboard_json)
+    assert all(isinstance(e, LeaderboardEntry) for e in entries)
+    assert all(e.period == "all" for e in entries)
+
+
+@pytest.mark.parametrize(
+    ("period", "expected_window"),
+    [("day", "1d"), ("week", "7d"), ("all", "all")],
+)
+async def test_get_leaderboard_maps_period_to_wire_window(
+    fake_http_factory: list[_FakePolyHttpClient],
+    period: Literal["day", "week", "all"],
+    expected_window: str,
+) -> None:
+    client = DataClient()
+    lb_http = _client_for_host(fake_http_factory, "lb-api")
+    lb_http.get.return_value = []
+
+    await client.get_leaderboard(period=period, limit=5)
+
+    lb_http.get.assert_awaited_once_with(
+        "/profit",
+        params={"window": expected_window, "limit": 5},
+    )
+
+
+async def test_aclose_closes_owned_clients(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    lb_http = _client_for_host(fake_http_factory, "lb-api")
+
+    await client.aclose()
+
+    data_http.aclose.assert_awaited_once_with()
+    lb_http.aclose.assert_awaited_once_with()
+
+
+async def test_aclose_does_not_close_passed_in_data_http(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    shared = _FakePolyHttpClient(base_url="https://data-api.polymarket.com", rpm=10)
+    client = DataClient(http=cast("PolyHttpClient", shared))
+    lb_http = _client_for_host(fake_http_factory, "lb-api")
+
+    await client.aclose()
+
+    shared.aclose.assert_not_awaited()
+    lb_http.aclose.assert_awaited_once_with()
+
+
+async def test_aclose_is_idempotent(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    lb_http = _client_for_host(fake_http_factory, "lb-api")
+
+    await client.aclose()
+    await client.aclose()
+
+    assert data_http.aclose.await_count == 1
+    assert lb_http.aclose.await_count == 1
