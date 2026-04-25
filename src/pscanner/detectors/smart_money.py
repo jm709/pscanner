@@ -1,10 +1,10 @@
-"""Smart-money detector — track high-winrate wallets and alert on new positions.
+"""Smart-money detector — track edge-positive wallets and alert on new positions.
 
 The detector runs two cooperating loops inside a single :class:`Detector` task:
 
 * ``_refresh_loop`` — periodically pulls the leaderboard, recomputes each
-  candidate wallet's winrate from their closed positions, and persists the
-  qualifying wallets via :class:`TrackedWalletsRepo`.
+  candidate wallet's edge metrics from their closed positions, and persists
+  the qualifying wallets via :class:`TrackedWalletsRepo`.
 * ``_poll_loop`` — periodically polls the open positions of every tracked
   wallet, diffs them against the last :class:`PositionSnapshotsRepo` snapshot,
   and emits an :class:`Alert` whenever a position grows by enough USD to clear
@@ -21,14 +21,15 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass
 
 import structlog
 
-from pscanner.alerts.models import Alert
+from pscanner.alerts.models import Alert, Severity
 from pscanner.alerts.sink import AlertSink
 from pscanner.config import SmartMoneyConfig
 from pscanner.poly.data import DataClient
-from pscanner.poly.models import LeaderboardEntry, Position
+from pscanner.poly.models import ClosedPosition, LeaderboardEntry, Position
 from pscanner.store.repo import (
     PositionSnapshotsRepo,
     TrackedWallet,
@@ -36,6 +37,80 @@ from pscanner.store.repo import (
 )
 
 _LOG = structlog.get_logger(__name__)
+
+# Severity thresholds for the score (delta_usd / $10k * mean_edge).
+_SEVERITY_HIGH_THRESHOLD = 0.5
+_SEVERITY_MED_THRESHOLD = 0.1
+
+
+@dataclass(frozen=True, slots=True)
+class _WalletMetrics:
+    """Aggregated edge metrics for a wallet's resolved positions."""
+
+    count: int
+    wins: int
+    winrate: float
+    mean_edge: float
+    weighted_edge: float
+    excess_pnl_usd: float
+    total_stake_usd: float
+
+
+def _compute_metrics(closed: list[ClosedPosition]) -> _WalletMetrics:
+    """Compute edge-based skill metrics from a wallet's closed positions.
+
+    Skips degenerate positions where avg_price <= 0 or >= 1 (no information).
+    excess_pnl_usd is realized PnL summed: market-rate expected PnL is 0 by
+    construction, so realized PnL IS the dollar alpha.
+    """
+    edges: list[float] = []
+    weighted_edge_sum = 0.0
+    weight_sum = 0.0
+    realized_pnl_sum = 0.0
+    wins = 0
+    for p in closed:
+        if p.avg_price <= 0 or p.avg_price >= 1:
+            continue
+        outcome = 1.0 if p.won else 0.0
+        edge = outcome - p.avg_price
+        stake_usd = p.size * p.avg_price
+        edges.append(edge)
+        weighted_edge_sum += edge * stake_usd
+        weight_sum += stake_usd
+        realized_pnl_sum += p.realized_pnl or 0.0
+        if p.won:
+            wins += 1
+    count = len(edges)
+    if count == 0:
+        return _WalletMetrics(0, 0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    mean_edge = sum(edges) / count
+    weighted_edge = weighted_edge_sum / weight_sum if weight_sum > 0 else mean_edge
+    return _WalletMetrics(
+        count=count,
+        wins=wins,
+        winrate=wins / count,
+        mean_edge=mean_edge,
+        weighted_edge=weighted_edge,
+        excess_pnl_usd=realized_pnl_sum,
+        total_stake_usd=weight_sum,
+    )
+
+
+def _severity(delta_usd: float, mean_edge: float | None) -> Severity:
+    """Grade a smart-money alert by combined size and skill.
+
+    score = (delta_usd / 10_000) * max(mean_edge or 0, 0)
+      score >= 0.5 -> high (e.g., $10k position from a 5%+ edge wallet)
+      score >= 0.1 -> med
+      else         -> low
+    """
+    edge = 0.0 if mean_edge is None or mean_edge < 0 else mean_edge
+    score = (delta_usd / 10_000.0) * edge
+    if score >= _SEVERITY_HIGH_THRESHOLD:
+        return "high"
+    if score >= _SEVERITY_MED_THRESHOLD:
+        return "med"
+    return "low"
 
 
 class SmartMoneyDetector:
@@ -60,7 +135,7 @@ class SmartMoneyDetector:
         """Build a detector wired to its collaborators.
 
         Args:
-            config: Smart-money thresholds (winrate, USD floor, intervals).
+            config: Smart-money thresholds (edge, USD floor, intervals).
             data_client: Async client for ``data-api.polymarket.com``.
             tracked_repo: Repo holding qualified wallets.
             snapshots_repo: Repo holding the last-seen size per (wallet, market, side).
@@ -116,19 +191,23 @@ class SmartMoneyDetector:
             entry: Leaderboard row to score against the configured thresholds.
         """
         closed = await self._data_client.get_closed_positions(entry.proxy_wallet)
-        count = len(closed)
-        if count < self._config.min_resolved_positions:
+        metrics = _compute_metrics(closed)
+        if metrics.count < self._config.min_resolved_positions:
             return
-        wins = sum(1 for position in closed if position.won)
-        winrate = wins / count
-        if winrate < self._config.min_winrate:
+        if metrics.mean_edge < self._config.min_edge:
+            return
+        if metrics.excess_pnl_usd < self._config.min_excess_pnl_usd:
             return
         self._tracked_repo.upsert(
             address=entry.proxy_wallet,
-            closed_position_count=count,
-            closed_position_wins=wins,
-            winrate=winrate,
+            closed_position_count=metrics.count,
+            closed_position_wins=metrics.wins,
+            winrate=metrics.winrate,
             leaderboard_pnl=entry.pnl,
+            mean_edge=metrics.mean_edge,
+            weighted_edge=metrics.weighted_edge,
+            excess_pnl_usd=metrics.excess_pnl_usd,
+            total_stake_usd=metrics.total_stake_usd,
         )
 
     async def poll_positions(self, sink: AlertSink) -> None:
@@ -138,8 +217,9 @@ class SmartMoneyDetector:
             sink: Shared alert sink that receives any new-position alerts.
         """
         tracked = self._tracked_repo.list_active(
-            self._config.min_winrate,
-            self._config.min_resolved_positions,
+            min_edge=self._config.min_edge,
+            min_excess_pnl_usd=self._config.min_excess_pnl_usd,
+            min_resolved=self._config.min_resolved_positions,
         )
         for wallet in tracked:
             try:
@@ -200,12 +280,14 @@ def _build_alert(
         "prev_size": prev or 0.0,
         "delta_usd": delta_usd,
         "winrate": wallet.winrate,
+        "mean_edge": wallet.mean_edge,
+        "excess_pnl_usd": wallet.excess_pnl_usd,
         "closed_position_count": wallet.closed_position_count,
     }
     return Alert(
         detector="smart_money",
         alert_key=alert_key,
-        severity="med",
+        severity=_severity(delta_usd, wallet.mean_edge),
         title=title,
         body=body,
         created_at=now,

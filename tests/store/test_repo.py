@@ -29,6 +29,10 @@ def test_tracked_wallets_upsert_round_trip(tmp_db: sqlite3.Connection) -> None:
         closed_position_wins=21,
         winrate=0.7,
         leaderboard_pnl=1234.5,
+        mean_edge=0.12,
+        weighted_edge=0.15,
+        excess_pnl_usd=2500.0,
+        total_stake_usd=8000.0,
     )
 
     wallets = repo.list_all()
@@ -39,7 +43,30 @@ def test_tracked_wallets_upsert_round_trip(tmp_db: sqlite3.Connection) -> None:
     assert wallet.closed_position_wins == 21
     assert wallet.winrate == 0.7
     assert wallet.leaderboard_pnl == 1234.5
+    assert wallet.mean_edge == 0.12
+    assert wallet.weighted_edge == 0.15
+    assert wallet.excess_pnl_usd == 2500.0
+    assert wallet.total_stake_usd == 8000.0
     assert wallet.last_refreshed_at >= int(time.time()) - 5
+
+
+def test_tracked_wallets_upsert_round_trip_optional_metrics_default_none(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = TrackedWalletsRepo(tmp_db)
+    repo.upsert(
+        address="0xabc",
+        closed_position_count=30,
+        closed_position_wins=21,
+        winrate=0.7,
+    )
+
+    wallet = repo.list_all()[0]
+    assert wallet.leaderboard_pnl is None
+    assert wallet.mean_edge is None
+    assert wallet.weighted_edge is None
+    assert wallet.excess_pnl_usd is None
+    assert wallet.total_stake_usd is None
 
 
 def test_tracked_wallets_second_upsert_updates_in_place(tmp_db: sqlite3.Connection) -> None:
@@ -50,6 +77,10 @@ def test_tracked_wallets_second_upsert_updates_in_place(tmp_db: sqlite3.Connecti
         closed_position_wins=5,
         winrate=0.5,
         leaderboard_pnl=100.0,
+        mean_edge=0.05,
+        weighted_edge=0.06,
+        excess_pnl_usd=500.0,
+        total_stake_usd=2000.0,
     )
     first_refresh = repo.list_all()[0].last_refreshed_at
 
@@ -61,6 +92,10 @@ def test_tracked_wallets_second_upsert_updates_in_place(tmp_db: sqlite3.Connecti
         closed_position_wins=15,
         winrate=0.75,
         leaderboard_pnl=None,
+        mean_edge=0.20,
+        weighted_edge=0.22,
+        excess_pnl_usd=3000.0,
+        total_stake_usd=5000.0,
     )
 
     wallets = repo.list_all()
@@ -70,34 +105,72 @@ def test_tracked_wallets_second_upsert_updates_in_place(tmp_db: sqlite3.Connecti
     assert updated.closed_position_wins == 15
     assert updated.winrate == 0.75
     assert updated.leaderboard_pnl is None
+    assert updated.mean_edge == 0.20
+    assert updated.weighted_edge == 0.22
+    assert updated.excess_pnl_usd == 3000.0
+    assert updated.total_stake_usd == 5000.0
     assert updated.last_refreshed_at > first_refresh
 
 
-def test_tracked_wallets_list_active_filters_and_orders(tmp_db: sqlite3.Connection) -> None:
+def test_tracked_wallets_list_active_filters_by_edge_and_excess_pnl(
+    tmp_db: sqlite3.Connection,
+) -> None:
     repo = TrackedWalletsRepo(tmp_db)
-    # Below winrate threshold.
-    repo.upsert(
-        address="0xlow",
-        closed_position_count=30,
-        closed_position_wins=12,
-        winrate=0.4,
-        leaderboard_pnl=10.0,
-    )
-    # Below resolved threshold.
+    # Below resolved threshold (would otherwise pass).
     repo.upsert(
         address="0xfew",
         closed_position_count=5,
         closed_position_wins=5,
         winrate=1.0,
         leaderboard_pnl=10.0,
+        mean_edge=0.30,
+        weighted_edge=0.30,
+        excess_pnl_usd=5000.0,
+        total_stake_usd=8000.0,
     )
-    # Two passing — different winrates so we can assert ordering.
+    # Below mean_edge threshold.
+    repo.upsert(
+        address="0xlow_edge",
+        closed_position_count=30,
+        closed_position_wins=10,
+        winrate=0.33,
+        leaderboard_pnl=10.0,
+        mean_edge=0.01,
+        weighted_edge=0.01,
+        excess_pnl_usd=5000.0,
+        total_stake_usd=8000.0,
+    )
+    # Below excess_pnl_usd threshold.
+    repo.upsert(
+        address="0xlow_pnl",
+        closed_position_count=30,
+        closed_position_wins=20,
+        winrate=0.66,
+        leaderboard_pnl=10.0,
+        mean_edge=0.10,
+        weighted_edge=0.12,
+        excess_pnl_usd=200.0,
+        total_stake_usd=8000.0,
+    )
+    # NULL edge metrics — must be excluded.
+    repo.upsert(
+        address="0xnull",
+        closed_position_count=30,
+        closed_position_wins=20,
+        winrate=0.66,
+        leaderboard_pnl=10.0,
+    )
+    # Two passing — assert ordering by excess_pnl_usd desc.
     repo.upsert(
         address="0xmid",
         closed_position_count=25,
         closed_position_wins=18,
         winrate=0.72,
         leaderboard_pnl=10.0,
+        mean_edge=0.10,
+        weighted_edge=0.11,
+        excess_pnl_usd=2500.0,
+        total_stake_usd=8000.0,
     )
     repo.upsert(
         address="0xhi",
@@ -105,9 +178,17 @@ def test_tracked_wallets_list_active_filters_and_orders(tmp_db: sqlite3.Connecti
         closed_position_wins=36,
         winrate=0.9,
         leaderboard_pnl=10.0,
+        mean_edge=0.20,
+        weighted_edge=0.22,
+        excess_pnl_usd=9000.0,
+        total_stake_usd=15000.0,
     )
 
-    active = repo.list_active(min_winrate=0.65, min_resolved=20)
+    active = repo.list_active(
+        min_edge=0.05,
+        min_excess_pnl_usd=1000.0,
+        min_resolved=20,
+    )
     assert [w.address for w in active] == ["0xhi", "0xmid"]
 
 
@@ -119,8 +200,12 @@ def test_tracked_wallets_list_active_empty_when_no_matches(tmp_db: sqlite3.Conne
         closed_position_wins=2,
         winrate=0.2,
         leaderboard_pnl=None,
+        mean_edge=0.01,
+        weighted_edge=0.01,
+        excess_pnl_usd=10.0,
+        total_stake_usd=100.0,
     )
-    assert repo.list_active(min_winrate=0.65, min_resolved=20) == []
+    assert repo.list_active(min_edge=0.05, min_excess_pnl_usd=1000.0, min_resolved=20) == []
 
 
 def test_position_snapshot_upsert_round_trip(tmp_db: sqlite3.Connection) -> None:
