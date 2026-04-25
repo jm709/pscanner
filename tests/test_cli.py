@@ -78,7 +78,7 @@ def test_main_run_once_exits_zero(
             "markets_cached": 100,
         },
     )
-    fake_scanner._shutdown = AsyncMock()
+    fake_scanner.aclose = AsyncMock()
 
     def fake_ctor(*args: object, **kwargs: object) -> MagicMock:
         return fake_scanner
@@ -90,7 +90,7 @@ def test_main_run_once_exits_zero(
     assert "events_scanned" in out
     assert "100" in out
     fake_scanner.run_once.assert_awaited_once()
-    fake_scanner._shutdown.assert_awaited_once()
+    fake_scanner.aclose.assert_awaited_once()
 
 
 def test_main_run_once_propagates_failure_as_exit_one(
@@ -104,7 +104,7 @@ def test_main_run_once_propagates_failure_as_exit_one(
 
     fake_scanner = MagicMock()
     fake_scanner.run_once = AsyncMock(side_effect=RuntimeError("boom"))
-    fake_scanner._shutdown = AsyncMock()
+    fake_scanner.aclose = AsyncMock()
     monkeypatch.setattr("pscanner.cli.Scanner", lambda *a, **kw: fake_scanner)
 
     rc = main(["--config", str(cfg), "run", "--once"])
@@ -279,7 +279,7 @@ def test_main_run_once_via_no_config(
             "markets_cached": 0,
         },
     )
-    fake_scanner._shutdown = AsyncMock()
+    fake_scanner.aclose = AsyncMock()
     monkeypatch.setattr("pscanner.cli.Scanner", lambda *a, **kw: fake_scanner)
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("PSCANNER_CONFIG", raising=False)

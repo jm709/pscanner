@@ -147,7 +147,7 @@ def _run_once(config: Config) -> int:
         try:
             return await scanner.run_once()
         finally:
-            await scanner._shutdown()
+            await scanner.aclose()
 
     try:
         result = asyncio.run(_go())

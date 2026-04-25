@@ -394,6 +394,7 @@ async def test_refresh_subscriptions_batches_asset_ids() -> None:
             "outcomes": ["YES", "NO"],
             "outcomePrices": ["0.5", "0.5"],
             "clobTokenIds": ["a1", "a2"],
+            "volume": 1000.0,
         }
     )
     market_b = Market.model_validate(
@@ -404,6 +405,7 @@ async def test_refresh_subscriptions_batches_asset_ids() -> None:
             "outcomes": ["YES", "NO"],
             "outcomePrices": ["0.4", "0.6"],
             "clobTokenIds": ["b1", "b2", "b3"],
+            "volume": 1000.0,
         }
     )
     ws = StubWebSocket()
@@ -433,6 +435,128 @@ async def test_refresh_subscriptions_batches_asset_ids() -> None:
     assert ws.subscribe_calls[0] == ["a1", "a2"]
     assert ws.subscribe_calls[1] == ["b1", "b2"]
     assert ws.subscribe_calls[2] == ["b3"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_subscriptions_skips_markets_without_order_book() -> None:
+    """Markets with ``enable_order_book=False`` aren't cached or subscribed."""
+    bookless = Market.model_validate(
+        {
+            "id": "m-x",
+            "question": "X?",
+            "slug": "x",
+            "outcomes": ["YES", "NO"],
+            "outcomePrices": ["0.5", "0.5"],
+            "clobTokenIds": ["x1", "x2"],
+            "volume": 5000.0,
+            "enableOrderBook": False,
+        }
+    )
+    booked = Market.model_validate(
+        {
+            "id": "m-y",
+            "question": "Y?",
+            "slug": "y",
+            "outcomes": ["YES", "NO"],
+            "outcomePrices": ["0.5", "0.5"],
+            "clobTokenIds": ["y1", "y2"],
+            "volume": 5000.0,
+            "enableOrderBook": True,
+        }
+    )
+    ws = StubWebSocket()
+    gamma = StubGammaClient([bookless, booked])
+    market_cache = StubMarketCache()
+    detector = WhalesDetector(
+        config=_make_config(),
+        ws=ws,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        gamma_client=gamma,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        data_client=StubDataClient(),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        market_cache=market_cache,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        wallet_first_seen=StubFirstSeen(),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    )
+
+    await detector._refresh_subscriptions()
+
+    assert [m.id for m in market_cache.upserts] == ["m-y"]
+    assert detector._asset_to_market == {"y1": "m-y", "y2": "m-y"}
+
+
+@pytest.mark.asyncio
+async def test_refresh_subscriptions_stops_at_max_markets_cap() -> None:
+    """Loop stops once ``subscription_max_markets * 2`` asset IDs accumulated."""
+
+    def _make_market_payload(idx: int) -> dict[str, Any]:
+        return {
+            "id": f"m-{idx}",
+            "question": "Q?",
+            "slug": f"slug-{idx}",
+            "outcomes": ["YES", "NO"],
+            "outcomePrices": ["0.5", "0.5"],
+            "clobTokenIds": [f"a{idx}", f"b{idx}"],
+            "volume": 1000.0,
+        }
+
+    markets = [Market.model_validate(_make_market_payload(i)) for i in range(10)]
+    ws = StubWebSocket()
+    gamma = StubGammaClient(markets)
+    market_cache = StubMarketCache()
+    # Cap of 3 markets -> 6 asset id ceiling. Should stop after 3 markets.
+    detector = WhalesDetector(
+        config=_make_config(subscription_max_markets=3),
+        ws=ws,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        gamma_client=gamma,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        data_client=StubDataClient(),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        market_cache=market_cache,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        wallet_first_seen=StubFirstSeen(),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    )
+
+    await detector._refresh_subscriptions()
+
+    assert len(market_cache.upserts) == 3
+    assert len(detector._asset_to_market) == 6
+
+
+@pytest.mark.asyncio
+async def test_refresh_subscriptions_skips_low_volume_markets() -> None:
+    """Markets with volume below ``subscription_min_volume_usd`` are skipped."""
+    quiet = Market.model_validate(
+        {
+            "id": "m-quiet",
+            "question": "Q?",
+            "slug": "quiet",
+            "outcomes": ["YES", "NO"],
+            "outcomePrices": ["0.5", "0.5"],
+            "clobTokenIds": ["q1", "q2"],
+            "volume": 5.0,
+        }
+    )
+    busy = Market.model_validate(
+        {
+            "id": "m-busy",
+            "question": "B?",
+            "slug": "busy",
+            "outcomes": ["YES", "NO"],
+            "outcomePrices": ["0.5", "0.5"],
+            "clobTokenIds": ["w1", "w2"],
+            "volume": 5000.0,
+        }
+    )
+    ws = StubWebSocket()
+    gamma = StubGammaClient([quiet, busy])
+    market_cache = StubMarketCache()
+    detector = WhalesDetector(
+        config=_make_config(subscription_min_volume_usd=100.0),
+        ws=ws,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        gamma_client=gamma,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        data_client=StubDataClient(),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        market_cache=market_cache,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        wallet_first_seen=StubFirstSeen(),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    )
+
+    await detector._refresh_subscriptions()
+
+    assert [m.id for m in market_cache.upserts] == ["m-busy"]
 
 
 @pytest.mark.asyncio

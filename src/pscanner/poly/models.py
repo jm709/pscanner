@@ -99,6 +99,11 @@ class Market(BaseModel):
         Field(alias="clobTokenIds", default_factory=list),
     ] = Field(default_factory=list)
     event_id: str | None = None
+    group_item_title: Annotated[str | None, Field(alias="groupItemTitle", default=None)] = None
+    group_item_threshold: Annotated[
+        str | None,
+        Field(alias="groupItemThreshold", default=None),
+    ] = None
 
     @field_validator("outcomes", "clob_token_ids", mode="before")
     @classmethod

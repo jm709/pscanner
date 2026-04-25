@@ -151,7 +151,7 @@ async def test_scanner_constructs_with_all_detectors_enabled(db_path: Path) -> N
         assert isinstance(scanner.sink, AlertSink)
         assert scanner.renderer is not None
     finally:
-        await scanner._shutdown()
+        await scanner.aclose()
 
 
 @pytest.mark.asyncio
@@ -162,7 +162,7 @@ async def test_run_once_with_no_data_returns_zero_counts(db_path: Path) -> None:
     try:
         result = await scanner.run_once()
     finally:
-        await scanner._shutdown()
+        await scanner.aclose()
     assert result == {
         "events_scanned": 0,
         "alerts_emitted": 0,
@@ -180,7 +180,7 @@ async def test_run_once_emits_mispricing_alert(db_path: Path) -> None:
     try:
         result = await scanner.run_once()
     finally:
-        await scanner._shutdown()
+        await scanner.aclose()
     assert result["events_scanned"] == 1
     assert result["alerts_emitted"] == 1
 
@@ -197,7 +197,7 @@ async def test_run_once_caches_markets_via_whales(db_path: Path) -> None:
     try:
         result = await scanner.run_once()
     finally:
-        await scanner._shutdown()
+        await scanner.aclose()
     assert result["markets_cached"] == 2
     cast("MagicMock", clients.market_ws).connect.assert_not_called()
 
@@ -233,7 +233,7 @@ async def test_run_invokes_shutdown_on_taskgroup_failure(
     db_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """SIGINT-equivalent: any unrecoverable exit from ``run`` must call ``_shutdown``."""
+    """SIGINT-equivalent: any unrecoverable exit from ``run`` must call ``aclose``."""
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())
     config = _make_config(enable_smart=False, enable_misprice=True, enable_whales=False)
     clients = _make_clients()
@@ -253,8 +253,8 @@ async def test_shutdown_is_idempotent(db_path: Path) -> None:
     config = _make_config()
     clients = _make_clients()
     scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    await scanner._shutdown()
-    await scanner._shutdown()
+    await scanner.aclose()
+    await scanner.aclose()
     cast("MagicMock", clients.market_ws).close.assert_awaited()
 
 
@@ -265,7 +265,7 @@ async def test_shutdown_closes_owned_clients(db_path: Path) -> None:
     # Replace owned clients with mocks to verify aclose calls without networking.
     mocked = _make_clients()
     scanner._clients = mocked
-    await scanner._shutdown()
+    await scanner.aclose()
     cast("MagicMock", mocked.market_ws).close.assert_awaited()
     cast("MagicMock", mocked.gamma_http).aclose.assert_awaited()
     cast("MagicMock", mocked.data_http).aclose.assert_awaited()
@@ -279,7 +279,7 @@ async def test_run_once_with_disabled_detectors_does_no_work(db_path: Path) -> N
     try:
         result = await scanner.run_once()
     finally:
-        await scanner._shutdown()
+        await scanner.aclose()
     assert result["events_scanned"] == 0
     cast("MagicMock", clients.gamma_client).iter_events.assert_not_called()
     cast("MagicMock", clients.gamma_client).list_markets.assert_not_called()

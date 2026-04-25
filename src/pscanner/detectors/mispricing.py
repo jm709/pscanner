@@ -4,6 +4,11 @@ For mutex-outcome events on Polymarket the sum of the YES legs across every
 market in the event must equal ``1.0`` at no-arbitrage. A persistent deviation
 hints at either an arbitrage opportunity or a stale book; either way it is
 worth a human eyeball.
+
+Non-mutex layouts (date-range or threshold buckets, e.g. "Measles cases in
+2026 above N") have markets with a non-empty ``groupItemTitle`` and are
+skipped: their outcomes are independent, so the sum-to-1 invariant doesn't
+apply.
 """
 
 from __future__ import annotations
@@ -76,10 +81,15 @@ class MispricingDetector:
         """
         events = self._gamma.iter_events(active=True, closed=False)
         async for event in events:
-            await self._maybe_alert(event, sink)
+            await self.evaluate_event(event, sink)
 
-    async def _maybe_alert(self, event: Event, sink: AlertSink) -> None:
-        """Evaluate a single event and emit an alert if it mispricies."""
+    async def evaluate_event(self, event: Event, sink: AlertSink) -> None:
+        """Evaluate a single event and emit an alert if it mispricies.
+
+        Args:
+            event: Event to evaluate.
+            sink: Sink to publish the alert to (when warranted).
+        """
         if not self._is_eligible(event):
             return
         price_sum, count = self._sum_outcome_prices(event)
@@ -92,10 +102,18 @@ class MispricingDetector:
         await sink.emit(alert)
 
     def _is_eligible(self, event: Event) -> bool:
-        """Apply the cheap pre-filters that don't depend on outcome prices."""
+        """Apply pre-filters that don't depend on outcome prices.
+
+        Skips events that aren't true mutex layouts: a non-empty
+        ``groupItemTitle`` on any market signals a date-range or
+        threshold-bucket layout where outcomes are independent and the
+        no-arbitrage sum-to-1 invariant does not apply.
+        """
         if len(event.markets) < _MIN_VALID_MARKETS:
             return False
         if any(not market.enable_order_book for market in event.markets):
+            return False
+        if any(market.group_item_title for market in event.markets):
             return False
         return not (
             event.liquidity is None or event.liquidity < self._config.min_event_liquidity_usd

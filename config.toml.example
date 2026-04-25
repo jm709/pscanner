@@ -26,6 +26,8 @@ big_bet_min_pct_of_liquidity = 0.05
 big_bet_min_usd = 2000
 ws_subscribe_batch_size = 50
 ws_resubscribe_interval_seconds = 1800
+subscription_max_markets = 2000
+subscription_min_volume_usd = 100
 
 [ratelimit]
 gamma_rpm = 50

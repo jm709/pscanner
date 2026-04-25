@@ -188,12 +188,8 @@ async def test_refresh_handles_empty_leaderboard() -> None:
 
 
 @pytest.mark.asyncio
-async def test_poll_emits_alert_for_new_position(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("pscanner.detectors.smart_money.time.time", lambda: 1_700_000_000)
-    monkeypatch.setattr(
-        "pscanner.detectors.smart_money.time.strftime",
-        lambda fmt, _t=None: "20231114",
-    )
+async def test_poll_first_observation_silently_upserts_no_alert() -> None:
+    """Cold-start bootstrap: first time we see a position, snapshot only."""
     data_client = AsyncMock()
     data_client.get_positions.return_value = [_open_position(size=5000.0, avg_price=0.4)]
     tracked_repo = MagicMock()
@@ -207,7 +203,37 @@ async def test_poll_emits_alert_for_new_position(monkeypatch: pytest.MonkeyPatch
         snapshots_repo=snapshots_repo,
     )
 
-    await detector._poll_positions(sink)
+    await detector.poll_positions(sink)
+
+    sink.emit.assert_not_called()
+    snapshots_repo.upsert.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_poll_emits_alert_when_growth_meets_threshold_after_bootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Second observation: prev is set, delta_usd >= threshold -> emit."""
+    monkeypatch.setattr("pscanner.detectors.smart_money.time.time", lambda: 1_700_000_000)
+    monkeypatch.setattr(
+        "pscanner.detectors.smart_money.time.strftime",
+        lambda fmt, _t=None: "20231114",
+    )
+    # prev=2500 shares, new=5000 shares at avg_price=0.4 -> delta_usd = 2500*0.4 = 1000 (>= 1000).
+    data_client = AsyncMock()
+    data_client.get_positions.return_value = [_open_position(size=5000.0, avg_price=0.4)]
+    tracked_repo = MagicMock()
+    tracked_repo.list_active.return_value = [_tracked_wallet()]
+    snapshots_repo = MagicMock()
+    snapshots_repo.previous_size.return_value = 2500.0
+    sink = AsyncMock()
+    detector, _, _, _ = _build_detector(
+        data_client=data_client,
+        tracked_repo=tracked_repo,
+        snapshots_repo=snapshots_repo,
+    )
+
+    await detector.poll_positions(sink)
 
     sink.emit.assert_awaited_once()
     alert = sink.emit.await_args.args[0]
@@ -215,9 +241,8 @@ async def test_poll_emits_alert_for_new_position(monkeypatch: pytest.MonkeyPatch
     assert alert.detector == "smart_money"
     assert alert.alert_key == "smart:0xabc:0xcond:yes:20231114"
     assert alert.body["new_size"] == 5000.0
-    assert alert.body["prev_size"] == 0.0
-    assert alert.body["winrate"] == 0.8
-    assert alert.body["closed_position_count"] == 10
+    assert alert.body["prev_size"] == 2500.0
+    assert alert.body["delta_usd"] == pytest.approx(1000.0)
     snapshots_repo.upsert.assert_called_once()
 
 
@@ -236,7 +261,7 @@ async def test_poll_no_alert_when_size_unchanged() -> None:
         snapshots_repo=snapshots_repo,
     )
 
-    await detector._poll_positions(sink)
+    await detector.poll_positions(sink)
 
     sink.emit.assert_not_called()
     snapshots_repo.upsert.assert_called_once()  # Still refreshes the snapshot.
@@ -258,7 +283,7 @@ async def test_poll_no_alert_when_delta_below_threshold() -> None:
         snapshots_repo=snapshots_repo,
     )
 
-    await detector._poll_positions(sink)
+    await detector.poll_positions(sink)
 
     sink.emit.assert_not_called()
     snapshots_repo.upsert.assert_called_once()
@@ -287,7 +312,7 @@ async def test_poll_emits_alert_when_delta_meets_threshold(
         snapshots_repo=snapshots_repo,
     )
 
-    await detector._poll_positions(sink)
+    await detector.poll_positions(sink)
 
     sink.emit.assert_awaited_once()
     alert = sink.emit.await_args.args[0]
@@ -306,7 +331,7 @@ async def test_poll_handles_no_tracked_wallets() -> None:
         tracked_repo=tracked_repo,
     )
 
-    await detector._poll_positions(sink)
+    await detector.poll_positions(sink)
 
     sink.emit.assert_not_called()
     data_client.get_positions.assert_not_called()
@@ -326,7 +351,7 @@ async def test_poll_handles_empty_positions() -> None:
         snapshots_repo=snapshots_repo,
     )
 
-    await detector._poll_positions(sink)
+    await detector.poll_positions(sink)
 
     sink.emit.assert_not_called()
     snapshots_repo.upsert.assert_not_called()
@@ -340,12 +365,13 @@ async def test_poll_continues_after_get_positions_error() -> None:
     data_client = AsyncMock()
     data_client.get_positions.side_effect = [
         RuntimeError("boom"),
-        [_open_position(address="0xbbb", size=5000.0, avg_price=0.4)],
+        [_open_position(address="0xbbb", size=10000.0, avg_price=0.4)],
     ]
     tracked_repo = MagicMock()
     tracked_repo.list_active.return_value = [wallet_a, wallet_b]
     snapshots_repo = MagicMock()
-    snapshots_repo.previous_size.return_value = None
+    # Prev=2500 -> new=10000 at 0.4 -> delta_usd = 7500*0.4 = 3000 (>= 1000) -> emit.
+    snapshots_repo.previous_size.return_value = 2500.0
     sink = AsyncMock()
     detector, _, _, _ = _build_detector(
         data_client=data_client,
@@ -353,9 +379,9 @@ async def test_poll_continues_after_get_positions_error() -> None:
         snapshots_repo=snapshots_repo,
     )
 
-    await detector._poll_positions(sink)
+    await detector.poll_positions(sink)
 
-    # Wallet B still produced an alert (prev was None).
+    # Wallet B still produced an alert (delta_usd cleared the threshold).
     sink.emit.assert_awaited_once()
     assert data_client.get_positions.await_count == 2
 
@@ -371,12 +397,13 @@ async def test_alert_key_uses_lowercased_outcome_as_side(
     )
     data_client = AsyncMock()
     data_client.get_positions.return_value = [
-        _open_position(outcome="NO", size=5000.0, avg_price=0.4),
+        _open_position(outcome="NO", size=10000.0, avg_price=0.4),
     ]
     tracked_repo = MagicMock()
     tracked_repo.list_active.return_value = [_tracked_wallet()]
     snapshots_repo = MagicMock()
-    snapshots_repo.previous_size.return_value = None
+    # Prev=5000 -> new=10000 at 0.4 -> delta_usd = 5000*0.4 = 2000 (>= 1000).
+    snapshots_repo.previous_size.return_value = 5000.0
     sink = AsyncMock()
     detector, _, _, _ = _build_detector(
         data_client=data_client,
@@ -384,7 +411,7 @@ async def test_alert_key_uses_lowercased_outcome_as_side(
         snapshots_repo=snapshots_repo,
     )
 
-    await detector._poll_positions(sink)
+    await detector.poll_positions(sink)
 
     alert = sink.emit.await_args.args[0]
     assert alert.alert_key.endswith(":no:20231114")

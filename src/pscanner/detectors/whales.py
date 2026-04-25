@@ -92,12 +92,29 @@ class WhalesDetector:
             await asyncio.sleep(self._config.ws_resubscribe_interval_seconds)
 
     async def _refresh_subscriptions(self) -> None:
-        """Pull every active market, cache it, and (re)subscribe in batches."""
+        """Pull bounded slice of active markets, cache, and (re)subscribe.
+
+        WebSocket connections are capped at 5/IP and the active-market
+        catalogue is huge (50k+), so the loop applies three filters:
+
+        * skip markets without an order book,
+        * skip markets below ``subscription_min_volume_usd``,
+        * stop accumulating once asset-id count reaches roughly
+          ``subscription_max_markets * 2`` (each market has ~2 token IDs).
+        """
+        asset_id_cap = self._config.subscription_max_markets * 2
+        min_volume = self._config.subscription_min_volume_usd
         asset_ids: list[str] = []
         async for market in self._gamma_client.iter_markets(active=True, closed=False):
+            if not market.enable_order_book:
+                continue
+            if (market.volume or 0.0) < min_volume:
+                continue
             self._cache_and_index(market, asset_ids)
+            if len(asset_ids) >= asset_id_cap:
+                break
         await self._subscribe_in_batches(asset_ids)
-        _LOG.debug(
+        _LOG.info(
             "whales.subscriptions.refreshed",
             markets=len(self._asset_to_market),
             assets=len(asset_ids),

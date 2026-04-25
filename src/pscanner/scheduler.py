@@ -184,7 +184,7 @@ class Scanner:
         except* KeyboardInterrupt:
             _LOG.info("scanner.shutdown.signal", source="keyboard_interrupt")
         finally:
-            await self._shutdown()
+            await self.aclose()
 
     async def _supervise_detector(
         self,
@@ -262,7 +262,7 @@ class Scanner:
             for event in page:
                 events_scanned += 1
                 try:
-                    await detector._maybe_alert(event, self._sink)
+                    await detector.evaluate_event(event, self._sink)
                 except Exception:
                     _LOG.exception(
                         "scanner.run_once.mispricing.event_failed",
@@ -293,14 +293,14 @@ class Scanner:
             entries = []
         for entry in entries:
             try:
-                await detector._refresh_one_wallet(entry)
+                await detector.refresh_one_wallet(entry)
             except Exception:
                 _LOG.exception(
                     "scanner.run_once.smart_money.refresh_one_failed",
                     wallet=entry.proxy_wallet,
                 )
         try:
-            await detector._poll_positions(self._sink)
+            await detector.poll_positions(self._sink)
         except Exception:
             _LOG.exception("scanner.run_once.smart_money.poll_failed")
 
@@ -331,7 +331,7 @@ class Scanner:
             except Exception:
                 _LOG.exception("scanner.run_once.whales.upsert_failed", market_id=market.id)
 
-    async def _shutdown(self) -> None:
+    async def aclose(self) -> None:
         """Tear down sockets, HTTP clients, renderer, and DB. Idempotent."""
         if self._closed:
             return

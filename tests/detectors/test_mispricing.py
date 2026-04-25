@@ -20,6 +20,7 @@ def _market(
     question: str = "Will X happen?",
     yes_price: float | None = 0.5,
     enable_order_book: bool = True,
+    group_item_title: str | None = None,
 ) -> Market:
     """Build a synthetic Market with optional YES price.
 
@@ -33,6 +34,7 @@ def _market(
         "outcomes": ["Yes", "No"],
         "outcomePrices": [] if yes_price is None else [yes_price, 1.0 - yes_price],
         "enableOrderBook": enable_order_book,
+        "groupItemTitle": group_item_title,
     }
     return Market.model_validate(payload)
 
@@ -147,6 +149,39 @@ async def test_event_within_threshold_does_not_alert() -> None:
     await detector._scan(sink)
 
     assert captured == []
+
+
+async def test_event_with_group_item_title_markets_is_skipped() -> None:
+    """Date-range / threshold layouts (non-mutex) are skipped."""
+    markets = [
+        _market(market_id="m1", yes_price=0.5, group_item_title="December 31, 2025"),
+        _market(market_id="m2", yes_price=0.5, group_item_title="December 31, 2026"),
+        _market(market_id="m3", yes_price=0.5, group_item_title="December 31, 2027"),
+    ]
+    event = _event(markets=markets)
+    detector, _ = _make_detector([event])
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert captured == []
+
+
+async def test_pure_mutex_event_with_no_group_item_title_still_alerts() -> None:
+    """Mutex events (group_item_title=None) keep alerting on deviation."""
+    markets = [
+        _market(market_id="m1", yes_price=0.5, group_item_title=None),
+        _market(market_id="m2", yes_price=0.4, group_item_title=None),
+        _market(market_id="m3", yes_price=0.2, group_item_title=None),
+    ]
+    event = _event(markets=markets)
+    detector, _ = _make_detector([event])
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert len(captured) == 1
+    assert captured[0].body["price_sum"] == pytest.approx(1.1)
 
 
 async def test_event_with_order_book_disabled_market_is_skipped() -> None:
