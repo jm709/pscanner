@@ -2,17 +2,20 @@
 
 The sink dedupes by ``alert_key`` (delegated to ``AlertsRepo.insert_if_new``),
 persists newly-seen alerts to SQLite, and forwards them to the optional
-terminal renderer plus any registered subscribers. Wave 1 freezes the shape;
-Wave 2's ``alert-sink`` agent implements the body.
+terminal renderer plus any registered subscribers.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 
+import structlog
+
 from pscanner.alerts.models import Alert
 from pscanner.alerts.terminal import TerminalRenderer
 from pscanner.store.repo import AlertsRepo
+
+_log = structlog.get_logger(__name__)
 
 
 class AlertSink:
@@ -30,7 +33,9 @@ class AlertSink:
             renderer: Optional terminal renderer that receives every newly
                 inserted alert via ``push``.
         """
-        raise NotImplementedError("Wave 2: alert-sink")
+        self._alerts_repo = alerts_repo
+        self._renderer = renderer
+        self._subscribers: list[Callable[[Alert], None]] = []
 
     async def emit(self, alert: Alert) -> bool:
         """Publish ``alert`` once. Returns whether it was newly inserted.
@@ -42,7 +47,20 @@ class AlertSink:
             ``True`` if the alert was new (and thus forwarded to renderer +
             subscribers); ``False`` if it was a dedupe hit.
         """
-        raise NotImplementedError("Wave 2: alert-sink")
+        inserted = self._alerts_repo.insert_if_new(alert)
+        if not inserted:
+            return False
+        if self._renderer is not None:
+            self._renderer.push(alert)
+        for callback in self._subscribers:
+            callback(alert)
+        _log.info(
+            "alert.emitted",
+            detector=alert.detector,
+            alert_key=alert.alert_key,
+            severity=alert.severity,
+        )
+        return True
 
     def subscribe(self, callback: Callable[[Alert], None]) -> None:
         """Register a synchronous callback fired on every newly-inserted alert.
@@ -50,4 +68,4 @@ class AlertSink:
         Args:
             callback: Synchronous fn invoked from within ``emit``. Must not block.
         """
-        raise NotImplementedError("Wave 2: alert-sink")
+        self._subscribers.append(callback)
