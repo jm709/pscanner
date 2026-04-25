@@ -32,3 +32,12 @@ subscription_min_volume_usd = 100
 [ratelimit]
 gamma_rpm = 50
 data_rpm = 50
+
+[positions]
+enabled = true
+snapshot_interval_seconds = 300
+
+[activity]
+enabled = true
+poll_interval_seconds = 300
+activity_page_limit = 200

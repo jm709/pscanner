@@ -16,11 +16,15 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from pscanner.alerts.sink import AlertSink
+from pscanner.collectors.activity import ActivityCollector
+from pscanner.collectors.positions import PositionCollector
 from pscanner.collectors.trades import TradeCollector
 from pscanner.collectors.watchlist import WatchlistSyncer
 from pscanner.config import (
+    ActivityConfig,
     Config,
     MispricingConfig,
+    PositionsConfig,
     RatelimitConfig,
     ScannerConfig,
     SmartMoneyConfig,
@@ -74,6 +78,8 @@ def _make_config(
     enable_smart: bool = True,
     enable_misprice: bool = True,
     enable_whales: bool = True,
+    enable_positions: bool = True,
+    enable_activity: bool = True,
 ) -> Config:
     return Config(
         scanner=ScannerConfig(),
@@ -81,6 +87,8 @@ def _make_config(
         mispricing=MispricingConfig(enabled=enable_misprice),
         whales=WhalesConfig(enabled=enable_whales),
         ratelimit=RatelimitConfig(),
+        positions=PositionsConfig(enabled=enable_positions),
+        activity=ActivityConfig(enabled=enable_activity),
     )
 
 
@@ -167,6 +175,8 @@ async def test_run_once_with_no_data_returns_zero_counts(db_path: Path) -> None:
         "markets_cached": 0,
         "watched_wallets": 0,
         "trades_recorded": 0,
+        "position_snapshots": 0,
+        "activity_events": 0,
     }
 
 
@@ -427,3 +437,65 @@ async def test_scanner_skips_whales_callback_when_disabled(db_path: Path) -> Non
         assert trades._new_trade_callbacks == []
     finally:
         await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_scanner_constructs_dc2_collectors_when_enabled(db_path: Path) -> None:
+    """DC-2 Wave 1: position + activity collectors live in ``_collectors``."""
+    config = _make_config(
+        enable_smart=False,
+        enable_misprice=False,
+        enable_whales=False,
+        enable_positions=True,
+        enable_activity=True,
+    )
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    try:
+        assert "position_collector" in scanner._collectors
+        assert "activity_collector" in scanner._collectors
+        assert isinstance(scanner._collectors["position_collector"], PositionCollector)
+        assert isinstance(scanner._collectors["activity_collector"], ActivityCollector)
+        assert scanner._positions_repo is not None
+        assert scanner._activity_repo is not None
+    finally:
+        await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_scanner_skips_dc2_collectors_when_disabled(db_path: Path) -> None:
+    """When ``positions``/``activity`` are disabled, neither collector is wired."""
+    config = _make_config(
+        enable_smart=False,
+        enable_misprice=False,
+        enable_whales=False,
+        enable_positions=False,
+        enable_activity=False,
+    )
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    try:
+        assert "position_collector" not in scanner._collectors
+        assert "activity_collector" not in scanner._collectors
+    finally:
+        await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_run_once_dc2_stub_metrics_remain_zero(db_path: Path) -> None:
+    """Wave 1 stubs raise; ``_run_once_collectors`` swallows so metrics stay 0."""
+    config = _make_config(
+        enable_smart=False,
+        enable_misprice=False,
+        enable_whales=False,
+        enable_positions=True,
+        enable_activity=True,
+    )
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    try:
+        result = await scanner.run_once()
+    finally:
+        await scanner.aclose()
+    assert result["position_snapshots"] == 0
+    assert result["activity_events"] == 0

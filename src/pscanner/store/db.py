@@ -94,6 +94,36 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     "ON wallet_trades(wallet, timestamp DESC)",
     "CREATE INDEX IF NOT EXISTS idx_wallet_trades_market_ts "
     "ON wallet_trades(condition_id, timestamp DESC)",
+    """
+    CREATE TABLE IF NOT EXISTS wallet_positions_history (
+      wallet TEXT NOT NULL,
+      condition_id TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      size REAL NOT NULL,
+      avg_price REAL NOT NULL,
+      current_value REAL,
+      cash_pnl REAL,
+      realized_pnl REAL,
+      redeemable INTEGER,
+      snapshot_at INTEGER NOT NULL,
+      PRIMARY KEY (wallet, condition_id, outcome, snapshot_at)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wph_wallet_ts "
+    "ON wallet_positions_history(wallet, snapshot_at DESC)",
+    """
+    CREATE TABLE IF NOT EXISTS wallet_activity_events (
+      wallet TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      timestamp INTEGER NOT NULL,
+      recorded_at INTEGER NOT NULL,
+      source TEXT NOT NULL,
+      PRIMARY KEY (wallet, timestamp, event_type)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wae_wallet_ts "
+    "ON wallet_activity_events(wallet, timestamp DESC)",
 )
 
 _MIGRATIONS: tuple[str, ...] = (

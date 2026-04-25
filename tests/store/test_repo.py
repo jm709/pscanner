@@ -14,7 +14,11 @@ from pscanner.store.repo import (
     MarketCacheRepo,
     PositionSnapshotsRepo,
     TrackedWalletsRepo,
+    WalletActivityEvent,
+    WalletActivityEventsRepo,
     WalletFirstSeenRepo,
+    WalletPositionsHistoryRepo,
+    WalletPositionsHistoryRow,
     WalletTrade,
     WalletTradesRepo,
     WatchlistRepo,
@@ -597,5 +601,163 @@ def test_wallet_trades_count_by_wallet_groups_correctly(tmp_db: sqlite3.Connecti
     repo.insert(_make_trade(txn="0x1", wallet="0xa"))
     repo.insert(_make_trade(txn="0x2", wallet="0xa"))
     repo.insert(_make_trade(txn="0x3", wallet="0xb"))
+
+    assert repo.count_by_wallet() == {"0xa": 2, "0xb": 1}
+
+
+def _make_history_row(
+    *,
+    wallet: str = "0xabc",
+    condition_id: str = "cond-1",
+    outcome: str = "Yes",
+    snapshot_at: int = 1_700_000_000,
+    size: float = 100.0,
+    avg_price: float = 0.42,
+    current_value: float | None = 50.0,
+    cash_pnl: float | None = 8.0,
+    realized_pnl: float | None = 2.0,
+    redeemable: bool | None = False,
+) -> WalletPositionsHistoryRow:
+    return WalletPositionsHistoryRow(
+        wallet=wallet,
+        condition_id=condition_id,
+        outcome=outcome,
+        size=size,
+        avg_price=avg_price,
+        current_value=current_value,
+        cash_pnl=cash_pnl,
+        realized_pnl=realized_pnl,
+        redeemable=redeemable,
+        snapshot_at=snapshot_at,
+    )
+
+
+def test_positions_history_insert_round_trips_all_fields(tmp_db: sqlite3.Connection) -> None:
+    repo = WalletPositionsHistoryRepo(tmp_db)
+    row = _make_history_row(redeemable=True)
+    assert repo.insert(row) is True
+
+    rows = repo.recent_for_wallet("0xabc")
+    assert len(rows) == 1
+    got = rows[0]
+    assert got == row
+
+
+def test_positions_history_insert_round_trips_none_optional_fields(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = WalletPositionsHistoryRepo(tmp_db)
+    row = _make_history_row(
+        current_value=None,
+        cash_pnl=None,
+        realized_pnl=None,
+        redeemable=None,
+    )
+    assert repo.insert(row) is True
+
+    got = repo.recent_for_wallet("0xabc")[0]
+    assert got.current_value is None
+    assert got.cash_pnl is None
+    assert got.realized_pnl is None
+    assert got.redeemable is None
+
+
+def test_positions_history_insert_pk_collision_returns_false(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = WalletPositionsHistoryRepo(tmp_db)
+    row = _make_history_row()
+    assert repo.insert(row) is True
+    assert repo.insert(row) is False
+
+
+def test_positions_history_two_snapshots_kept_and_ordered_desc(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = WalletPositionsHistoryRepo(tmp_db)
+    repo.insert(_make_history_row(snapshot_at=100, size=10.0))
+    repo.insert(_make_history_row(snapshot_at=300, size=30.0))
+    repo.insert(_make_history_row(snapshot_at=200, size=20.0))
+
+    rows = repo.recent_for_wallet("0xabc")
+    assert [r.snapshot_at for r in rows] == [300, 200, 100]
+
+    limited = repo.recent_for_wallet("0xabc", limit=2)
+    assert [r.snapshot_at for r in limited] == [300, 200]
+
+
+def test_positions_history_count_by_wallet_groups_correctly(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = WalletPositionsHistoryRepo(tmp_db)
+    repo.insert(_make_history_row(wallet="0xa", snapshot_at=100))
+    repo.insert(_make_history_row(wallet="0xa", snapshot_at=200))
+    repo.insert(_make_history_row(wallet="0xb", snapshot_at=300))
+
+    assert repo.count_by_wallet() == {"0xa": 2, "0xb": 1}
+
+
+def _make_activity_event(
+    *,
+    wallet: str = "0xabc",
+    event_type: str = "TRADE",
+    timestamp: int = 1_700_000_000,
+    payload: dict[str, Any] | None = None,
+    source: str = "activity_api",
+) -> WalletActivityEvent:
+    body = payload if payload is not None else {"hash": "0xtx", "size": 1.0}
+    return WalletActivityEvent(
+        wallet=wallet,
+        event_type=event_type,
+        payload_json=json.dumps(body),
+        timestamp=timestamp,
+        recorded_at=timestamp + 5,
+        source=source,
+    )
+
+
+def test_activity_events_insert_round_trips_all_fields(tmp_db: sqlite3.Connection) -> None:
+    repo = WalletActivityEventsRepo(tmp_db)
+    event = _make_activity_event(payload={"k": "v", "n": 1})
+    assert repo.insert(event) is True
+
+    rows = repo.recent_for_wallet("0xabc")
+    assert len(rows) == 1
+    got = rows[0]
+    assert got == event
+    assert json.loads(got.payload_json) == {"k": "v", "n": 1}
+
+
+def test_activity_events_insert_pk_collision_returns_false(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = WalletActivityEventsRepo(tmp_db)
+    event = _make_activity_event()
+    assert repo.insert(event) is True
+    assert repo.insert(event) is False
+
+
+def test_activity_events_recent_filters_by_event_type(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = WalletActivityEventsRepo(tmp_db)
+    repo.insert(_make_activity_event(event_type="TRADE", timestamp=100))
+    repo.insert(_make_activity_event(event_type="REDEEM", timestamp=200))
+    repo.insert(_make_activity_event(event_type="SPLIT", timestamp=300))
+
+    trades = repo.recent_for_wallet("0xabc", event_type="TRADE")
+    assert [e.event_type for e in trades] == ["TRADE"]
+
+    all_events = repo.recent_for_wallet("0xabc")
+    assert [e.timestamp for e in all_events] == [300, 200, 100]
+
+
+def test_activity_events_count_by_wallet_groups_correctly(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = WalletActivityEventsRepo(tmp_db)
+    repo.insert(_make_activity_event(wallet="0xa", timestamp=100))
+    repo.insert(_make_activity_event(wallet="0xa", timestamp=200))
+    repo.insert(_make_activity_event(wallet="0xb", timestamp=300))
 
     assert repo.count_by_wallet() == {"0xa": 2, "0xb": 1}

@@ -74,6 +74,21 @@ class RatelimitConfig(_Section):
     data_rpm: int = 50
 
 
+class PositionsConfig(_Section):
+    """Cadence + toggles for the position-snapshot collector."""
+
+    enabled: bool = True
+    snapshot_interval_seconds: float = 300.0
+
+
+class ActivityConfig(_Section):
+    """Cadence + toggles for the activity-stream collector."""
+
+    enabled: bool = True
+    poll_interval_seconds: float = 300.0
+    activity_page_limit: int = 200
+
+
 class Config(BaseModel):
     """Root pscanner config aggregating every section."""
 
@@ -84,6 +99,8 @@ class Config(BaseModel):
     mispricing: MispricingConfig = Field(default_factory=MispricingConfig)
     whales: WhalesConfig = Field(default_factory=WhalesConfig)
     ratelimit: RatelimitConfig = Field(default_factory=RatelimitConfig)
+    positions: PositionsConfig = Field(default_factory=PositionsConfig)
+    activity: ActivityConfig = Field(default_factory=ActivityConfig)
 
     @classmethod
     def load(cls, path: Path | None = None) -> Config:

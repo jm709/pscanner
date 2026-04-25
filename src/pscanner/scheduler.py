@@ -31,7 +31,9 @@ import structlog
 
 from pscanner.alerts.sink import AlertSink
 from pscanner.alerts.terminal import TerminalRenderer
+from pscanner.collectors.activity import ActivityCollector
 from pscanner.collectors.base import Collector
+from pscanner.collectors.positions import PositionCollector
 from pscanner.collectors.trades import TradeCollector
 from pscanner.collectors.watchlist import WatchlistRegistry, WatchlistSyncer
 from pscanner.config import Config
@@ -47,7 +49,9 @@ from pscanner.store.repo import (
     MarketCacheRepo,
     PositionSnapshotsRepo,
     TrackedWalletsRepo,
+    WalletActivityEventsRepo,
     WalletFirstSeenRepo,
+    WalletPositionsHistoryRepo,
     WalletTradesRepo,
     WatchlistRepo,
 )
@@ -105,6 +109,8 @@ class Scanner:
         self._first_seen_repo = WalletFirstSeenRepo(self._db)
         self._market_cache_repo = MarketCacheRepo(self._db)
         self._alerts_repo = AlertsRepo(self._db)
+        self._positions_repo = WalletPositionsHistoryRepo(self._db)
+        self._activity_repo = WalletActivityEventsRepo(self._db)
         self._watchlist_repo = WatchlistRepo(self._db)
         self._wallet_trades_repo = WalletTradesRepo(self._db)
         self._owns_clients = clients is None
@@ -148,13 +154,12 @@ class Scanner:
         )
 
     def _build_collectors(self) -> dict[str, Collector]:
-        """Instantiate the watchlist syncer and trade collector.
+        """Instantiate the watchlist syncer, trade collector, and DC-2 collectors.
 
-        Both collectors are always-on; there is no enable/disable knob in
-        ``Config`` because the watchlist+trades pipeline is integral to the
-        DC-1 data-collection contract. The watchlist is hydrated from any
-        rows persisted by the CLI ``watch``/``unwatch`` commands so the trade
-        collector can subscribe immediately on startup.
+        The watchlist syncer and trade collector are always-on (integral to
+        the DC-1 data-collection contract). The DC-2 position and activity
+        collectors are gated on their respective config flags so operators
+        can disable them while the Wave 2 implementation is in flight.
         """
         syncer = WatchlistSyncer(
             registry=self._watchlist_registry,
@@ -167,7 +172,23 @@ class Scanner:
             data_client=self._clients.data_client,
             trades_repo=self._wallet_trades_repo,
         )
-        return {syncer.name: syncer, trades.name: trades}
+        collectors: dict[str, Collector] = {syncer.name: syncer, trades.name: trades}
+        if self._config.positions.enabled:
+            collectors["position_collector"] = PositionCollector(
+                registry=self._watchlist_registry,
+                data_client=self._clients.data_client,
+                positions_repo=self._positions_repo,
+                snapshot_interval_seconds=self._config.positions.snapshot_interval_seconds,
+            )
+        if self._config.activity.enabled:
+            collectors["activity_collector"] = ActivityCollector(
+                registry=self._watchlist_registry,
+                data_client=self._clients.data_client,
+                activity_repo=self._activity_repo,
+                poll_interval_seconds=self._config.activity.poll_interval_seconds,
+                activity_page_limit=self._config.activity.activity_page_limit,
+            )
+        return collectors
 
     def _build_detectors(self) -> dict[str, Any]:
         """Instantiate the enabled detectors from config."""
@@ -294,7 +315,8 @@ class Scanner:
         Returns:
             Counts of work done in this pass — useful for the ``--once`` CLI:
             ``events_scanned``, ``alerts_emitted``, ``tracked_wallets``,
-            ``markets_cached``, ``watched_wallets``, ``trades_recorded``.
+            ``markets_cached``, ``watched_wallets``, ``trades_recorded``,
+            ``position_snapshots``, ``activity_events``.
         """
         baseline_alerts = self._alerts_repo.recent(limit=10000)
         before = len(baseline_alerts)
@@ -302,7 +324,7 @@ class Scanner:
         events_scanned = await self._run_once_mispricing()
         await self._run_once_smart_money()
         await self._run_once_whales()
-        await self._run_once_collectors()
+        position_snapshots, activity_events = await self._run_once_collectors()
         after_alerts = self._alerts_repo.recent(limit=10000)
         markets = self._market_cache_repo.list_active()
         tracked = self._tracked_repo.list_all()
@@ -314,9 +336,11 @@ class Scanner:
             "markets_cached": len(markets),
             "watched_wallets": len(self._watchlist_registry.addresses()),
             "trades_recorded": trades_after - trades_before,
+            "position_snapshots": position_snapshots,
+            "activity_events": activity_events,
         }
 
-    async def _run_once_collectors(self) -> None:
+    async def _run_once_collectors(self) -> tuple[int, int]:
         """Drive a single iteration of each collector.
 
         ``WatchlistSyncer.sync_smart_money`` mirrors any tracked wallets the
@@ -324,19 +348,59 @@ class Scanner:
         collector's subsequent ``poll_all_wallets`` covers them too. Errors
         are logged and swallowed — single-shot mode should report whatever
         it can finish, not bail on the first transient failure.
+
+        Returns:
+            ``(position_snapshots, activity_events)`` — counts of new rows
+            inserted by the DC-2 collectors. Both are 0 when the collectors
+            are disabled or raise (Wave 1 stubs always raise).
         """
+        await self._run_once_watchlist_sync()
+        await self._run_once_trade_collector()
+        position_snapshots = await self._run_once_position_collector()
+        activity_events = await self._run_once_activity_collector()
+        return position_snapshots, activity_events
+
+    async def _run_once_watchlist_sync(self) -> None:
+        """Single-shot mirror of tracked wallets into the watchlist registry."""
         syncer = self._collectors.get("watchlist_sync")
-        if isinstance(syncer, WatchlistSyncer):
-            try:
-                await syncer.sync_smart_money()
-            except Exception:
-                _LOG.exception("scanner.run_once.watchlist_sync.failed")
+        if not isinstance(syncer, WatchlistSyncer):
+            return
+        try:
+            await syncer.sync_smart_money()
+        except Exception:
+            _LOG.exception("scanner.run_once.watchlist_sync.failed")
+
+    async def _run_once_trade_collector(self) -> None:
+        """Single-shot poll of every watched wallet's ``/activity`` for trades."""
         trades = self._collectors.get("trade_collector")
-        if isinstance(trades, TradeCollector):
-            try:
-                await trades.poll_all_wallets()
-            except Exception:
-                _LOG.exception("scanner.run_once.trade_collector.failed")
+        if not isinstance(trades, TradeCollector):
+            return
+        try:
+            await trades.poll_all_wallets()
+        except Exception:
+            _LOG.exception("scanner.run_once.trade_collector.failed")
+
+    async def _run_once_position_collector(self) -> int:
+        """Single-shot snapshot of every watched wallet's positions."""
+        collector = self._collectors.get("position_collector")
+        if not isinstance(collector, PositionCollector):
+            return 0
+        try:
+            return await collector.snapshot_all_wallets()
+        except Exception:
+            _LOG.exception("scanner.run_once.positions_failed")
+            return 0
+
+    async def _run_once_activity_collector(self) -> int:
+        """Single-shot poll of every watched wallet's full activity stream."""
+        collector = self._collectors.get("activity_collector")
+        if not isinstance(collector, ActivityCollector):
+            return 0
+        try:
+            return await collector.poll_all_wallets()
+        except Exception:
+            _LOG.exception("scanner.run_once.activity_failed")
+            return 0
 
     async def _run_once_mispricing(self) -> int:
         """Run the mispricing scan once over a bounded slice of the event catalogue.

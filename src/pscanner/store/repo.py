@@ -748,3 +748,246 @@ def _row_to_wallet_trade(row: sqlite3.Row) -> WalletTrade:
         timestamp=int(row["timestamp"]),
         recorded_at=int(row["recorded_at"]),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class WalletPositionsHistoryRow:
+    """One row per (wallet, market-position) at a given timestamp."""
+
+    wallet: str
+    condition_id: str
+    outcome: str
+    size: float
+    avg_price: float
+    current_value: float | None
+    cash_pnl: float | None
+    realized_pnl: float | None
+    redeemable: bool | None
+    snapshot_at: int
+
+
+class WalletPositionsHistoryRepo:
+    """Append-only history of position snapshots per watched wallet.
+
+    Rows are inserted with ``INSERT OR IGNORE`` against the composite primary
+    key ``(wallet, condition_id, outcome, snapshot_at)``. Because callers
+    stamp ``snapshot_at`` at second resolution, two snapshots taken in the
+    same second for the same position collapse to a single row — that is
+    the intended idempotency behaviour.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        """Bind the repo to an already-initialised connection."""
+        self._conn = conn
+
+    def insert(self, row: WalletPositionsHistoryRow) -> bool:
+        """Insert ``row`` if its composite PK is unseen.
+
+        Args:
+            row: Fully-populated history row to persist.
+
+        Returns:
+            ``True`` if the row was newly inserted, ``False`` on PK collision.
+        """
+        redeemable = _bool_to_int_or_none(row.redeemable)
+        cur = self._conn.execute(
+            """
+            INSERT OR IGNORE INTO wallet_positions_history (
+              wallet, condition_id, outcome, size, avg_price,
+              current_value, cash_pnl, realized_pnl, redeemable, snapshot_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row.wallet,
+                row.condition_id,
+                row.outcome,
+                row.size,
+                row.avg_price,
+                row.current_value,
+                row.cash_pnl,
+                row.realized_pnl,
+                redeemable,
+                row.snapshot_at,
+            ),
+        )
+        self._conn.commit()
+        return cur.rowcount == 1
+
+    def recent_for_wallet(
+        self,
+        wallet: str,
+        *,
+        limit: int = 200,
+    ) -> list[WalletPositionsHistoryRow]:
+        """Return the wallet's most-recent rows, newest first.
+
+        Args:
+            wallet: 0x-prefixed proxy wallet address.
+            limit: Max rows to return.
+
+        Returns:
+            History rows ordered by ``snapshot_at DESC``.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT wallet, condition_id, outcome, size, avg_price,
+                   current_value, cash_pnl, realized_pnl, redeemable, snapshot_at
+              FROM wallet_positions_history
+             WHERE wallet = ?
+             ORDER BY snapshot_at DESC
+             LIMIT ?
+            """,
+            (wallet, limit),
+        ).fetchall()
+        return [_row_to_positions_history(row) for row in rows]
+
+    def count_by_wallet(self) -> dict[str, int]:
+        """Return ``{wallet: row_count}`` across the full table."""
+        rows = self._conn.execute(
+            "SELECT wallet, COUNT(*) AS c FROM wallet_positions_history GROUP BY wallet",
+        ).fetchall()
+        return {row["wallet"]: int(row["c"]) for row in rows}
+
+
+def _row_to_positions_history(row: sqlite3.Row) -> WalletPositionsHistoryRow:
+    """Convert a ``wallet_positions_history`` row to its dataclass."""
+    redeemable_raw = row["redeemable"]
+    redeemable = None if redeemable_raw is None else bool(redeemable_raw)
+    return WalletPositionsHistoryRow(
+        wallet=row["wallet"],
+        condition_id=row["condition_id"],
+        outcome=row["outcome"],
+        size=float(row["size"]),
+        avg_price=float(row["avg_price"]),
+        current_value=_optional_float(row["current_value"]),
+        cash_pnl=_optional_float(row["cash_pnl"]),
+        realized_pnl=_optional_float(row["realized_pnl"]),
+        redeemable=redeemable,
+        snapshot_at=int(row["snapshot_at"]),
+    )
+
+
+def _optional_float(value: float | int | None) -> float | None:
+    """Return ``float(value)`` or ``None`` when the value is missing."""
+    if value is None:
+        return None
+    return float(value)
+
+
+def _bool_to_int_or_none(value: bool | None) -> int | None:
+    """Encode an optional bool as 0/1/None for SQLite storage."""
+    if value is None:
+        return None
+    return 1 if value else 0
+
+
+@dataclass(frozen=True, slots=True)
+class WalletActivityEvent:
+    """One activity-stream event from the Polymarket data API."""
+
+    wallet: str
+    event_type: str
+    payload_json: str
+    timestamp: int
+    recorded_at: int
+    source: str
+
+
+class WalletActivityEventsRepo:
+    """Append-only activity stream per watched wallet.
+
+    Dedupes by composite primary key ``(wallet, timestamp, event_type)`` via
+    ``INSERT OR IGNORE`` — the data API returns overlapping pages across
+    polls, so the repo silently swallows redundant inserts.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        """Bind the repo to an already-initialised connection."""
+        self._conn = conn
+
+    def insert(self, event: WalletActivityEvent) -> bool:
+        """Insert ``event`` if its composite PK is unseen.
+
+        Args:
+            event: Fully-populated activity event to persist.
+
+        Returns:
+            ``True`` if the row was newly inserted, ``False`` on PK collision.
+        """
+        cur = self._conn.execute(
+            """
+            INSERT OR IGNORE INTO wallet_activity_events (
+              wallet, event_type, payload_json, timestamp, recorded_at, source
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event.wallet,
+                event.event_type,
+                event.payload_json,
+                event.timestamp,
+                event.recorded_at,
+                event.source,
+            ),
+        )
+        self._conn.commit()
+        return cur.rowcount == 1
+
+    def recent_for_wallet(
+        self,
+        wallet: str,
+        *,
+        limit: int = 200,
+        event_type: str | None = None,
+    ) -> list[WalletActivityEvent]:
+        """Return the wallet's most-recent events, newest first.
+
+        Args:
+            wallet: 0x-prefixed proxy wallet address.
+            limit: Max rows to return.
+            event_type: When set, only rows with ``event_type = <value>``.
+
+        Returns:
+            Activity events ordered by ``timestamp DESC``.
+        """
+        if event_type is None:
+            rows = self._conn.execute(
+                """
+                SELECT wallet, event_type, payload_json, timestamp, recorded_at, source
+                  FROM wallet_activity_events
+                 WHERE wallet = ?
+                 ORDER BY timestamp DESC
+                 LIMIT ?
+                """,
+                (wallet, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """
+                SELECT wallet, event_type, payload_json, timestamp, recorded_at, source
+                  FROM wallet_activity_events
+                 WHERE wallet = ? AND event_type = ?
+                 ORDER BY timestamp DESC
+                 LIMIT ?
+                """,
+                (wallet, event_type, limit),
+            ).fetchall()
+        return [_row_to_activity_event(row) for row in rows]
+
+    def count_by_wallet(self) -> dict[str, int]:
+        """Return ``{wallet: event_count}`` across the full table."""
+        rows = self._conn.execute(
+            "SELECT wallet, COUNT(*) AS c FROM wallet_activity_events GROUP BY wallet",
+        ).fetchall()
+        return {row["wallet"]: int(row["c"]) for row in rows}
+
+
+def _row_to_activity_event(row: sqlite3.Row) -> WalletActivityEvent:
+    """Convert a ``wallet_activity_events`` row to its dataclass."""
+    return WalletActivityEvent(
+        wallet=row["wallet"],
+        event_type=row["event_type"],
+        payload_json=row["payload_json"],
+        timestamp=int(row["timestamp"]),
+        recorded_at=int(row["recorded_at"]),
+        source=row["source"],
+    )
