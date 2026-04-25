@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from collections.abc import Iterable
 from typing import Any
 
 import structlog
@@ -37,6 +38,10 @@ _DATE_PATTERNS = (
     re.compile(r"^(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d+(?:,\s*\d{4})?$"),
 )
 _NUMERIC_THRESHOLD_PATTERN = re.compile(r"^[<>]?=?\s*\$?\d")
+_RANGE_KEYWORD_PATTERN = re.compile(
+    r"^(?:above|below|over|under|at\s+least|at\s+most|more\s+than|less\s+than|>=|<=|≥|≤)\s+\$?\d",
+    re.IGNORECASE,
+)
 
 
 def _looks_like_bucket_label(label: str | None) -> bool:
@@ -44,17 +49,27 @@ def _looks_like_bucket_label(label: str | None) -> bool:
 
     Used to detect range/threshold-style events (where outcomes overlap and the
     sum-to-1 invariant does not apply) vs candidate-style mutex events (where
-    titles are arbitrary names).
+    titles are arbitrary names). Range-keyword prefixes (``Above $300M``,
+    ``At least 5``, ``≥ 10``) are also treated as bucket labels.
     """
     if not label:
         return False
     text = label.strip()
     if not text:
         return False
-    for pattern in _DATE_PATTERNS:
-        if pattern.match(text):
-            return True
-    return bool(_NUMERIC_THRESHOLD_PATTERN.match(text))
+    return (
+        any(p.match(text) for p in _DATE_PATTERNS)
+        or bool(_NUMERIC_THRESHOLD_PATTERN.match(text))
+        or bool(_RANGE_KEYWORD_PATTERN.match(text))
+    )
+
+
+def _has_excluded_tag(event: Event, excluded: Iterable[str]) -> bool:
+    """Return True if any of ``event.tags`` matches an excluded tag (case-insensitive)."""
+    if not event.tags:
+        return False
+    excluded_lower = {t.lower() for t in excluded}
+    return any(tag.lower() in excluded_lower for tag in event.tags)
 
 
 def _is_range_bucket_event(event: Event) -> bool:
@@ -142,14 +157,25 @@ class MispricingDetector:
     def _is_eligible(self, event: Event) -> bool:
         """Apply the cheap pre-filters that don't depend on outcome prices.
 
-        Skips events whose markets all carry date-like or numeric-threshold
-        ``groupItemTitle`` values — those are bucket layouts where outcomes can
-        overlap and the sum-to-1 invariant does not apply. Candidate-style mutex
-        events (Trump/Harris/Other) leave the field arbitrary and remain eligible.
+        Skips events:
+
+        * with fewer than two markets, or any market with the order book
+          disabled;
+        * whose tags include a configured excluded tag (e.g. ``Sports`` or
+          ``Esports``) — those are tournament aggregations, not mutex
+          outcomes;
+        * whose markets all carry date-like or numeric-threshold
+          ``groupItemTitle`` values — bucket layouts where outcomes overlap;
+        * with insufficient liquidity.
+
+        Candidate-style mutex events (Trump/Harris/Other) leave
+        ``groupItemTitle`` arbitrary and remain eligible.
         """
         if len(event.markets) < _MIN_VALID_MARKETS:
             return False
         if any(not market.enable_order_book for market in event.markets):
+            return False
+        if _has_excluded_tag(event, self._config.excluded_tags):
             return False
         if _is_range_bucket_event(event):
             return False

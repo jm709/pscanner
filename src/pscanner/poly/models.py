@@ -138,12 +138,45 @@ class Event(BaseModel):
     volume: float | None = None
     active: bool = True
     closed: bool = False
+    tags: list[str] = Field(default_factory=list)
 
     @field_validator("liquidity", "volume", mode="before")
     @classmethod
     def _decode_money(cls, value: Any) -> float | None:
         """Coerce numeric strings to float."""
         return _coerce_optional_float(value)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _parse_tags(cls, value: Any) -> list[str]:
+        """Normalise the gamma ``tags`` payload into a list of label strings.
+
+        The gamma ``/events`` endpoint returns ``tags`` as a list of dicts
+        like ``{"id": "...", "label": "Sports", "slug": "sports"}``. We extract
+        each dict's ``label`` (preserving the API's capitalisation, e.g.
+        ``"Sports"``). Plain string lists pass through. ``None``/empty inputs
+        produce an empty list. Non-string/non-dict entries are silently dropped
+        so a malformed entry doesn't poison the whole event.
+
+        Args:
+            value: ``None``, a list of strings, or a list of dicts.
+
+        Returns:
+            A list of tag-label strings (possibly empty).
+        """
+        if value is None or value == "":
+            return []
+        if not isinstance(value, list):
+            return []
+        labels: list[str] = []
+        for entry in value:
+            if isinstance(entry, str):
+                labels.append(entry)
+            elif isinstance(entry, dict):
+                label = entry.get("label")
+                if isinstance(label, str):
+                    labels.append(label)
+        return labels
 
 
 class Position(BaseModel):

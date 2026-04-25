@@ -17,6 +17,7 @@ enabled = true
 scan_interval_seconds = 300
 sum_deviation_threshold = 0.03
 min_event_liquidity_usd = 10000
+excluded_tags = ["Sports", "Esports"]
 
 [whales]
 enabled = true
