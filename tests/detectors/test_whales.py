@@ -72,7 +72,7 @@ def _make_cached_market(**overrides: Any) -> CachedMarket:
         "title": "Will X happen?",
         "liquidity_usd": 10000.0,
         "volume_usd": 50000.0,
-        "outcome_prices_json": "[]",
+        "outcome_prices": [],
         "active": True,
         "cached_at": _NOW,
     }

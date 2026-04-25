@@ -74,11 +74,8 @@ class MispricingDetector:
         Args:
             sink: Sink to publish alerts to.
         """
-        # ``iter_events`` is an async generator; the Wave 1 stub signature
-        # types it as a coroutine returning ``AsyncIterator``, which ty sees
-        # as non-iterable. The runtime contract is async-iterable.
         events = self._gamma.iter_events(active=True, closed=False)
-        async for event in events:  # ty: ignore[not-iterable]
+        async for event in events:
             await self._maybe_alert(event, sink)
 
     async def _maybe_alert(self, event: Event, sink: AlertSink) -> None:

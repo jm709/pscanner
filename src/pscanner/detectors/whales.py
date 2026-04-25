@@ -94,7 +94,7 @@ class WhalesDetector:
     async def _refresh_subscriptions(self) -> None:
         """Pull every active market, cache it, and (re)subscribe in batches."""
         asset_ids: list[str] = []
-        async for market in self._gamma_client.iter_markets(active=True, closed=False):  # ty:ignore[not-iterable]
+        async for market in self._gamma_client.iter_markets(active=True, closed=False):
             self._cache_and_index(market, asset_ids)
         await self._subscribe_in_batches(asset_ids)
         _LOG.debug(
@@ -118,7 +118,7 @@ class WhalesDetector:
 
     async def _consume_loop(self, sink: AlertSink) -> None:
         """Read messages from the websocket and dispatch trades to handlers."""
-        async for msg in self._ws.messages():  # ty:ignore[not-iterable]
+        async for msg in self._ws.messages():
             if not isinstance(msg, WsTradeMessage):
                 continue
             await self._handle_trade(msg, sink)
