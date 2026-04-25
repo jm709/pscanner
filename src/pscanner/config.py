@@ -45,12 +45,25 @@ class SmartMoneyConfig(_Section):
 
 
 class MispricingConfig(_Section):
-    """Thresholds for the mispricing detector."""
+    """Thresholds for the mispricing detector.
+
+    ``alert_max_deviation`` is the upper cap on ``|Σ - 1|`` that still emits an
+    alert: events with deviation above this value are silently captured into
+    ``event_outcome_sum_history`` (forming a research dataset for high-Σ
+    checkbox/multi-outcome layouts) but produce no alert. Alerts fire only when
+    ``sum_deviation_threshold < |Σ - 1| <= alert_max_deviation``.
+
+    ``min_market_liquidity_usd`` filters per-market noise: when > 0, any event
+    containing a market with ``liquidity`` below this threshold (or NULL) is
+    skipped entirely. Defaults to 0.0 (no filter) for backward compatibility.
+    """
 
     enabled: bool = True
     scan_interval_seconds: int = 300
     sum_deviation_threshold: float = 0.03
+    alert_max_deviation: float = 0.5
     min_event_liquidity_usd: float = 10000.0
+    min_market_liquidity_usd: float = 0.0
     excluded_tags: tuple[str, ...] = ("Sports", "Esports")
 
 

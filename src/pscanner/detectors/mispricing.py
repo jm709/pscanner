@@ -26,6 +26,7 @@ from pscanner.alerts.sink import AlertSink
 from pscanner.config import MispricingConfig
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.models import Event, Market
+from pscanner.store.repo import EventOutcomeSumRepo, EventOutcomeSumRow
 
 _LOGGER = structlog.get_logger(__name__)
 
@@ -101,15 +102,20 @@ class MispricingDetector:
         *,
         config: MispricingConfig,
         gamma_client: GammaClient,
+        sum_history_repo: EventOutcomeSumRepo,
     ) -> None:
-        """Build a detector bound to a config and gamma client.
+        """Build a detector bound to a config, gamma client, and history repo.
 
         Args:
             config: Threshold + cadence settings (see ``MispricingConfig``).
             gamma_client: Async gamma-api client used to enumerate events.
+            sum_history_repo: Repo that persists every eligible event's Σ-of-
+                outcomes regardless of whether an alert fires, building the
+                research dataset that backs ``ABS(deviation) > 5`` queries.
         """
         self._config = config
         self._gamma = gamma_client
+        self._sum_repo = sum_history_repo
 
     async def run(self, sink: AlertSink) -> None:
         """Loop forever: scan, sleep, repeat. Logs and continues on error.
@@ -137,7 +143,12 @@ class MispricingDetector:
             await self.evaluate_event(event, sink)
 
     async def evaluate_event(self, event: Event, sink: AlertSink) -> None:
-        """Evaluate a single event and emit an alert if it mispricies.
+        """Evaluate a single event, record Σ-history, and alert if in band.
+
+        Every eligible event is captured in ``event_outcome_sum_history`` —
+        even when no alert fires — so analysts can later study high-Σ
+        multi-outcome layouts. An alert is emitted only when
+        ``sum_deviation_threshold < |deviation| <= alert_max_deviation``.
 
         Args:
             event: Event to evaluate.
@@ -149,7 +160,19 @@ class MispricingDetector:
         if count < _MIN_VALID_MARKETS:
             return
         deviation = price_sum - 1.0
-        if abs(deviation) <= self._config.sum_deviation_threshold:
+        self._sum_repo.insert(
+            EventOutcomeSumRow(
+                event_id=event.id,
+                market_count=count,
+                price_sum=price_sum,
+                deviation=deviation,
+                snapshot_at=int(time.time()),
+            ),
+        )
+        abs_dev = abs(deviation)
+        if abs_dev <= self._config.sum_deviation_threshold:
+            return
+        if abs_dev > self._config.alert_max_deviation:
             return
         alert = self._build_alert(event, price_sum, count)
         await sink.emit(alert)
@@ -166,7 +189,10 @@ class MispricingDetector:
           outcomes;
         * whose markets all carry date-like or numeric-threshold
           ``groupItemTitle`` values — bucket layouts where outcomes overlap;
-        * with insufficient liquidity.
+        * with insufficient event-level liquidity;
+        * containing any market with per-market liquidity below
+          ``min_market_liquidity_usd`` (when > 0). Drops noise-floor markets
+          where individual fills can swing prices by >10%.
 
         Candidate-style mutex events (Trump/Harris/Other) leave
         ``groupItemTitle`` arbitrary and remain eligible.
@@ -179,9 +205,20 @@ class MispricingDetector:
             return False
         if _is_range_bucket_event(event):
             return False
-        return not (
-            event.liquidity is None or event.liquidity < self._config.min_event_liquidity_usd
-        )
+        if event.liquidity is None or event.liquidity < self._config.min_event_liquidity_usd:
+            return False
+        return not self._has_below_floor_market(event)
+
+    def _has_below_floor_market(self, event: Event) -> bool:
+        """Return True if any market falls below ``min_market_liquidity_usd``.
+
+        When the configured floor is 0.0, returns False (filter disabled).
+        Markets with NULL ``liquidity`` are treated as below the floor.
+        """
+        floor = self._config.min_market_liquidity_usd
+        if floor <= 0:
+            return False
+        return any(m.liquidity is None or m.liquidity < floor for m in event.markets)
 
     def _sum_outcome_prices(self, event: Event) -> tuple[float, int]:
         """Sum YES-leg prices across the event's markets.

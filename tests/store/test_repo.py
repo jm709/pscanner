@@ -11,6 +11,8 @@ from pscanner.alerts.models import Alert
 from pscanner.poly.models import Market
 from pscanner.store.repo import (
     AlertsRepo,
+    EventOutcomeSumRepo,
+    EventOutcomeSumRow,
     EventSnapshot,
     EventSnapshotsRepo,
     MarketCacheRepo,
@@ -937,3 +939,91 @@ def test_event_snapshots_distinct_count_and_count_by_event(
 
     assert repo.distinct_snapshot_count() == 2
     assert repo.count_by_event() == {"evt-1": 2, "evt-2": 1}
+
+
+def _make_outcome_sum_row(
+    *,
+    event_id: str = "evt-1",
+    market_count: int = 3,
+    price_sum: float = 1.05,
+    deviation: float = 0.05,
+    snapshot_at: int = 1_700_000_000,
+) -> EventOutcomeSumRow:
+    return EventOutcomeSumRow(
+        event_id=event_id,
+        market_count=market_count,
+        price_sum=price_sum,
+        deviation=deviation,
+        snapshot_at=snapshot_at,
+    )
+
+
+def test_event_outcome_sum_insert_round_trip(tmp_db: sqlite3.Connection) -> None:
+    repo = EventOutcomeSumRepo(tmp_db)
+    row = _make_outcome_sum_row()
+    assert repo.insert(row) is True
+
+    rows = repo.recent()
+    assert len(rows) == 1
+    assert rows[0] == row
+
+
+def test_event_outcome_sum_pk_collision_returns_false(tmp_db: sqlite3.Connection) -> None:
+    repo = EventOutcomeSumRepo(tmp_db)
+    row = _make_outcome_sum_row()
+    assert repo.insert(row) is True
+    assert repo.insert(row) is False
+
+
+def test_event_outcome_sum_recent_orders_desc_and_limits(tmp_db: sqlite3.Connection) -> None:
+    repo = EventOutcomeSumRepo(tmp_db)
+    repo.insert(_make_outcome_sum_row(event_id="evt-a", snapshot_at=100))
+    repo.insert(_make_outcome_sum_row(event_id="evt-b", snapshot_at=300))
+    repo.insert(_make_outcome_sum_row(event_id="evt-c", snapshot_at=200))
+
+    rows = repo.recent()
+    assert [r.snapshot_at for r in rows] == [300, 200, 100]
+
+    limited = repo.recent(limit=2)
+    assert [r.snapshot_at for r in limited] == [300, 200]
+
+
+def test_event_outcome_sum_by_event_id_isolates(tmp_db: sqlite3.Connection) -> None:
+    repo = EventOutcomeSumRepo(tmp_db)
+    repo.insert(_make_outcome_sum_row(event_id="evt-1", snapshot_at=100))
+    repo.insert(_make_outcome_sum_row(event_id="evt-1", snapshot_at=200))
+    repo.insert(_make_outcome_sum_row(event_id="evt-2", snapshot_at=150))
+
+    rows = repo.by_event_id("evt-1")
+    assert [r.snapshot_at for r in rows] == [200, 100]
+    assert all(r.event_id == "evt-1" for r in rows)
+
+    assert repo.by_event_id("evt-missing") == []
+
+
+def test_event_outcome_sum_with_high_deviation_filters_and_orders(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = EventOutcomeSumRepo(tmp_db)
+    repo.insert(
+        _make_outcome_sum_row(event_id="small", deviation=0.04, snapshot_at=100),
+    )
+    repo.insert(
+        _make_outcome_sum_row(event_id="medium", deviation=-2.0, snapshot_at=200),
+    )
+    repo.insert(
+        _make_outcome_sum_row(event_id="huge", deviation=15.5, snapshot_at=300),
+    )
+    repo.insert(
+        _make_outcome_sum_row(event_id="big_neg", deviation=-7.5, snapshot_at=400),
+    )
+
+    rows = repo.with_high_deviation(min_abs_deviation=1.0)
+    # Ordered by ABS(deviation) DESC: 15.5, 7.5, 2.0; 0.04 filtered out.
+    assert [r.event_id for r in rows] == ["huge", "big_neg", "medium"]
+
+    limited = repo.with_high_deviation(min_abs_deviation=1.0, limit=2)
+    assert [r.event_id for r in limited] == ["huge", "big_neg"]
+
+    # Threshold above the largest magnitude returns empty.
+    assert repo.with_high_deviation(min_abs_deviation=100.0) == []

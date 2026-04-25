@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import AsyncIterator, Iterable
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -12,6 +13,7 @@ from pscanner.alerts.models import Alert
 from pscanner.config import MispricingConfig
 from pscanner.detectors.mispricing import MispricingDetector
 from pscanner.poly.models import Event, Market
+from pscanner.store.repo import EventOutcomeSumRepo
 
 
 def _market(
@@ -22,6 +24,7 @@ def _market(
     enable_order_book: bool = True,
     group_item_title: str | None = None,
     group_item_threshold: str | None = None,
+    liquidity: float | None = None,
 ) -> Market:
     """Build a synthetic Market with optional YES price.
 
@@ -37,6 +40,7 @@ def _market(
         "enableOrderBook": enable_order_book,
         "groupItemTitle": group_item_title,
         "groupItemThreshold": group_item_threshold,
+        "liquidity": liquidity,
     }
     return Market.model_validate(payload)
 
@@ -76,16 +80,50 @@ def _make_detector(
     events: Iterable[Event],
     *,
     sum_deviation_threshold: float = 0.03,
+    alert_max_deviation: float = 0.5,
     min_event_liquidity_usd: float = 10000.0,
+    min_market_liquidity_usd: float = 0.0,
+    sum_history_repo: EventOutcomeSumRepo | None = None,
 ) -> tuple[MispricingDetector, AsyncMock]:
-    """Construct a detector wired to a mocked GammaClient."""
+    """Construct a detector wired to a mocked GammaClient and a repo.
+
+    ``sum_history_repo`` defaults to a stub repo. Tests that need to assert on
+    persisted rows pass an explicit repo backed by the ``tmp_db`` fixture so
+    cleanup is handled by pytest.
+    """
     gamma = AsyncMock()
     gamma.iter_events = lambda **_kwargs: _async_iter(list(events))
     config = MispricingConfig(
         sum_deviation_threshold=sum_deviation_threshold,
+        alert_max_deviation=alert_max_deviation,
         min_event_liquidity_usd=min_event_liquidity_usd,
+        min_market_liquidity_usd=min_market_liquidity_usd,
     )
-    return MispricingDetector(config=config, gamma_client=gamma), gamma
+    repo = sum_history_repo if sum_history_repo is not None else _StubSumRepo()
+    detector = MispricingDetector(
+        config=config,
+        gamma_client=gamma,
+        sum_history_repo=cast(EventOutcomeSumRepo, repo),
+    )
+    return detector, gamma
+
+
+class _StubSumRepo:
+    """Minimal in-process stand-in for EventOutcomeSumRepo (no SQLite)."""
+
+    def __init__(self) -> None:
+        self.rows: list[Any] = []
+
+    def insert(self, row: Any) -> bool:
+        self.rows.append(row)
+        return True
+
+
+def _count_history(repo: EventOutcomeSumRepo | _StubSumRepo) -> int:
+    """Count all rows in the repo (test helper)."""
+    if isinstance(repo, _StubSumRepo):
+        return len(repo.rows)
+    return len(repo.recent(limit=10_000))
 
 
 def _capturing_sink() -> tuple[AsyncMock, list[Alert]]:
@@ -638,6 +676,149 @@ async def test_mixed_above_dollar_and_other_alerts() -> None:
 
     assert len(captured) == 1
     assert captured[0].body["price_sum"] == pytest.approx(1.2)
+
+
+async def test_history_row_written_for_eligible_event_within_band(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """An eligible in-band event records exactly one history row + one alert."""
+    repo = EventOutcomeSumRepo(tmp_db)
+    markets = [
+        _market(market_id="m1", yes_price=0.6),
+        _market(market_id="m2", yes_price=0.6),  # Σ = 1.2, |dev| = 0.2
+    ]
+    event = _event(markets=markets)
+    detector, _ = _make_detector([event], sum_history_repo=repo)
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert _count_history(repo) == 1
+    rows = repo.by_event_id(event.id)
+    assert len(rows) == 1
+    assert rows[0].market_count == 2
+    assert rows[0].price_sum == pytest.approx(1.2)
+    assert rows[0].deviation == pytest.approx(0.2)
+    assert len(captured) == 1
+
+
+async def test_alert_cap_skips_alert_but_writes_history(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """Σ above ``alert_max_deviation`` writes history but emits no alert."""
+    repo = EventOutcomeSumRepo(tmp_db)
+    # Five markets at 0.5 → Σ = 2.5, |deviation| = 1.5 > alert_max_deviation=0.5
+    markets = [_market(market_id=f"m{i}", yes_price=0.5) for i in range(5)]
+    event = _event(markets=markets)
+    detector, _ = _make_detector(
+        [event],
+        alert_max_deviation=0.5,
+        sum_history_repo=repo,
+    )
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert _count_history(repo) == 1
+    history = repo.by_event_id(event.id)
+    assert len(history) == 1
+    assert history[0].price_sum == pytest.approx(2.5)
+    assert history[0].deviation == pytest.approx(1.5)
+    assert captured == []
+
+
+async def test_below_threshold_writes_history_but_no_alert(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """Σ inside the deadband writes history but emits no alert."""
+    repo = EventOutcomeSumRepo(tmp_db)
+    # Σ = 1.01, |deviation| = 0.01 < sum_deviation_threshold=0.03
+    markets = [
+        _market(market_id="m1", yes_price=0.51),
+        _market(market_id="m2", yes_price=0.50),
+    ]
+    event = _event(markets=markets)
+    detector, _ = _make_detector(
+        [event],
+        sum_deviation_threshold=0.03,
+        sum_history_repo=repo,
+    )
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert _count_history(repo) == 1
+    assert captured == []
+
+
+async def test_per_market_liquidity_floor_skips_event_and_history(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """Any market below ``min_market_liquidity_usd`` skips eligibility entirely."""
+    repo = EventOutcomeSumRepo(tmp_db)
+    markets = [
+        _market(market_id="m1", yes_price=0.6, liquidity=50.0),  # below floor
+        _market(market_id="m2", yes_price=0.6, liquidity=5000.0),
+    ]
+    event = _event(markets=markets)
+    detector, _ = _make_detector(
+        [event],
+        min_market_liquidity_usd=100.0,
+        sum_history_repo=repo,
+    )
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert _count_history(repo) == 0
+    assert captured == []
+
+
+async def test_per_market_liquidity_floor_disabled_when_zero(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """Default ``min_market_liquidity_usd=0`` keeps backward-compatible behaviour."""
+    repo = EventOutcomeSumRepo(tmp_db)
+    markets = [
+        _market(market_id="m1", yes_price=0.6, liquidity=None),
+        _market(market_id="m2", yes_price=0.6, liquidity=None),
+    ]
+    event = _event(markets=markets)
+    detector, _ = _make_detector(
+        [event],
+        min_market_liquidity_usd=0.0,
+        sum_history_repo=repo,
+    )
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert _count_history(repo) == 1
+    assert len(captured) == 1
+
+
+async def test_history_uses_real_repo_persists_via_db(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """Smoke: a real repo + in-memory db round-trips a history row."""
+    repo = EventOutcomeSumRepo(tmp_db)
+    markets = [
+        _market(market_id="m1", yes_price=0.6),
+        _market(market_id="m2", yes_price=0.6),
+    ]
+    event = _event(event_id="evt-real", markets=markets)
+    detector, _ = _make_detector([event], sum_history_repo=repo)
+    sink, _ = _capturing_sink()
+
+    await detector._scan(sink)
+
+    rows = tmp_db.execute(
+        "SELECT event_id, market_count, price_sum FROM event_outcome_sum_history",
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["event_id"] == "evt-real"
+    assert rows[0]["market_count"] == 2
+    assert rows[0]["price_sum"] == pytest.approx(1.2)
 
 
 class _StopLoop(BaseException):

@@ -1226,3 +1226,135 @@ def _row_to_event_snapshot(row: sqlite3.Row) -> EventSnapshot:
         market_count=int(row["market_count"]),
         snapshot_at=int(row["snapshot_at"]),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class EventOutcomeSumRow:
+    """One row per (event, snapshot_at) — captured even when no alert fires."""
+
+    event_id: str
+    market_count: int
+    price_sum: float
+    deviation: float
+    snapshot_at: int
+
+
+class EventOutcomeSumRepo:
+    """Append-only history of event-level Σ-of-outcomes per scan.
+
+    Captures the YES-leg price sum across every market in a mispricing-eligible
+    event on each scan, regardless of whether the event triggered an alert.
+    Lets analysts retroactively study high-Σ multi-outcome layouts (checkbox
+    events) that the alert path now silently filters past
+    ``MispricingConfig.alert_max_deviation``.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        """Bind the repo to an already-initialised connection."""
+        self._conn = conn
+
+    def insert(self, row: EventOutcomeSumRow) -> bool:
+        """Insert ``row`` if its composite PK ``(event_id, snapshot_at)`` is unseen.
+
+        Args:
+            row: Fully-populated outcome-sum row to persist.
+
+        Returns:
+            ``True`` if the row was newly inserted, ``False`` on PK collision.
+        """
+        cur = self._conn.execute(
+            """
+            INSERT OR IGNORE INTO event_outcome_sum_history (
+              event_id, market_count, price_sum, deviation, snapshot_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                row.event_id,
+                row.market_count,
+                row.price_sum,
+                row.deviation,
+                row.snapshot_at,
+            ),
+        )
+        self._conn.commit()
+        return cur.rowcount == 1
+
+    def recent(self, *, limit: int = 200) -> list[EventOutcomeSumRow]:
+        """Return the most recent rows across every event.
+
+        Args:
+            limit: Max rows to return.
+
+        Returns:
+            Rows ordered by ``snapshot_at DESC``.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT event_id, market_count, price_sum, deviation, snapshot_at
+              FROM event_outcome_sum_history
+             ORDER BY snapshot_at DESC
+             LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [_row_to_event_outcome_sum(row) for row in rows]
+
+    def by_event_id(self, event_id: str, *, limit: int = 200) -> list[EventOutcomeSumRow]:
+        """Return all rows for one event, newest first.
+
+        Args:
+            event_id: Polymarket event identifier.
+            limit: Max rows to return.
+
+        Returns:
+            Rows ordered by ``snapshot_at DESC``.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT event_id, market_count, price_sum, deviation, snapshot_at
+              FROM event_outcome_sum_history
+             WHERE event_id = ?
+             ORDER BY snapshot_at DESC
+             LIMIT ?
+            """,
+            (event_id, limit),
+        ).fetchall()
+        return [_row_to_event_outcome_sum(row) for row in rows]
+
+    def with_high_deviation(
+        self,
+        *,
+        min_abs_deviation: float,
+        limit: int = 200,
+    ) -> list[EventOutcomeSumRow]:
+        """Return rows whose ``|deviation| >= min_abs_deviation``.
+
+        Args:
+            min_abs_deviation: Inclusive minimum absolute deviation threshold.
+            limit: Max rows to return.
+
+        Returns:
+            Rows ordered by ``ABS(deviation) DESC``.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT event_id, market_count, price_sum, deviation, snapshot_at
+              FROM event_outcome_sum_history
+             WHERE ABS(deviation) >= ?
+             ORDER BY ABS(deviation) DESC
+             LIMIT ?
+            """,
+            (min_abs_deviation, limit),
+        ).fetchall()
+        return [_row_to_event_outcome_sum(row) for row in rows]
+
+
+def _row_to_event_outcome_sum(row: sqlite3.Row) -> EventOutcomeSumRow:
+    """Convert an ``event_outcome_sum_history`` row to its dataclass."""
+    return EventOutcomeSumRow(
+        event_id=row["event_id"],
+        market_count=int(row["market_count"]),
+        price_sum=float(row["price_sum"]),
+        deviation=float(row["deviation"]),
+        snapshot_at=int(row["snapshot_at"]),
+    )

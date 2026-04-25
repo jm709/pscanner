@@ -154,6 +154,18 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_event_snapshots_ts ON event_snapshots(snapshot_at DESC)",
+    """
+    CREATE TABLE IF NOT EXISTS event_outcome_sum_history (
+      event_id TEXT NOT NULL,
+      market_count INTEGER NOT NULL,
+      price_sum REAL NOT NULL,
+      deviation REAL NOT NULL,
+      snapshot_at INTEGER NOT NULL,
+      PRIMARY KEY (event_id, snapshot_at)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_eosh_ts ON event_outcome_sum_history(snapshot_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_eosh_deviation ON event_outcome_sum_history(deviation)",
 )
 
 _MIGRATIONS: tuple[str, ...] = (

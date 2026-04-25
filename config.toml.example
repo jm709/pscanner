@@ -16,7 +16,9 @@ new_position_min_usd = 1000
 enabled = true
 scan_interval_seconds = 300
 sum_deviation_threshold = 0.03
+alert_max_deviation = 0.5
 min_event_liquidity_usd = 10000
+min_market_liquidity_usd = 100
 excluded_tags = ["Sports", "Esports"]
 
 [whales]

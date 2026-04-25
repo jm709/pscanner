@@ -48,6 +48,7 @@ from pscanner.poly.http import PolyHttpClient
 from pscanner.store.db import init_db
 from pscanner.store.repo import (
     AlertsRepo,
+    EventOutcomeSumRepo,
     EventSnapshotsRepo,
     MarketCacheRepo,
     MarketSnapshotsRepo,
@@ -117,6 +118,7 @@ class Scanner:
         self._activity_repo = WalletActivityEventsRepo(self._db)
         self._market_snapshots_repo = MarketSnapshotsRepo(self._db)
         self._event_snapshots_repo = EventSnapshotsRepo(self._db)
+        self._sum_history_repo = EventOutcomeSumRepo(self._db)
         self._watchlist_repo = WatchlistRepo(self._db)
         self._wallet_trades_repo = WalletTradesRepo(self._db)
         self._owns_clients = clients is None
@@ -226,6 +228,7 @@ class Scanner:
             detectors["mispricing"] = MispricingDetector(
                 config=self._config.mispricing,
                 gamma_client=self._clients.gamma_client,
+                sum_history_repo=self._sum_history_repo,
             )
         if self._config.whales.enabled:
             detectors["whales"] = WhalesDetector(

@@ -51,6 +51,53 @@ Edit `config.toml` to dial detector thresholds. The fields are:
 You can override the config path via `--config` or the `PSCANNER_CONFIG`
 env var.
 
+## Querying the data
+
+The SQLite database at `./data/pscanner.sqlite3` exposes nine tables:
+
+| Table | Purpose |
+|---|---|
+| `tracked_wallets` | Smart-money wallets with computed edge/PnL metrics. |
+| `wallet_position_snapshots` | Latest position per `(wallet, market, side)` for diff-based new-entry alerts. |
+| `wallet_first_seen` | Cached first-activity metadata for whale-detector age checks. |
+| `market_cache` | Most-recent gamma snapshot of every active market. |
+| `wallet_watchlist` | Wallets enrolled in the data-collection pipeline. |
+| `wallet_trades` | Append-only confirmed trade fills per watched wallet. |
+| `wallet_positions_history` | Append-only position snapshots per watched wallet. |
+| `wallet_activity_events` | Append-only `/activity` stream per watched wallet. |
+| `market_snapshots` | Append-only point-in-time market state (price, liquidity, volume). |
+| `event_snapshots` | Append-only point-in-time event metadata. |
+| `alerts` | Detector output (smart-money / mispricing / whales). |
+| `event_outcome_sum_history` | Append-only Σ-of-outcomes per eligible event per scan. |
+
+Recommended liquidity floor for analysis: when joining `wallet_trades` or
+`market_snapshots` for downstream studies, filter `liquidity_usd >= 100` to
+drop noise-floor markets where individual fills can swing prices by >10%.
+
+```sql
+SELECT * FROM market_snapshots
+WHERE liquidity_usd >= 100
+ORDER BY snapshot_at DESC LIMIT 100;
+```
+
+The `event_outcome_sum_history` table captures the Σ-of-YES-leg-prices for
+every mispricing-eligible event on every scan, regardless of whether an
+alert fires. This enables retroactive analysis of multi-outcome layouts
+(checkbox events) that the alert path silently filters past
+`alert_max_deviation`:
+
+```sql
+-- Events with extreme Σ — likely checkbox/multi-outcome layouts
+SELECT event_id, market_count, price_sum, deviation, snapshot_at
+FROM event_outcome_sum_history
+WHERE ABS(deviation) > 5
+ORDER BY ABS(deviation) DESC LIMIT 20;
+```
+
+Alerts only fire when `sum_deviation_threshold < |Σ − 1| <= alert_max_deviation`.
+Events with deviation above the cap are silently captured for future analysis,
+not surfaced as alerts.
+
 ## Run
 
 ```bash
