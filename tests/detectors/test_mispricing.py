@@ -21,6 +21,7 @@ def _market(
     yes_price: float | None = 0.5,
     enable_order_book: bool = True,
     group_item_title: str | None = None,
+    group_item_threshold: str | None = None,
 ) -> Market:
     """Build a synthetic Market with optional YES price.
 
@@ -35,6 +36,7 @@ def _market(
         "outcomePrices": [] if yes_price is None else [yes_price, 1.0 - yes_price],
         "enableOrderBook": enable_order_book,
         "groupItemTitle": group_item_title,
+        "groupItemThreshold": group_item_threshold,
     }
     return Market.model_validate(payload)
 
@@ -151,12 +153,12 @@ async def test_event_within_threshold_does_not_alert() -> None:
     assert captured == []
 
 
-async def test_event_with_group_item_title_markets_is_skipped() -> None:
-    """Date-range / threshold layouts (non-mutex) are skipped."""
+async def test_event_with_group_item_threshold_markets_is_skipped() -> None:
+    """Numeric-bucket layouts (date ranges, value thresholds) are skipped."""
     markets = [
-        _market(market_id="m1", yes_price=0.5, group_item_title="December 31, 2025"),
-        _market(market_id="m2", yes_price=0.5, group_item_title="December 31, 2026"),
-        _market(market_id="m3", yes_price=0.5, group_item_title="December 31, 2027"),
+        _market(market_id="m1", yes_price=0.5, group_item_threshold="0"),
+        _market(market_id="m2", yes_price=0.5, group_item_threshold="1"),
+        _market(market_id="m3", yes_price=0.5, group_item_threshold="2"),
     ]
     event = _event(markets=markets)
     detector, _ = _make_detector([event])
@@ -167,12 +169,12 @@ async def test_event_with_group_item_title_markets_is_skipped() -> None:
     assert captured == []
 
 
-async def test_pure_mutex_event_with_no_group_item_title_still_alerts() -> None:
-    """Mutex events (group_item_title=None) keep alerting on deviation."""
+async def test_candidate_mutex_event_with_titles_but_no_threshold_alerts() -> None:
+    """Candidate-style mutex events (titles set, threshold empty) still alert."""
     markets = [
-        _market(market_id="m1", yes_price=0.5, group_item_title=None),
-        _market(market_id="m2", yes_price=0.4, group_item_title=None),
-        _market(market_id="m3", yes_price=0.2, group_item_title=None),
+        _market(market_id="m1", yes_price=0.5, group_item_title="Trump"),
+        _market(market_id="m2", yes_price=0.4, group_item_title="Harris"),
+        _market(market_id="m3", yes_price=0.2, group_item_title="Other"),
     ]
     event = _event(markets=markets)
     detector, _ = _make_detector([event])

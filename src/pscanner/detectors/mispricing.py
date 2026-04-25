@@ -105,15 +105,16 @@ class MispricingDetector:
         """Apply pre-filters that don't depend on outcome prices.
 
         Skips events that aren't true mutex layouts: a non-empty
-        ``groupItemTitle`` on any market signals a date-range or
-        threshold-bucket layout where outcomes are independent and the
-        no-arbitrage sum-to-1 invariant does not apply.
+        A non-empty ``groupItemThreshold`` on any market signals a numeric
+        bucket layout (date ranges, value thresholds) where outcomes are
+        independent and the sum-to-1 invariant does not apply. Candidate-
+        style mutex events leave this field empty and still qualify.
         """
         if len(event.markets) < _MIN_VALID_MARKETS:
             return False
         if any(not market.enable_order_book for market in event.markets):
             return False
-        if any(market.group_item_title for market in event.markets):
+        if any(market.group_item_threshold for market in event.markets):
             return False
         return not (
             event.liquidity is None or event.liquidity < self._config.min_event_liquidity_usd
