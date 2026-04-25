@@ -15,6 +15,9 @@ from pscanner.store.repo import (
     PositionSnapshotsRepo,
     TrackedWalletsRepo,
     WalletFirstSeenRepo,
+    WalletTrade,
+    WalletTradesRepo,
+    WatchlistRepo,
 )
 
 
@@ -357,3 +360,157 @@ def test_alerts_recent_round_trips_body_json(tmp_db: sqlite3.Connection) -> None
         ("rt",),
     ).fetchone()
     assert json.loads(raw["body_json"]) == body
+
+
+def test_watchlist_upsert_round_trip(tmp_db: sqlite3.Connection) -> None:
+    repo = WatchlistRepo(tmp_db)
+    inserted = repo.upsert(address="0xabc", source="manual", reason="cli-add")
+    assert inserted is True
+
+    got = repo.get("0xabc")
+    assert got is not None
+    assert got.address == "0xabc"
+    assert got.source == "manual"
+    assert got.reason == "cli-add"
+    assert got.active is True
+    assert got.added_at >= int(time.time()) - 5
+
+
+def test_watchlist_second_upsert_preserves_source_and_reason(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = WatchlistRepo(tmp_db)
+    repo.upsert(address="0xabc", source="smart_money", reason="winrate>0.7")
+    second = repo.upsert(address="0xabc", source="manual", reason="overwrite-attempt")
+    assert second is False
+
+    got = repo.get("0xabc")
+    assert got is not None
+    assert got.source == "smart_money"
+    assert got.reason == "winrate>0.7"
+
+
+def test_watchlist_set_active_excludes_from_active_list(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = WatchlistRepo(tmp_db)
+    repo.upsert(address="0xabc", source="manual")
+    repo.upsert(address="0xdef", source="whale_alert", reason="usd>50k")
+
+    repo.set_active("0xabc", active=False)
+
+    active = repo.list_active()
+    assert [e.address for e in active] == ["0xdef"]
+
+    deactivated = repo.get("0xabc")
+    assert deactivated is not None
+    assert deactivated.active is False
+
+    all_rows = repo.list_all()
+    assert {e.address for e in all_rows} == {"0xabc", "0xdef"}
+
+
+def test_watchlist_get_unknown_returns_none(tmp_db: sqlite3.Connection) -> None:
+    repo = WatchlistRepo(tmp_db)
+    assert repo.get("0xnope") is None
+
+
+def test_watchlist_list_active_only_returns_active(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = WatchlistRepo(tmp_db)
+    repo.upsert(address="0xa", source="manual")
+    repo.upsert(address="0xb", source="manual")
+    repo.set_active("0xa", active=False)
+
+    active = repo.list_active()
+    assert [e.address for e in active] == ["0xb"]
+
+
+def _make_trade(
+    *,
+    txn: str = "0xtx1",
+    asset_id: str = "asset-1",
+    side: str = "BUY",
+    wallet: str = "0xabc",
+    condition_id: str = "cond-1",
+    timestamp: int = 1_700_000_000,
+) -> WalletTrade:
+    return WalletTrade(
+        transaction_hash=txn,
+        asset_id=asset_id,
+        side=side,
+        wallet=wallet,
+        condition_id=condition_id,
+        size=10.0,
+        price=0.42,
+        usd_value=4.2,
+        status="CONFIRMED",
+        source="ws",
+        timestamp=timestamp,
+        recorded_at=timestamp + 1,
+    )
+
+
+def test_wallet_trades_insert_returns_true_then_false(tmp_db: sqlite3.Connection) -> None:
+    repo = WalletTradesRepo(tmp_db)
+    trade = _make_trade()
+    assert repo.insert(trade) is True
+    assert repo.insert(trade) is False
+
+
+def test_wallet_trades_insert_round_trips_all_fields(tmp_db: sqlite3.Connection) -> None:
+    repo = WalletTradesRepo(tmp_db)
+    trade = WalletTrade(
+        transaction_hash="0xtx9",
+        asset_id="asset-9",
+        side="SELL",
+        wallet="0xWALLET",
+        condition_id="cond-9",
+        size=123.5,
+        price=0.6125,
+        usd_value=75.64,
+        status="CONFIRMED",
+        source="activity_api",
+        timestamp=1_701_000_000,
+        recorded_at=1_701_000_005,
+    )
+    assert repo.insert(trade) is True
+
+    rows = repo.recent_for_wallet("0xWALLET")
+    assert len(rows) == 1
+    got = rows[0]
+    assert got == trade
+
+
+def test_wallet_trades_recent_for_wallet_orders_desc_and_limits(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = WalletTradesRepo(tmp_db)
+    repo.insert(_make_trade(txn="0xa", timestamp=100))
+    repo.insert(_make_trade(txn="0xb", timestamp=300))
+    repo.insert(_make_trade(txn="0xc", timestamp=200))
+
+    rows = repo.recent_for_wallet("0xabc")
+    assert [r.transaction_hash for r in rows] == ["0xb", "0xc", "0xa"]
+
+    limited = repo.recent_for_wallet("0xabc", limit=2)
+    assert [r.transaction_hash for r in limited] == ["0xb", "0xc"]
+
+
+def test_wallet_trades_distinct_side_is_separate_row(tmp_db: sqlite3.Connection) -> None:
+    repo = WalletTradesRepo(tmp_db)
+    assert repo.insert(_make_trade(txn="0xtx", side="BUY")) is True
+    assert repo.insert(_make_trade(txn="0xtx", side="SELL")) is True
+
+    counts = repo.count_by_wallet()
+    assert counts == {"0xabc": 2}
+
+
+def test_wallet_trades_count_by_wallet_groups_correctly(tmp_db: sqlite3.Connection) -> None:
+    repo = WalletTradesRepo(tmp_db)
+    repo.insert(_make_trade(txn="0x1", wallet="0xa"))
+    repo.insert(_make_trade(txn="0x2", wallet="0xa"))
+    repo.insert(_make_trade(txn="0x3", wallet="0xb"))
+
+    assert repo.count_by_wallet() == {"0xa": 2, "0xb": 1}

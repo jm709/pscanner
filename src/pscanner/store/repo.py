@@ -473,3 +473,233 @@ def _row_to_alert(row: sqlite3.Row) -> Alert:
         body=body,
         created_at=row["created_at"],
     )
+
+
+@dataclass(frozen=True, slots=True)
+class WatchlistEntry:
+    """A wallet enrolled in the data-collection watchlist."""
+
+    address: str
+    source: str
+    reason: str | None
+    added_at: int
+    active: bool
+
+
+class WatchlistRepo:
+    """CRUD for the ``wallet_watchlist`` table."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        """Bind the repo to an already-initialised connection."""
+        self._conn = conn
+
+    def upsert(
+        self,
+        *,
+        address: str,
+        source: str,
+        reason: str | None = None,
+    ) -> bool:
+        """Insert a new watchlist entry; never overwrite an existing one.
+
+        On conflict the existing ``source`` and ``reason`` are preserved (we
+        keep the first-recorded provenance).
+
+        Args:
+            address: 0x-prefixed proxy wallet address (primary key).
+            source: How the address was discovered (``smart_money``,
+                ``whale_alert``, or ``manual``).
+            reason: Optional free-form note explaining why the wallet was
+                added (e.g. an alert key).
+
+        Returns:
+            ``True`` if a new row was inserted, ``False`` if ``address`` was
+            already present.
+        """
+        now = _now_seconds()
+        cur = self._conn.execute(
+            """
+            INSERT OR IGNORE INTO wallet_watchlist (
+              address, source, reason, added_at, active
+            ) VALUES (?, ?, ?, ?, 1)
+            """,
+            (address, source, reason, now),
+        )
+        self._conn.commit()
+        return cur.rowcount == 1
+
+    def set_active(self, address: str, active: bool) -> None:
+        """Toggle an entry's ``active`` flag in place.
+
+        Args:
+            address: 0x-prefixed proxy wallet address.
+            active: New active state. ``False`` deactivates without removing
+                the row, preserving its provenance.
+        """
+        self._conn.execute(
+            "UPDATE wallet_watchlist SET active = ? WHERE address = ?",
+            (1 if active else 0, address),
+        )
+        self._conn.commit()
+
+    def get(self, address: str) -> WatchlistEntry | None:
+        """Return the row for ``address``, or ``None`` if absent."""
+        row = self._conn.execute(
+            """
+            SELECT address, source, reason, added_at, active
+              FROM wallet_watchlist
+             WHERE address = ?
+            """,
+            (address,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _row_to_watchlist_entry(row)
+
+    def list_active(self) -> list[WatchlistEntry]:
+        """Return every row with ``active = 1``, ordered by address."""
+        rows = self._conn.execute(
+            """
+            SELECT address, source, reason, added_at, active
+              FROM wallet_watchlist
+             WHERE active = 1
+             ORDER BY address ASC
+            """,
+        ).fetchall()
+        return [_row_to_watchlist_entry(row) for row in rows]
+
+    def list_all(self) -> list[WatchlistEntry]:
+        """Return every row in the table (active + inactive)."""
+        rows = self._conn.execute(
+            """
+            SELECT address, source, reason, added_at, active
+              FROM wallet_watchlist
+             ORDER BY address ASC
+            """,
+        ).fetchall()
+        return [_row_to_watchlist_entry(row) for row in rows]
+
+
+def _row_to_watchlist_entry(row: sqlite3.Row) -> WatchlistEntry:
+    """Convert a ``wallet_watchlist`` row to a ``WatchlistEntry``."""
+    return WatchlistEntry(
+        address=row["address"],
+        source=row["source"],
+        reason=row["reason"],
+        added_at=row["added_at"],
+        active=bool(row["active"]),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class WalletTrade:
+    """A single CONFIRMED trade by a watched wallet (append-only)."""
+
+    transaction_hash: str
+    asset_id: str
+    side: str
+    wallet: str
+    condition_id: str
+    size: float
+    price: float
+    usd_value: float
+    status: str
+    source: str
+    timestamp: int
+    recorded_at: int
+
+
+class WalletTradesRepo:
+    """Append-only store for ``wallet_trades`` rows.
+
+    Rows are never updated or deleted post-insert: the composite primary key
+    ``(transaction_hash, asset_id, side)`` is the dedupe key and ``insert``
+    uses ``INSERT OR IGNORE``.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        """Bind the repo to an already-initialised connection."""
+        self._conn = conn
+
+    def insert(self, trade: WalletTrade) -> bool:
+        """Insert ``trade`` if its composite PK is unseen.
+
+        Args:
+            trade: The fully-populated trade row to persist.
+
+        Returns:
+            ``True`` if the row was inserted, ``False`` if the composite key
+            already existed (dedupe hit).
+        """
+        cur = self._conn.execute(
+            """
+            INSERT OR IGNORE INTO wallet_trades (
+              transaction_hash, asset_id, side, wallet, condition_id,
+              size, price, usd_value, status, source, timestamp, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                trade.transaction_hash,
+                trade.asset_id,
+                trade.side,
+                trade.wallet,
+                trade.condition_id,
+                trade.size,
+                trade.price,
+                trade.usd_value,
+                trade.status,
+                trade.source,
+                trade.timestamp,
+                trade.recorded_at,
+            ),
+        )
+        self._conn.commit()
+        return cur.rowcount == 1
+
+    def recent_for_wallet(self, wallet: str, *, limit: int = 100) -> list[WalletTrade]:
+        """Return the wallet's most-recent trades, newest first.
+
+        Args:
+            wallet: 0x-prefixed proxy wallet address.
+            limit: Max rows to return.
+
+        Returns:
+            Trades with ``wallet = <address>`` ordered by ``timestamp DESC``.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT transaction_hash, asset_id, side, wallet, condition_id,
+                   size, price, usd_value, status, source, timestamp, recorded_at
+              FROM wallet_trades
+             WHERE wallet = ?
+             ORDER BY timestamp DESC
+             LIMIT ?
+            """,
+            (wallet, limit),
+        ).fetchall()
+        return [_row_to_wallet_trade(row) for row in rows]
+
+    def count_by_wallet(self) -> dict[str, int]:
+        """Return ``{wallet: trade_count}`` across the full table."""
+        rows = self._conn.execute(
+            "SELECT wallet, COUNT(*) AS c FROM wallet_trades GROUP BY wallet",
+        ).fetchall()
+        return {row["wallet"]: int(row["c"]) for row in rows}
+
+
+def _row_to_wallet_trade(row: sqlite3.Row) -> WalletTrade:
+    """Convert a ``wallet_trades`` row to a ``WalletTrade`` dataclass."""
+    return WalletTrade(
+        transaction_hash=row["transaction_hash"],
+        asset_id=row["asset_id"],
+        side=row["side"],
+        wallet=row["wallet"],
+        condition_id=row["condition_id"],
+        size=float(row["size"]),
+        price=float(row["price"]),
+        usd_value=float(row["usd_value"]),
+        status=row["status"],
+        source=row["source"],
+        timestamp=int(row["timestamp"]),
+        recorded_at=int(row["recorded_at"]),
+    )

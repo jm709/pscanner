@@ -1,8 +1,8 @@
 """SQLite bootstrap for pscanner.
 
-Creates (idempotently) the five tables described in the project plan plus the
-``idx_alerts_created`` index, applies pragmas for WAL + foreign keys, and sets
-``row_factory = sqlite3.Row`` so callers can index columns by name.
+Creates (idempotently) the project's tables plus their indexes, applies
+pragmas for WAL + foreign keys, and sets ``row_factory = sqlite3.Row`` so
+callers can index columns by name.
 """
 
 from __future__ import annotations
@@ -63,6 +63,37 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at DESC)",
+    """
+    CREATE TABLE IF NOT EXISTS wallet_watchlist (
+      address TEXT PRIMARY KEY,
+      source TEXT NOT NULL,
+      reason TEXT,
+      added_at INTEGER NOT NULL,
+      active INTEGER NOT NULL DEFAULT 1
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_watchlist_active ON wallet_watchlist(active, address)",
+    """
+    CREATE TABLE IF NOT EXISTS wallet_trades (
+      transaction_hash TEXT NOT NULL,
+      asset_id TEXT NOT NULL,
+      side TEXT NOT NULL,
+      wallet TEXT NOT NULL,
+      condition_id TEXT NOT NULL,
+      size REAL NOT NULL,
+      price REAL NOT NULL,
+      usd_value REAL NOT NULL,
+      status TEXT NOT NULL,
+      source TEXT NOT NULL,
+      timestamp INTEGER NOT NULL,
+      recorded_at INTEGER NOT NULL,
+      PRIMARY KEY (transaction_hash, asset_id, side)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wallet_trades_wallet_ts "
+    "ON wallet_trades(wallet, timestamp DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_wallet_trades_market_ts "
+    "ON wallet_trades(condition_id, timestamp DESC)",
 )
 
 _PRAGMAS: tuple[str, ...] = (
