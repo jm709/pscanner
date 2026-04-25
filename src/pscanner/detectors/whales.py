@@ -1,7 +1,9 @@
 """Whale detector — newly-active wallet places an outsized bet on a tiny market.
 
-Subscribes to the CLOB websocket trade stream, joins each trade to the cached
-gamma market metadata, and emits an alert when:
+DC-1.5 rewires the detector to consume ``wallet_trades`` rows produced by the
+trade collector (REST polling against ``/activity``) instead of the public
+CLOB websocket, which never carried the per-wallet trade events the detector
+needs. The detector now fires when:
 
 * the market's liquidity is below ``small_market_max_liquidity_usd``,
 * the trade USD notional is above ``big_bet_min_usd`` *and* above
@@ -10,33 +12,31 @@ gamma market metadata, and emits an alert when:
   with fewer than ``new_account_max_trades`` total trades.
 
 Wallet age and total-trade counts are cached in ``wallet_first_seen`` for 24h
-to keep data-API request volume bounded.
+to keep data-API request volume bounded. The :meth:`run` loop only refreshes
+the market metadata cache used for the liquidity filter; trade evaluation is
+driven by :meth:`handle_trade_sync`, registered with the trade collector via
+``TradeCollector.subscribe_new_trade``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
-from typing import TYPE_CHECKING
 
 import structlog
 
 from pscanner.alerts.models import Alert
 from pscanner.alerts.sink import AlertSink
 from pscanner.config import WhalesConfig
-from pscanner.poly.clob_ws import MarketWebSocket
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
-from pscanner.poly.models import WsTradeMessage
 from pscanner.store.repo import (
     CachedMarket,
     MarketCacheRepo,
     WalletFirstSeen,
     WalletFirstSeenRepo,
+    WalletTrade,
 )
-
-if TYPE_CHECKING:
-    from pscanner.poly.models import Market
 
 _LOG = structlog.get_logger(__name__)
 _WALLET_CACHE_TTL_SECONDS = 86400
@@ -54,7 +54,6 @@ class WhalesDetector:
         self,
         *,
         config: WhalesConfig,
-        ws: MarketWebSocket,
         gamma_client: GammaClient,
         data_client: DataClient,
         market_cache: MarketCacheRepo,
@@ -64,105 +63,108 @@ class WhalesDetector:
 
         Args:
             config: Threshold settings from ``WhalesConfig``.
-            ws: Connected (or pending) CLOB websocket client.
-            gamma_client: Source of the active markets catalogue.
+            gamma_client: Source of the active markets catalogue, used to
+                periodically refresh ``market_cache`` for liquidity lookups.
             data_client: Source of wallet activity for age lookups.
             market_cache: Persistent cache of market metadata.
             wallet_first_seen: Persistent cache of wallet first-activity rows.
         """
         self._config = config
-        self._ws = ws
         self._gamma_client = gamma_client
         self._data_client = data_client
         self._market_cache = market_cache
         self._wallet_first_seen = wallet_first_seen
-        self._asset_to_market: dict[str, str] = {}
+        self._sink: AlertSink | None = None
+        self._condition_to_market: dict[str, CachedMarket] = {}
+        self._pending_tasks: set[asyncio.Task[None]] = set()
 
     async def run(self, sink: AlertSink) -> None:
-        """Connect the websocket and run the subscription + consume loops."""
-        await self._ws.connect()
-        async with asyncio.TaskGroup() as tg:
-            tg.create_task(self._subscription_loop())
-            tg.create_task(self._consume_loop(sink))
+        """Long-running task: periodically refresh the market cache.
 
-    async def _subscription_loop(self) -> None:
-        """Refresh the active markets and resubscribe forever."""
+        Trade alerts are NOT driven from this loop. They fire via
+        :meth:`handle_trade` invoked by the trade collector callback. This
+        loop only keeps the ``market_cache`` fresh so liquidity lookups in
+        :meth:`handle_trade` are accurate.
+
+        Args:
+            sink: Alert sink used by :meth:`handle_trade` for emission.
+        """
+        if self._sink is None:
+            self._sink = sink
         while True:
-            await self._refresh_subscriptions()
+            try:
+                await self._refresh_market_cache()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _LOG.exception("whales.refresh_failed")
             await asyncio.sleep(self._config.ws_resubscribe_interval_seconds)
 
-    async def _refresh_subscriptions(self) -> None:
-        """Pull bounded slice of active markets, cache, and (re)subscribe.
-
-        WebSocket connections are capped at 5/IP and the active-market
-        catalogue is huge (50k+), so the loop applies three filters:
-
-        * skip markets without an order book,
-        * skip markets below ``subscription_min_volume_usd``,
-        * stop accumulating once asset-id count reaches roughly
-          ``subscription_max_markets * 2`` (each market has ~2 token IDs).
-        """
-        asset_id_cap = self._config.subscription_max_markets * 2
-        min_volume = self._config.subscription_min_volume_usd
-        asset_ids: list[str] = []
+    async def _refresh_market_cache(self) -> None:
+        """Page the active markets, upsert into market_cache, rebuild condition map."""
+        fresh: dict[str, CachedMarket] = {}
+        count = 0
         async for market in self._gamma_client.iter_markets(active=True, closed=False):
             if not market.enable_order_book:
                 continue
-            if (market.volume or 0.0) < min_volume:
+            if (market.volume or 0.0) < self._config.subscription_min_volume_usd:
                 continue
-            self._cache_and_index(market, asset_ids)
-            if len(asset_ids) >= asset_id_cap:
+            if count >= self._config.subscription_max_markets:
                 break
-        await self._subscribe_in_batches(asset_ids)
-        _LOG.info(
-            "whales.subscriptions.refreshed",
-            markets=len(self._asset_to_market),
-            assets=len(asset_ids),
-        )
+            self._market_cache.upsert(market)
+            cached = self._market_cache.get(market.id)
+            if cached is not None and market.condition_id:
+                fresh[market.condition_id] = cached
+                count += 1
+        self._condition_to_market = fresh
+        _LOG.info("whales.market_cache.refreshed", markets=count)
 
-    def _cache_and_index(self, market: Market, asset_ids: list[str]) -> None:
-        """Upsert ``market`` into the cache and extend the asset→market map."""
-        self._market_cache.upsert(market)
-        for asset_id in market.clob_token_ids:
-            self._asset_to_market[asset_id] = market.id
-            asset_ids.append(asset_id)
+    def handle_trade_sync(self, trade: WalletTrade) -> None:
+        """Sync entry point for the TradeCollector callback.
 
-    async def _subscribe_in_batches(self, asset_ids: list[str]) -> None:
-        """Send subscribe frames in chunks of ``ws_subscribe_batch_size``."""
-        batch_size = self._config.ws_subscribe_batch_size
-        for start in range(0, len(asset_ids), batch_size):
-            await self._ws.subscribe(asset_ids[start : start + batch_size])
+        Spawns the async handler on the running loop. Called from inside the
+        trade collector's poll loop, so it must not block.
 
-    async def _consume_loop(self, sink: AlertSink) -> None:
-        """Read messages from the websocket and dispatch trades to handlers."""
-        async for msg in self._ws.messages():
-            if not isinstance(msg, WsTradeMessage):
-                continue
-            await self._handle_trade(msg, sink)
+        Args:
+            trade: Newly-inserted ``WalletTrade`` row.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            _LOG.warning("whales.no_event_loop", tx=trade.transaction_hash)
+            return
+        task = loop.create_task(self.handle_trade(trade))
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
 
-    async def _handle_trade(self, msg: WsTradeMessage, sink: AlertSink) -> None:
-        """Apply the whale-detection rules and emit an alert when matched."""
-        cached = self._lookup_market(msg)
+    async def handle_trade(self, trade: WalletTrade) -> None:
+        """Apply the new+small+big filter to a freshly-inserted trade.
+
+        Wired via :meth:`TradeCollector.subscribe_new_trade`. Fires only when
+        the trade was a new insert (callback contract). Skips silently when
+        the sink has not been wired yet (defensive — Scanner sets it at
+        construction).
+
+        Args:
+            trade: Newly-inserted ``WalletTrade`` row.
+        """
+        if self._sink is None:
+            _LOG.warning("whales.no_sink", tx=trade.transaction_hash)
+            return
+        cached = self._condition_to_market.get(trade.condition_id)
         if cached is None or cached.liquidity_usd is None:
             return
         if cached.liquidity_usd > self._config.small_market_max_liquidity_usd:
             return
-        usd = msg.size * msg.price
+        usd = trade.usd_value
         if not self._is_big_bet(usd, cached.liquidity_usd):
             return
-        seen = await self._get_or_refresh_wallet(msg.taker_proxy)
+        seen = await self._get_or_refresh_wallet(trade.wallet)
         if seen is None or seen.first_activity_at is None:
             return
-        if not self._is_new_wallet(seen, msg.timestamp):
+        if not self._is_new_wallet(seen, trade.timestamp):
             return
-        await sink.emit(self._build_alert(msg, cached, usd, seen))
-
-    def _lookup_market(self, msg: WsTradeMessage) -> CachedMarket | None:
-        """Return the cached market for a trade, or ``None`` if unknown."""
-        market_id = self._asset_to_market.get(msg.asset_id)
-        if market_id is None:
-            return None
-        return self._market_cache.get(market_id)
+        await self._sink.emit(self._build_alert(trade, cached, usd, seen))
 
     def _is_big_bet(self, usd: float, liquidity_usd: float) -> bool:
         """Return whether ``usd`` clears both the absolute and pct thresholds."""
@@ -192,46 +194,46 @@ class WhalesDetector:
 
     def _build_alert(
         self,
-        msg: WsTradeMessage,
+        trade: WalletTrade,
         cached: CachedMarket,
         usd: float,
         seen: WalletFirstSeen,
     ) -> Alert:
         """Construct the ``Alert`` payload for an emitted whale event."""
         liquidity = cached.liquidity_usd
-        # liquidity is non-None — _handle_trade rejects None upstream — but assert
+        # liquidity is non-None — handle_trade rejects None upstream — but assert
         # for the type-checker.
         assert liquidity is not None  # noqa: S101
         pct = usd / liquidity
         # first_activity_at is non-None — _is_new_wallet rejects None upstream.
         assert seen.first_activity_at is not None  # noqa: S101
-        age_days = (msg.timestamp - seen.first_activity_at) / 86400
+        age_days = (trade.timestamp - seen.first_activity_at) / 86400
         severity = "high" if usd > _HIGH_SEVERITY_USD or pct > _HIGH_SEVERITY_PCT else "med"
         body = {
-            "wallet": msg.taker_proxy,
+            "wallet": trade.wallet,
             "market_title": cached.title,
-            "condition_id": msg.condition_id,
-            "side": msg.side,
-            "size": msg.size,
-            "price": msg.price,
+            "condition_id": trade.condition_id,
+            "side": trade.side,
+            "size": trade.size,
+            "price": trade.price,
             "usd_value": usd,
             "market_liquidity": liquidity,
             "age_days": age_days,
             "total_trades": seen.total_trades,
         }
-        title = f"Whale on {cached.title or msg.condition_id}: ${usd:,.0f}"
+        title = f"Whale on {cached.title or trade.condition_id}: ${usd:,.0f}"
         return Alert(
             detector="whales",
-            alert_key=_alert_key(msg),
+            alert_key=_alert_key(trade),
             severity=severity,
             title=title,
             body=body,
-            created_at=msg.timestamp,
+            created_at=trade.timestamp,
         )
 
 
-def _alert_key(msg: WsTradeMessage) -> str:
+def _alert_key(trade: WalletTrade) -> str:
     """Compute an idempotent dedupe key for a whale alert."""
-    if msg.transaction_hash:
-        return f"whale:{msg.transaction_hash}"
-    return f"whale:{msg.condition_id}:{msg.taker_proxy}:{msg.timestamp}"
+    if trade.transaction_hash:
+        return f"whale:{trade.transaction_hash}"
+    return f"whale:{trade.condition_id}:{trade.wallet}:{trade.timestamp}"

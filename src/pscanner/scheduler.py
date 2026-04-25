@@ -38,7 +38,6 @@ from pscanner.config import Config
 from pscanner.detectors.mispricing import MispricingDetector
 from pscanner.detectors.smart_money import SmartMoneyDetector
 from pscanner.detectors.whales import WhalesDetector
-from pscanner.poly.clob_ws import MarketWebSocket
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.http import PolyHttpClient
@@ -78,7 +77,6 @@ class SchedulerClients:
     data_http: PolyHttpClient
     gamma_client: GammaClient
     data_client: DataClient
-    market_ws: MarketWebSocket
 
 
 class Scanner:
@@ -116,8 +114,21 @@ class Scanner:
         self._watchlist_registry = WatchlistRegistry(self._watchlist_repo)
         self._detectors = self._build_detectors()
         self._collectors = self._build_collectors()
+        self._wire_trade_callbacks()
         self._collectors_stop = asyncio.Event()
         self._closed = False
+
+    def _wire_trade_callbacks(self) -> None:
+        """Wire trade-collector → whales detector callback (DC-1.5)."""
+        trade_collector = self._collectors.get("trade_collector")
+        whales_detector = self._detectors.get("whales")
+        if not isinstance(trade_collector, TradeCollector):
+            return
+        if not isinstance(whales_detector, WhalesDetector):
+            return
+        # Set sink directly so handle_trade works even before whales.run() is called.
+        whales_detector._sink = self._sink
+        trade_collector.subscribe_new_trade(whales_detector.handle_trade_sync)
 
     def _build_default_clients(self) -> SchedulerClients:
         """Construct the production HTTP/WS clients from config."""
@@ -134,7 +145,6 @@ class Scanner:
             data_http=data_http,
             gamma_client=GammaClient(http=gamma_http),
             data_client=DataClient(http=data_http),
-            market_ws=MarketWebSocket(),
         )
 
     def _build_collectors(self) -> dict[str, Collector]:
@@ -177,7 +187,6 @@ class Scanner:
         if self._config.whales.enabled:
             detectors["whales"] = WhalesDetector(
                 config=self._config.whales,
-                ws=self._clients.market_ws,
                 gamma_client=self._clients.gamma_client,
                 data_client=self._clients.data_client,
                 market_cache=self._market_cache_repo,
@@ -400,9 +409,9 @@ class Scanner:
             _LOG.exception("scanner.run_once.smart_money.poll_failed")
 
     async def _run_once_whales(self) -> None:
-        """Snapshot the markets cache (one bounded page, no websocket).
+        """Snapshot the markets cache (one bounded page).
 
-        ``WhalesDetector._refresh_subscriptions`` paginates the entire active
+        ``WhalesDetector._refresh_market_cache`` paginates the entire active
         market catalogue (50k+ rows on Polymarket today). That's appropriate
         for a long-running daemon, but in single-shot mode we only need
         enough markets to populate the cache so downstream `pscanner status`
@@ -434,8 +443,6 @@ class Scanner:
         self._collectors_stop.set()
         with contextlib.suppress(Exception):
             await self._renderer.stop()
-        with contextlib.suppress(Exception):
-            await self._clients.market_ws.close()
         if self._owns_clients:
             await self._close_owned_clients()
         with contextlib.suppress(sqlite3.Error):

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 from typing import Any
 
 import structlog
@@ -76,6 +77,20 @@ class TradeCollector:
         self._poll_interval_seconds = poll_interval_seconds
         self._activity_page_limit = activity_page_limit
         self._pending_add_tasks: set[asyncio.Task[int]] = set()
+        self._new_trade_callbacks: list[Callable[[WalletTrade], None]] = []
+
+    def subscribe_new_trade(self, callback: Callable[[WalletTrade], None]) -> None:
+        """Register a synchronous callback fired on each newly-inserted WalletTrade.
+
+        Callbacks fire only when the trade was actually inserted (PK insert
+        succeeded — duplicates skipped). Exceptions are logged and swallowed so
+        one failing subscriber does not break the polling loop.
+
+        Args:
+            callback: Sync callable invoked from inside :meth:`_poll_wallet`.
+                Must not block.
+        """
+        self._new_trade_callbacks.append(callback)
 
     async def run(self, stop_event: asyncio.Event) -> None:
         """Run the polling loop until ``stop_event`` is set.
@@ -143,15 +158,30 @@ class TradeCollector:
             if trade is None:
                 continue
             try:
-                if self._trades_repo.insert(trade):
-                    inserted += 1
+                inserted_now = self._trades_repo.insert(trade)
             except Exception:
                 _LOG.exception(
                     "trades.insert_failed",
                     wallet=address,
                     tx_hash=trade.transaction_hash,
                 )
+                continue
+            if inserted_now:
+                inserted += 1
+                self._fire_new_trade_callbacks(trade)
         return inserted
+
+    def _fire_new_trade_callbacks(self, trade: WalletTrade) -> None:
+        """Invoke every registered new-trade callback, swallowing exceptions.
+
+        Args:
+            trade: The freshly-inserted ``WalletTrade``.
+        """
+        for cb in self._new_trade_callbacks:
+            try:
+                cb(trade)
+            except Exception:
+                _LOG.exception("trades.callback_failed", wallet=trade.wallet)
 
     def _on_watchlist_add(self, address: str) -> None:
         """Schedule an immediate poll for ``address`` when it joins the watchlist.

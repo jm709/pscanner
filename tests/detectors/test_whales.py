@@ -1,8 +1,9 @@
-"""Tests for ``WhalesDetector``.
+"""Tests for ``WhalesDetector`` (DC-1.5 callback-driven).
 
-These exercise ``_handle_trade`` directly with synthesised dependencies and
-verify ``_subscription_loop`` issues batched ``ws.subscribe`` calls. All
-collaborators are stubbed in-process — no network, no SQLite.
+These exercise :meth:`WhalesDetector.handle_trade` directly with synthesised
+``WalletTrade`` objects and verify :meth:`_refresh_market_cache` populates
+the in-memory ``condition_id -> CachedMarket`` map. All collaborators are
+stubbed in-process — no network, no SQLite.
 """
 
 from __future__ import annotations
@@ -18,8 +19,8 @@ import pytest
 from pscanner.alerts.models import Alert
 from pscanner.config import WhalesConfig
 from pscanner.detectors.whales import WhalesDetector
-from pscanner.poly.models import Market, WsBookMessage, WsTradeMessage
-from pscanner.store.repo import CachedMarket, WalletFirstSeen
+from pscanner.poly.models import Market
+from pscanner.store.repo import CachedMarket, WalletFirstSeen, WalletTrade
 
 # Pin "now" to wall-clock at import. Tests treat this as the trade timestamp so
 # the wallet-first-seen cache TTL check (which uses real time) sees a fresh row.
@@ -39,29 +40,30 @@ def _make_config(**overrides: Any) -> WhalesConfig:
         "small_market_max_liquidity_usd": 50000.0,
         "big_bet_min_pct_of_liquidity": 0.05,
         "big_bet_min_usd": 2000.0,
-        "ws_subscribe_batch_size": 50,
         "ws_resubscribe_interval_seconds": 1800,
     }
     base.update(overrides)
     return WhalesConfig(**base)
 
 
-def _make_trade(**overrides: Any) -> WsTradeMessage:
-    """Build a ``CONFIRMED`` trade message with sensible defaults."""
+def _make_trade(**overrides: Any) -> WalletTrade:
+    """Build a ``CONFIRMED`` ``WalletTrade`` with sensible defaults."""
     base: dict[str, Any] = {
-        "event_type": "trade",
-        "condition_id": _CONDITION_ID,
+        "transaction_hash": "0xtxhash1",
         "asset_id": _ASSET_ID,
         "side": "BUY",
+        "wallet": _WALLET,
+        "condition_id": _CONDITION_ID,
         "size": 1000.0,
         "price": 0.50,
-        "taker_proxy": _WALLET,
+        "usd_value": 500.0,
         "status": "CONFIRMED",
-        "transaction_hash": "0xtxhash1",
+        "source": "activity_api",
         "timestamp": _NOW,
+        "recorded_at": _NOW,
     }
     base.update(overrides)
-    return WsTradeMessage.model_validate(base)
+    return WalletTrade(**base)
 
 
 def _make_cached_market(**overrides: Any) -> CachedMarket:
@@ -90,24 +92,6 @@ def _make_first_seen(**overrides: Any) -> WalletFirstSeen:
     }
     base.update(overrides)
     return WalletFirstSeen(**base)
-
-
-class StubWebSocket:
-    """Minimal in-memory ``MarketWebSocket`` replacement."""
-
-    def __init__(self) -> None:
-        self.connected = False
-        self.subscribe_calls: list[list[str]] = []
-
-    async def connect(self) -> None:
-        self.connected = True
-
-    async def subscribe(self, asset_ids: Any) -> None:
-        self.subscribe_calls.append(list(asset_ids))
-
-    async def messages(self) -> AsyncIterator[Any]:
-        if False:  # pragma: no cover - generator typing helper
-            yield None
 
 
 class StubGammaClient:
@@ -160,6 +144,19 @@ class StubMarketCache:
 
     def upsert(self, market: Market) -> None:
         self.upserts.append(market)
+        # Mirror what MarketCacheRepo does: ensure the next .get() returns a
+        # CachedMarket reflecting the upsert so _refresh_market_cache can
+        # rebuild its condition map from .get().
+        self._cache[market.id] = CachedMarket(
+            market_id=market.id,
+            event_id=market.event_id,
+            title=market.question,
+            liquidity_usd=market.liquidity,
+            volume_usd=market.volume,
+            outcome_prices=list(market.outcome_prices),
+            active=market.active,
+            cached_at=_NOW,
+        )
 
     def get(self, market_id: str) -> CachedMarket | None:
         return self._cache.get(market_id)
@@ -205,22 +202,28 @@ class CapturingSink:
 def _make_detector(
     *,
     config: WhalesConfig | None = None,
-    ws: StubWebSocket | None = None,
     gamma: StubGammaClient | None = None,
     data: StubDataClient | None = None,
     market_cache: StubMarketCache | None = None,
     first_seen: StubFirstSeen | None = None,
+    sink: CapturingSink | None = None,
+    seed_condition_map: bool = True,
 ) -> WhalesDetector:
     """Construct a ``WhalesDetector`` wired to the given stubs (with defaults)."""
+    cache = market_cache or StubMarketCache()
     detector = WhalesDetector(
         config=config or _make_config(),
-        ws=ws or StubWebSocket(),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         gamma_client=gamma or StubGammaClient([]),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         data_client=data or StubDataClient(),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
-        market_cache=market_cache or StubMarketCache(),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        market_cache=cache,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         wallet_first_seen=first_seen or StubFirstSeen(),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
     )
-    detector._asset_to_market[_ASSET_ID] = _MARKET_ID
+    if sink is not None:
+        detector._sink = sink  # type: ignore[assignment]  # ty:ignore[invalid-assignment]
+    if seed_condition_map:
+        cached = cache.get(_MARKET_ID)
+        if cached is not None:
+            detector._condition_to_market[_CONDITION_ID] = cached
     return detector
 
 
@@ -229,10 +232,10 @@ async def test_handle_trade_emits_when_thresholds_met() -> None:
     sink = CapturingSink()
     market_cache = StubMarketCache({_MARKET_ID: _make_cached_market()})
     first_seen = StubFirstSeen({_WALLET: _make_first_seen()})
-    detector = _make_detector(market_cache=market_cache, first_seen=first_seen)
+    detector = _make_detector(market_cache=market_cache, first_seen=first_seen, sink=sink)
 
-    trade = _make_trade(size=4000.0, price=1.0)  # $4000 > $2000 min, 40% of $10k liquidity
-    await detector._handle_trade(trade, sink)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    trade = _make_trade(size=4000.0, price=1.0, usd_value=4000.0)
+    await detector.handle_trade(trade)
 
     assert len(sink.alerts) == 1
     alert = sink.alerts[0]
@@ -248,9 +251,9 @@ async def test_handle_trade_skips_aged_wallet() -> None:
     market_cache = StubMarketCache({_MARKET_ID: _make_cached_market()})
     aged_seen = _make_first_seen(first_activity_at=_NOW - 60 * 86400)
     first_seen = StubFirstSeen({_WALLET: aged_seen})
-    detector = _make_detector(market_cache=market_cache, first_seen=first_seen)
+    detector = _make_detector(market_cache=market_cache, first_seen=first_seen, sink=sink)
 
-    await detector._handle_trade(_make_trade(size=4000.0, price=1.0), sink)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    await detector.handle_trade(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
 
     assert sink.alerts == []
 
@@ -260,9 +263,9 @@ async def test_handle_trade_skips_when_usd_below_min() -> None:
     sink = CapturingSink()
     market_cache = StubMarketCache({_MARKET_ID: _make_cached_market()})
     first_seen = StubFirstSeen({_WALLET: _make_first_seen()})
-    detector = _make_detector(market_cache=market_cache, first_seen=first_seen)
+    detector = _make_detector(market_cache=market_cache, first_seen=first_seen, sink=sink)
 
-    await detector._handle_trade(_make_trade(size=10.0, price=0.10), sink)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    await detector.handle_trade(_make_trade(size=10.0, price=0.10, usd_value=1.0))
 
     assert sink.alerts == []
 
@@ -273,22 +276,32 @@ async def test_handle_trade_skips_when_market_too_liquid() -> None:
     big_market = _make_cached_market(liquidity_usd=200000.0)
     market_cache = StubMarketCache({_MARKET_ID: big_market})
     first_seen = StubFirstSeen({_WALLET: _make_first_seen()})
-    detector = _make_detector(market_cache=market_cache, first_seen=first_seen)
+    detector = _make_detector(market_cache=market_cache, first_seen=first_seen, sink=sink)
 
-    await detector._handle_trade(_make_trade(size=4000.0, price=1.0), sink)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    await detector.handle_trade(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
 
     assert sink.alerts == []
 
 
 @pytest.mark.asyncio
-async def test_handle_trade_skips_unknown_market() -> None:
+async def test_handle_trade_skips_unknown_condition() -> None:
     sink = CapturingSink()
-    detector = _make_detector()
-    detector._asset_to_market.clear()  # forget the mapping
+    detector = _make_detector(sink=sink, seed_condition_map=False)
 
-    await detector._handle_trade(_make_trade(size=4000.0, price=1.0), sink)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    await detector.handle_trade(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
 
     assert sink.alerts == []
+
+
+@pytest.mark.asyncio
+async def test_handle_trade_returns_when_sink_unwired() -> None:
+    """Defensive: a detector with no sink must return without raising."""
+    market_cache = StubMarketCache({_MARKET_ID: _make_cached_market()})
+    first_seen = StubFirstSeen({_WALLET: _make_first_seen()})
+    detector = _make_detector(market_cache=market_cache, first_seen=first_seen, sink=None)
+
+    # Should not raise.
+    await detector.handle_trade(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
 
 
 @pytest.mark.asyncio
@@ -300,9 +313,14 @@ async def test_handle_trade_refreshes_when_first_seen_missing() -> None:
         first_activity_at=_NOW - 5 * 86400,
         activity=[{"type": "TRADE"}] * 7,
     )
-    detector = _make_detector(market_cache=market_cache, first_seen=first_seen, data=data)
+    detector = _make_detector(
+        market_cache=market_cache,
+        first_seen=first_seen,
+        data=data,
+        sink=sink,
+    )
 
-    await detector._handle_trade(_make_trade(size=4000.0, price=1.0), sink)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    await detector.handle_trade(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
 
     assert data.first_calls == [_WALLET]
     assert data.activity_calls == [(_WALLET, 200)]
@@ -322,9 +340,14 @@ async def test_handle_trade_refreshes_stale_cache() -> None:
         first_activity_at=_NOW - 5 * 86400,
         activity=[{"type": "TRADE"}] * 9,
     )
-    detector = _make_detector(market_cache=market_cache, first_seen=first_seen, data=data)
+    detector = _make_detector(
+        market_cache=market_cache,
+        first_seen=first_seen,
+        data=data,
+        sink=sink,
+    )
 
-    await detector._handle_trade(_make_trade(size=4000.0, price=1.0), sink)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    await detector.handle_trade(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
 
     assert data.first_calls == [_WALLET]
     assert first_seen.upserts == [(_WALLET, _NOW - 5 * 86400, 9)]
@@ -337,9 +360,14 @@ async def test_handle_trade_skips_when_first_activity_unknown() -> None:
     market_cache = StubMarketCache({_MARKET_ID: _make_cached_market()})
     first_seen = StubFirstSeen()
     data = StubDataClient(first_activity_at=None, activity=[])
-    detector = _make_detector(market_cache=market_cache, first_seen=first_seen, data=data)
+    detector = _make_detector(
+        market_cache=market_cache,
+        first_seen=first_seen,
+        data=data,
+        sink=sink,
+    )
 
-    await detector._handle_trade(_make_trade(size=4000.0, price=1.0), sink)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    await detector.handle_trade(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
 
     assert sink.alerts == []
 
@@ -350,9 +378,9 @@ async def test_handle_trade_skips_when_total_trades_exceeds_cap() -> None:
     market_cache = StubMarketCache({_MARKET_ID: _make_cached_market()})
     seen = _make_first_seen(total_trades=999)
     first_seen = StubFirstSeen({_WALLET: seen})
-    detector = _make_detector(market_cache=market_cache, first_seen=first_seen)
+    detector = _make_detector(market_cache=market_cache, first_seen=first_seen, sink=sink)
 
-    await detector._handle_trade(_make_trade(size=4000.0, price=1.0), sink)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    await detector.handle_trade(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
 
     assert sink.alerts == []
 
@@ -362,10 +390,10 @@ async def test_handle_trade_alert_key_falls_back_when_no_tx_hash() -> None:
     sink = CapturingSink()
     market_cache = StubMarketCache({_MARKET_ID: _make_cached_market()})
     first_seen = StubFirstSeen({_WALLET: _make_first_seen()})
-    detector = _make_detector(market_cache=market_cache, first_seen=first_seen)
+    detector = _make_detector(market_cache=market_cache, first_seen=first_seen, sink=sink)
 
-    trade = _make_trade(size=4000.0, price=1.0, transaction_hash=None)
-    await detector._handle_trade(trade, sink)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    trade = _make_trade(size=4000.0, price=1.0, usd_value=4000.0, transaction_hash="")
+    await detector.handle_trade(trade)
 
     assert sink.alerts[0].alert_key == f"whale:{_CONDITION_ID}:{_WALLET}:{_NOW}"
 
@@ -377,72 +405,65 @@ async def test_handle_trade_severity_med_for_modest_bet() -> None:
     market = _make_cached_market(liquidity_usd=50000.0)
     market_cache = StubMarketCache({_MARKET_ID: market})
     first_seen = StubFirstSeen({_WALLET: _make_first_seen()})
-    detector = _make_detector(market_cache=market_cache, first_seen=first_seen)
+    detector = _make_detector(market_cache=market_cache, first_seen=first_seen, sink=sink)
 
-    await detector._handle_trade(_make_trade(size=2500.0, price=1.0), sink)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    await detector.handle_trade(_make_trade(size=2500.0, price=1.0, usd_value=2500.0))
 
     assert sink.alerts[0].severity == "med"
 
 
 @pytest.mark.asyncio
-async def test_refresh_subscriptions_batches_asset_ids() -> None:
+async def test_refresh_market_cache_populates_condition_map() -> None:
+    """``_refresh_market_cache`` builds ``_condition_to_market`` from gamma iter."""
     market_a = Market.model_validate(
         {
             "id": "m-a",
+            "conditionId": "cond-a",
             "question": "A?",
             "slug": "a",
             "outcomes": ["YES", "NO"],
             "outcomePrices": ["0.5", "0.5"],
             "clobTokenIds": ["a1", "a2"],
             "volume": 1000.0,
+            "liquidity": 5000.0,
         }
     )
     market_b = Market.model_validate(
         {
             "id": "m-b",
+            "conditionId": "cond-b",
             "question": "B?",
             "slug": "b",
             "outcomes": ["YES", "NO"],
             "outcomePrices": ["0.4", "0.6"],
-            "clobTokenIds": ["b1", "b2", "b3"],
+            "clobTokenIds": ["b1", "b2"],
             "volume": 1000.0,
+            "liquidity": 7000.0,
         }
     )
-    ws = StubWebSocket()
     gamma = StubGammaClient([market_a, market_b])
     market_cache = StubMarketCache()
     detector = WhalesDetector(
-        config=_make_config(ws_subscribe_batch_size=2),
-        ws=ws,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        config=_make_config(),
         gamma_client=gamma,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         data_client=StubDataClient(),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         market_cache=market_cache,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         wallet_first_seen=StubFirstSeen(),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
     )
 
-    await detector._refresh_subscriptions()
+    await detector._refresh_market_cache()
 
     assert [m.id for m in market_cache.upserts] == ["m-a", "m-b"]
-    assert detector._asset_to_market == {
-        "a1": "m-a",
-        "a2": "m-a",
-        "b1": "m-b",
-        "b2": "m-b",
-        "b3": "m-b",
-    }
-    # 5 asset ids, batch size 2 -> 3 calls of sizes 2, 2, 1.
-    assert [len(batch) for batch in ws.subscribe_calls] == [2, 2, 1]
-    assert ws.subscribe_calls[0] == ["a1", "a2"]
-    assert ws.subscribe_calls[1] == ["b1", "b2"]
-    assert ws.subscribe_calls[2] == ["b3"]
+    assert set(detector._condition_to_market.keys()) == {"cond-a", "cond-b"}
 
 
 @pytest.mark.asyncio
-async def test_refresh_subscriptions_skips_markets_without_order_book() -> None:
-    """Markets with ``enable_order_book=False`` aren't cached or subscribed."""
+async def test_refresh_market_cache_skips_markets_without_order_book() -> None:
+    """Markets with ``enable_order_book=False`` aren't cached."""
     bookless = Market.model_validate(
         {
             "id": "m-x",
+            "conditionId": "cond-x",
             "question": "X?",
             "slug": "x",
             "outcomes": ["YES", "NO"],
@@ -455,6 +476,7 @@ async def test_refresh_subscriptions_skips_markets_without_order_book() -> None:
     booked = Market.model_validate(
         {
             "id": "m-y",
+            "conditionId": "cond-y",
             "question": "Y?",
             "slug": "y",
             "outcomes": ["YES", "NO"],
@@ -464,31 +486,30 @@ async def test_refresh_subscriptions_skips_markets_without_order_book() -> None:
             "enableOrderBook": True,
         }
     )
-    ws = StubWebSocket()
     gamma = StubGammaClient([bookless, booked])
     market_cache = StubMarketCache()
     detector = WhalesDetector(
         config=_make_config(),
-        ws=ws,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         gamma_client=gamma,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         data_client=StubDataClient(),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         market_cache=market_cache,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         wallet_first_seen=StubFirstSeen(),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
     )
 
-    await detector._refresh_subscriptions()
+    await detector._refresh_market_cache()
 
     assert [m.id for m in market_cache.upserts] == ["m-y"]
-    assert detector._asset_to_market == {"y1": "m-y", "y2": "m-y"}
+    assert set(detector._condition_to_market.keys()) == {"cond-y"}
 
 
 @pytest.mark.asyncio
-async def test_refresh_subscriptions_stops_at_max_markets_cap() -> None:
-    """Loop stops once ``subscription_max_markets * 2`` asset IDs accumulated."""
+async def test_refresh_market_cache_stops_at_max_markets_cap() -> None:
+    """Loop stops once ``subscription_max_markets`` markets accumulated."""
 
     def _make_market_payload(idx: int) -> dict[str, Any]:
         return {
             "id": f"m-{idx}",
+            "conditionId": f"cond-{idx}",
             "question": "Q?",
             "slug": f"slug-{idx}",
             "outcomes": ["YES", "NO"],
@@ -498,31 +519,28 @@ async def test_refresh_subscriptions_stops_at_max_markets_cap() -> None:
         }
 
     markets = [Market.model_validate(_make_market_payload(i)) for i in range(10)]
-    ws = StubWebSocket()
     gamma = StubGammaClient(markets)
     market_cache = StubMarketCache()
-    # Cap of 3 markets -> 6 asset id ceiling. Should stop after 3 markets.
     detector = WhalesDetector(
         config=_make_config(subscription_max_markets=3),
-        ws=ws,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         gamma_client=gamma,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         data_client=StubDataClient(),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         market_cache=market_cache,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         wallet_first_seen=StubFirstSeen(),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
     )
 
-    await detector._refresh_subscriptions()
+    await detector._refresh_market_cache()
 
-    assert len(market_cache.upserts) == 3
-    assert len(detector._asset_to_market) == 6
+    assert len(detector._condition_to_market) == 3
 
 
 @pytest.mark.asyncio
-async def test_refresh_subscriptions_skips_low_volume_markets() -> None:
+async def test_refresh_market_cache_skips_low_volume_markets() -> None:
     """Markets with volume below ``subscription_min_volume_usd`` are skipped."""
     quiet = Market.model_validate(
         {
             "id": "m-quiet",
+            "conditionId": "cond-quiet",
             "question": "Q?",
             "slug": "quiet",
             "outcomes": ["YES", "NO"],
@@ -534,6 +552,7 @@ async def test_refresh_subscriptions_skips_low_volume_markets() -> None:
     busy = Market.model_validate(
         {
             "id": "m-busy",
+            "conditionId": "cond-busy",
             "question": "B?",
             "slug": "busy",
             "outcomes": ["YES", "NO"],
@@ -542,54 +561,46 @@ async def test_refresh_subscriptions_skips_low_volume_markets() -> None:
             "volume": 5000.0,
         }
     )
-    ws = StubWebSocket()
     gamma = StubGammaClient([quiet, busy])
     market_cache = StubMarketCache()
     detector = WhalesDetector(
         config=_make_config(subscription_min_volume_usd=100.0),
-        ws=ws,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         gamma_client=gamma,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         data_client=StubDataClient(),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         market_cache=market_cache,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         wallet_first_seen=StubFirstSeen(),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
     )
 
-    await detector._refresh_subscriptions()
+    await detector._refresh_market_cache()
 
     assert [m.id for m in market_cache.upserts] == ["m-busy"]
+    assert set(detector._condition_to_market.keys()) == {"cond-busy"}
 
 
 @pytest.mark.asyncio
-async def test_consume_loop_skips_non_trade_messages() -> None:
+async def test_handle_trade_sync_spawns_async_handler() -> None:
+    """``handle_trade_sync`` schedules ``handle_trade`` on the running loop."""
     sink = CapturingSink()
-    book_msg = WsBookMessage.model_validate({"event_type": "book", "asset_id": "x", "data": {}})
+    market_cache = StubMarketCache({_MARKET_ID: _make_cached_market()})
+    first_seen = StubFirstSeen({_WALLET: _make_first_seen()})
+    detector = _make_detector(market_cache=market_cache, first_seen=first_seen, sink=sink)
 
-    class WsWithMessages(StubWebSocket):
-        async def messages(self) -> AsyncIterator[Any]:
-            yield book_msg
+    detector.handle_trade_sync(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
+    # Drain the spawned task.
+    for _ in range(10):
+        await asyncio.sleep(0)
 
-    detector = _make_detector(ws=WsWithMessages())
-
-    await detector._consume_loop(sink)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
-
-    assert sink.alerts == []
+    assert len(sink.alerts) == 1
+    assert not detector._pending_tasks
 
 
 @pytest.mark.asyncio
-async def test_run_connects_and_dispatches_taskgroup() -> None:
-    """``run`` must call ``ws.connect`` and start the two loops concurrently."""
+async def test_run_sets_sink_and_runs_until_cancelled() -> None:
+    """``run`` stores the sink and refreshes the cache, then sleeps."""
     sink = CapturingSink()
-
-    class OneShotWs(StubWebSocket):
-        async def messages(self) -> AsyncIterator[Any]:
-            if False:  # pragma: no cover
-                yield None
-
-    ws = OneShotWs()
     gamma = StubGammaClient([])
     detector = WhalesDetector(
         config=_make_config(ws_resubscribe_interval_seconds=3600),
-        ws=ws,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         gamma_client=gamma,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         data_client=StubDataClient(),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         market_cache=StubMarketCache(),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
@@ -598,12 +609,10 @@ async def test_run_connects_and_dispatches_taskgroup() -> None:
 
     task = asyncio.create_task(detector.run(sink))  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
     # Yield control briefly so the task hits its first await.
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    for _ in range(5):
+        await asyncio.sleep(0)
     task.cancel()
-    with pytest.raises((asyncio.CancelledError, BaseExceptionGroup)):
+    with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert ws.connected is True
-    # Subscription loop ran at least one iteration.
-    assert ws.subscribe_calls == [] or ws.subscribe_calls
+    assert detector._sink is sink
