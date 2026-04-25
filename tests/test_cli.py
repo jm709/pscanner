@@ -20,7 +20,7 @@ import pytest
 from pscanner.alerts.models import Alert
 from pscanner.cli import main
 from pscanner.store.db import init_db
-from pscanner.store.repo import AlertsRepo
+from pscanner.store.repo import AlertsRepo, WatchlistRepo
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore::pytest.PytestUnraisableExceptionWarning",
@@ -285,3 +285,105 @@ def test_main_run_once_via_no_config(
     monkeypatch.delenv("PSCANNER_CONFIG", raising=False)
     rc = main(["run", "--once"])
     assert rc == 0
+
+
+def test_main_watch_inserts_row(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg = tmp_path / "config.toml"
+    db = tmp_path / "test.sqlite3"
+    _write_config(cfg, db)
+    rc = main(["--config", str(cfg), "watch", "0xabc", "--reason", "test"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "0xabc" in out
+    conn = init_db(db)
+    try:
+        row = WatchlistRepo(conn).get("0xabc")
+    finally:
+        conn.close()
+    assert row is not None
+    assert row.source == "manual"
+    assert row.reason == "test"
+    assert row.active is True
+
+
+def test_main_watch_is_idempotent(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg = tmp_path / "config.toml"
+    db = tmp_path / "test.sqlite3"
+    _write_config(cfg, db)
+    rc1 = main(["--config", str(cfg), "watch", "0xabc"])
+    rc2 = main(["--config", str(cfg), "watch", "0xabc"])
+    assert rc1 == 0
+    assert rc2 == 0
+    out = capsys.readouterr().out
+    assert "already in watchlist" in out
+
+
+def test_main_unwatch_flips_active_flag(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg = tmp_path / "config.toml"
+    db = tmp_path / "test.sqlite3"
+    _write_config(cfg, db)
+    main(["--config", str(cfg), "watch", "0xabc"])
+    rc = main(["--config", str(cfg), "unwatch", "0xabc"])
+    assert rc == 0
+    conn = init_db(db)
+    try:
+        row = WatchlistRepo(conn).get("0xabc")
+    finally:
+        conn.close()
+    assert row is not None
+    assert row.active is False
+    out = capsys.readouterr().out
+    assert "unwatched" in out
+
+
+def test_main_unwatch_unknown_address_exits_zero(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg = tmp_path / "config.toml"
+    db = tmp_path / "test.sqlite3"
+    _write_config(cfg, db)
+    rc = main(["--config", str(cfg), "unwatch", "0xnotpresent"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "not in watchlist" in out
+
+
+def test_main_watchlist_prints_table(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg = tmp_path / "config.toml"
+    db = tmp_path / "test.sqlite3"
+    _write_config(cfg, db)
+    main(["--config", str(cfg), "watch", "0xabc", "--reason", "first"])
+    main(["--config", str(cfg), "watch", "0xdef", "--reason", "second"])
+    capsys.readouterr()  # discard prior output
+    rc = main(["--config", str(cfg), "watchlist"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "0xabc" in out
+    assert "0xdef" in out
+    assert "manual" in out
+
+
+def test_main_watchlist_empty(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg = tmp_path / "config.toml"
+    db = tmp_path / "test.sqlite3"
+    _write_config(cfg, db)
+    rc = main(["--config", str(cfg), "watchlist"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "empty" in out

@@ -5,6 +5,9 @@ Sub-commands:
 * ``pscanner run`` — start the long-running daemon.
 * ``pscanner run --once`` — run a single-shot scan and exit.
 * ``pscanner status`` — print the most-recent alerts from SQLite.
+* ``pscanner watch <address>`` — add a wallet to the data-collection watchlist.
+* ``pscanner unwatch <address>`` — deactivate a watchlist entry.
+* ``pscanner watchlist`` — print every watchlist entry as a table.
 
 The CLI returns an integer exit code so it composes cleanly with shell
 pipelines and ``uv run pscanner ...``.
@@ -29,7 +32,7 @@ from pscanner.alerts.models import Alert
 from pscanner.config import Config
 from pscanner.scheduler import Scanner
 from pscanner.store.db import init_db
-from pscanner.store.repo import AlertsRepo
+from pscanner.store.repo import AlertsRepo, WatchlistEntry, WatchlistRepo
 
 _PROG = "pscanner"
 _STATUS_LIMIT: Final[int] = 50
@@ -57,10 +60,25 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"{_PROG}: invalid config: {exc}\n")
         return 2
     _configure_logging(config.scanner.log_level)
+    return _dispatch_command(parser, args, config)
+
+
+def _dispatch_command(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    config: Config,
+) -> int:
+    """Route ``args.command`` to the matching ``_cmd_*`` handler."""
     if args.command == "run":
         return _cmd_run(config, once=bool(args.once))
     if args.command == "status":
         return _cmd_status(config)
+    if args.command == "watch":
+        return _cmd_watch(config, address=args.address, reason=args.reason)
+    if args.command == "unwatch":
+        return _cmd_unwatch(config, address=args.address)
+    if args.command == "watchlist":
+        return _cmd_watchlist(config)
     parser.error(f"unknown command: {args.command}")
     return 2  # unreachable; argparse exits
 
@@ -87,6 +105,20 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser("status", help="print recent alerts from the SQLite log")
+
+    watch = sub.add_parser("watch", help="add a wallet to the watchlist")
+    watch.add_argument("address", type=str, help="0x-prefixed proxy wallet address")
+    watch.add_argument(
+        "--reason",
+        type=str,
+        default=None,
+        help="free-form note to record alongside the entry",
+    )
+
+    unwatch = sub.add_parser("unwatch", help="deactivate a watchlist entry")
+    unwatch.add_argument("address", type=str, help="0x-prefixed proxy wallet address")
+
+    sub.add_parser("watchlist", help="print every watchlist entry as a table")
     return parser
 
 
@@ -221,4 +253,82 @@ def _print_status_table(alerts: list[Alert]) -> None:
             tz=datetime.UTC,
         ).strftime("%Y-%m-%d %H:%M:%S")
         table.add_row(when, alert.detector, alert.severity, alert.title)
+    console.print(table)
+
+
+def _cmd_watch(config: Config, *, address: str, reason: str | None) -> int:
+    """Add a wallet to the watchlist via the manual source.
+
+    Idempotent: re-running for the same address simply preserves the existing
+    row (``WatchlistRepo.upsert`` keeps first-seen provenance).
+    """
+    db_path = Path(config.scanner.db_path)
+    conn = init_db(db_path)
+    try:
+        repo = WatchlistRepo(conn)
+        inserted = repo.upsert(address=address, source="manual", reason=reason)
+    finally:
+        conn.close()
+    console = Console()
+    if inserted:
+        console.print(f"watching [bold]{address}[/bold]")
+    else:
+        console.print(f"[dim]{address} already in watchlist (no-op)[/dim]")
+    return 0
+
+
+def _cmd_unwatch(config: Config, *, address: str) -> int:
+    """Deactivate a watchlist entry. No-op when the address is unknown."""
+    db_path = Path(config.scanner.db_path)
+    conn = init_db(db_path)
+    try:
+        repo = WatchlistRepo(conn)
+        existing = repo.get(address)
+        if existing is None:
+            Console().print(f"[dim]{address} not in watchlist (no-op)[/dim]")
+            return 0
+        repo.set_active(address, False)
+    finally:
+        conn.close()
+    Console().print(f"unwatched [bold]{address}[/bold]")
+    return 0
+
+
+def _cmd_watchlist(config: Config) -> int:
+    """Print every watchlist entry (active + inactive) as a ``rich`` table."""
+    db_path = Path(config.scanner.db_path)
+    conn = init_db(db_path)
+    try:
+        repo = WatchlistRepo(conn)
+        entries = repo.list_all()
+    finally:
+        conn.close()
+    _print_watchlist_table(entries)
+    return 0
+
+
+def _print_watchlist_table(entries: list[WatchlistEntry]) -> None:
+    """Render the watchlist as a ``rich`` table."""
+    console = Console()
+    if not entries:
+        console.print("[dim]watchlist is empty[/dim]")
+        return
+    table = Table(title=f"watchlist ({len(entries)} entries)", show_lines=False)
+    table.add_column("address", overflow="fold")
+    table.add_column("source")
+    table.add_column("reason", overflow="fold")
+    table.add_column("added_at")
+    table.add_column("active")
+    for entry in entries:
+        added = datetime.datetime.fromtimestamp(
+            entry.added_at,
+            tz=datetime.UTC,
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        table.add_row(
+            entry.address,
+            entry.source,
+            entry.reason or "",
+            added,
+            "yes" if entry.active else "no",
+        )
     console.print(table)

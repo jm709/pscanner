@@ -112,10 +112,18 @@ class TradeCollector:
         """Refresh asset subscriptions for every watched wallet on a cadence."""
         while not stop_event.is_set():
             try:
-                await self._refresh_subscriptions()
+                await self.refresh_subscriptions()
             except Exception:
                 _LOG.exception("trades.subscription_refresh_failed")
             await self._sleep_until_stop(self._subscription_refresh_seconds, stop_event)
+
+    async def refresh_subscriptions(self) -> None:
+        """Pull each watched wallet's positions and subscribe to new asset ids.
+
+        Public delegating wrapper invoked by the scheduler's single-shot
+        path and by :meth:`_subscription_refresh_loop`.
+        """
+        await self._refresh_subscriptions()
 
     async def _consume_loop(self, stop_event: asyncio.Event) -> None:
         """Consume websocket messages and persist trades by watched wallets."""

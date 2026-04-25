@@ -16,6 +16,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from pscanner.alerts.sink import AlertSink
+from pscanner.collectors.trades import TradeCollector
+from pscanner.collectors.watchlist import WatchlistSyncer
 from pscanner.config import (
     Config,
     MispricingConfig,
@@ -128,12 +130,18 @@ def _make_clients(
     market_ws.subscribe = AsyncMock()
     market_ws.close = AsyncMock()
 
+    trade_ws = MagicMock()
+    trade_ws.connect = AsyncMock()
+    trade_ws.subscribe = AsyncMock()
+    trade_ws.close = AsyncMock()
+
     return SchedulerClients(
         gamma_http=gamma_http,
         data_http=data_http,
         gamma_client=gamma_client,
         data_client=data_client,
         market_ws=market_ws,
+        trade_ws=trade_ws,
     )
 
 
@@ -168,6 +176,8 @@ async def test_run_once_with_no_data_returns_zero_counts(db_path: Path) -> None:
         "alerts_emitted": 0,
         "tracked_wallets": 0,
         "markets_cached": 0,
+        "watched_wallets": 0,
+        "trades_recorded": 0,
     }
 
 
@@ -301,3 +311,110 @@ async def test_run_with_supervisor_cancellation(db_path: Path) -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
     assert scanner._closed is True
+
+
+@pytest.mark.asyncio
+async def test_scanner_wires_collectors_and_repos(db_path: Path) -> None:
+    """Construction wires watchlist + wallet-trades repos and both collectors."""
+    config = _make_config()
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    try:
+        assert "watchlist_sync" in scanner._collectors
+        assert "trade_collector" in scanner._collectors
+        assert isinstance(scanner._collectors["watchlist_sync"], WatchlistSyncer)
+        assert isinstance(scanner._collectors["trade_collector"], TradeCollector)
+        assert scanner._watchlist_repo is not None
+        assert scanner._wallet_trades_repo is not None
+        assert scanner._watchlist_registry is not None
+    finally:
+        await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_run_once_reports_collector_metrics(db_path: Path) -> None:
+    """``run_once`` includes ``watched_wallets`` and ``trades_recorded`` keys."""
+    config = _make_config(enable_smart=False, enable_misprice=False, enable_whales=False)
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    try:
+        result = await scanner.run_once()
+    finally:
+        await scanner.aclose()
+    assert result["watched_wallets"] == 0
+    assert result["trades_recorded"] == 0
+
+
+@pytest.mark.asyncio
+async def test_run_once_drives_collectors_with_active_watchlist(db_path: Path) -> None:
+    """Pre-seeded watchlist drives ``refresh_subscriptions`` to fetch positions."""
+    config = _make_config(enable_smart=False, enable_misprice=False, enable_whales=False)
+    positions = [
+        Position.model_validate(
+            {
+                "proxyWallet": "0xabc",
+                "asset": "asset-1",
+                "conditionId": "cond-1",
+                "size": 100.0,
+                "avgPrice": 0.4,
+                "currentValue": 50.0,
+                "outcome": "Yes",
+                "outcomeIndex": 0,
+                "title": "test market",
+            }
+        ),
+    ]
+    clients = _make_clients(positions=positions)
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    scanner._watchlist_repo.upsert(address="0xabc", source="manual", reason="test")
+    scanner._watchlist_registry.reload()
+    try:
+        result = await scanner.run_once()
+    finally:
+        await scanner.aclose()
+    assert result["watched_wallets"] == 1
+    cast("AsyncMock", clients.data_client.get_positions).assert_awaited_with("0xabc")
+    cast("AsyncMock", clients.trade_ws.subscribe).assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_once_mirrors_tracked_wallets_into_watchlist(db_path: Path) -> None:
+    """``run_once`` syncs ``tracked_wallets`` rows into the registry as smart-money."""
+    config = _make_config(enable_smart=False, enable_misprice=False, enable_whales=False)
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    scanner._tracked_repo.upsert(
+        address="0xleader",
+        closed_position_count=30,
+        closed_position_wins=22,
+        winrate=0.73,
+        leaderboard_pnl=10000.0,
+    )
+    try:
+        result = await scanner.run_once()
+    finally:
+        await scanner.aclose()
+    assert result["tracked_wallets"] == 1
+    assert "0xleader" in scanner._watchlist_registry.addresses()
+
+
+@pytest.mark.asyncio
+async def test_aclose_closes_trade_ws(db_path: Path) -> None:
+    """``aclose`` must close both ``market_ws`` and ``trade_ws``."""
+    config = _make_config()
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    await scanner.aclose()
+    cast("MagicMock", clients.market_ws).close.assert_awaited()
+    cast("MagicMock", clients.trade_ws).close.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_aclose_sets_collectors_stop_event(db_path: Path) -> None:
+    """``aclose`` sets ``_collectors_stop`` so collectors can drain cleanly."""
+    config = _make_config()
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    assert not scanner._collectors_stop.is_set()
+    await scanner.aclose()
+    assert scanner._collectors_stop.is_set()

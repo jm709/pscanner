@@ -176,11 +176,19 @@ class WatchlistSyncer:
         """
         while not stop_event.is_set():
             try:
-                await self._sync_smart_money()
+                await self.sync_smart_money()
             except Exception:
                 _LOG.exception("watchlist_sync.iteration_failed")
             if await self._wait_or_stop(stop_event, self._sync_interval_seconds):
                 return
+
+    async def sync_smart_money(self) -> None:
+        """Mirror every tracked wallet into the registry as ``smart_money``.
+
+        Public delegating wrapper invoked by the scheduler's single-shot
+        path and by :meth:`run`. Idempotent.
+        """
+        await self._sync_smart_money()
 
     async def _sync_smart_money(self) -> None:
         """Mirror every tracked wallet into the registry as ``smart_money``.

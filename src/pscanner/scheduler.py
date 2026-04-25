@@ -31,6 +31,9 @@ import structlog
 
 from pscanner.alerts.sink import AlertSink
 from pscanner.alerts.terminal import TerminalRenderer
+from pscanner.collectors.base import Collector
+from pscanner.collectors.trades import TradeCollector
+from pscanner.collectors.watchlist import WatchlistRegistry, WatchlistSyncer
 from pscanner.config import Config
 from pscanner.detectors.mispricing import MispricingDetector
 from pscanner.detectors.smart_money import SmartMoneyDetector
@@ -46,6 +49,8 @@ from pscanner.store.repo import (
     PositionSnapshotsRepo,
     TrackedWalletsRepo,
     WalletFirstSeenRepo,
+    WalletTradesRepo,
+    WatchlistRepo,
 )
 
 _LOG = structlog.get_logger(__name__)
@@ -74,6 +79,7 @@ class SchedulerClients:
     gamma_client: GammaClient
     data_client: DataClient
     market_ws: MarketWebSocket
+    trade_ws: MarketWebSocket
 
 
 class Scanner:
@@ -102,11 +108,16 @@ class Scanner:
         self._first_seen_repo = WalletFirstSeenRepo(self._db)
         self._market_cache_repo = MarketCacheRepo(self._db)
         self._alerts_repo = AlertsRepo(self._db)
+        self._watchlist_repo = WatchlistRepo(self._db)
+        self._wallet_trades_repo = WalletTradesRepo(self._db)
         self._owns_clients = clients is None
         self._clients = clients or self._build_default_clients()
         self._renderer = TerminalRenderer()
         self._sink = AlertSink(self._alerts_repo, renderer=self._renderer)
+        self._watchlist_registry = WatchlistRegistry(self._watchlist_repo)
         self._detectors = self._build_detectors()
+        self._collectors = self._build_collectors()
+        self._collectors_stop = asyncio.Event()
         self._closed = False
 
     def _build_default_clients(self) -> SchedulerClients:
@@ -125,7 +136,31 @@ class Scanner:
             gamma_client=GammaClient(http=gamma_http),
             data_client=DataClient(http=data_http),
             market_ws=MarketWebSocket(),
+            trade_ws=MarketWebSocket(),
         )
+
+    def _build_collectors(self) -> dict[str, Collector]:
+        """Instantiate the watchlist syncer and trade collector.
+
+        Both collectors are always-on; there is no enable/disable knob in
+        ``Config`` because the watchlist+trades pipeline is integral to the
+        DC-1 data-collection contract. The watchlist is hydrated from any
+        rows persisted by the CLI ``watch``/``unwatch`` commands so the trade
+        collector can subscribe immediately on startup.
+        """
+        syncer = WatchlistSyncer(
+            registry=self._watchlist_registry,
+            tracked_repo=self._tracked_repo,
+            sink=self._sink,
+            sync_interval_seconds=60.0,
+        )
+        trades = TradeCollector(
+            registry=self._watchlist_registry,
+            data_client=self._clients.data_client,
+            ws=self._clients.trade_ws,
+            trades_repo=self._wallet_trades_repo,
+        )
+        return {syncer.name: syncer, trades.name: trades}
 
     def _build_detectors(self) -> dict[str, Any]:
         """Instantiate the enabled detectors from config."""
@@ -164,12 +199,13 @@ class Scanner:
         return self._renderer
 
     async def run(self) -> None:
-        """Drive the renderer plus every enabled detector forever.
+        """Drive the renderer plus every enabled detector and collector forever.
 
-        Detectors are individually supervised: if one returns or raises, the
-        scheduler restarts it up to :data:`_MAX_RESTARTS` times within a
-        rolling :data:`_RESTART_WINDOW_SECONDS` window. Beyond that the loop
-        gives up and re-raises so the operator sees the failure.
+        Detectors and collectors are individually supervised: if one returns
+        or raises, the scheduler restarts it up to :data:`_MAX_RESTARTS`
+        times within a rolling :data:`_RESTART_WINDOW_SECONDS` window. Beyond
+        that the loop gives up and re-raises so the operator sees the
+        failure.
 
         Catches :class:`KeyboardInterrupt` to perform graceful shutdown.
         """
@@ -180,6 +216,11 @@ class Scanner:
                     tg.create_task(
                         self._supervise_detector(name, detector.run),
                         name=f"detector:{name}",
+                    )
+                for name, collector in self._collectors.items():
+                    tg.create_task(
+                        self._supervise_collector(name, collector),
+                        name=f"collector:{name}",
                     )
         except* KeyboardInterrupt:
             _LOG.info("scanner.shutdown.signal", source="keyboard_interrupt")
@@ -211,28 +252,85 @@ class Scanner:
             _LOG.info("scanner.detector.restart", detector=name, backoff=backoff)
             await asyncio.sleep(backoff)
 
+    async def _supervise_collector(self, name: str, collector: Collector) -> None:
+        """Restart a collector on unexpected return/exception, up to a cap.
+
+        Mirrors :meth:`_supervise_detector` but passes the shared
+        ``_collectors_stop`` event so the collector can drain cleanly when
+        the daemon shuts down.
+        """
+        restarts: list[float] = []
+        while True:
+            if self._collectors_stop.is_set():
+                return
+            try:
+                await collector.run(self._collectors_stop)
+                _LOG.info("scanner.collector.returned", collector=name)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _LOG.exception("scanner.collector.crashed", collector=name)
+            if self._collectors_stop.is_set():
+                return
+            now = time.monotonic()
+            restarts = [t for t in restarts if now - t < _RESTART_WINDOW_SECONDS]
+            restarts.append(now)
+            if len(restarts) > _MAX_RESTARTS:
+                msg = f"collector {name} restarted too many times; giving up"
+                raise RuntimeError(msg)
+            backoff = min(2.0 ** (len(restarts) - 1), 30.0)
+            _LOG.info("scanner.collector.restart", collector=name, backoff=backoff)
+            await asyncio.sleep(backoff)
+
     async def run_once(self) -> dict[str, Any]:
         """Single-pass snapshot: refresh catalog state without opening the WS.
 
         Returns:
             Counts of work done in this pass — useful for the ``--once`` CLI:
             ``events_scanned``, ``alerts_emitted``, ``tracked_wallets``,
-            ``markets_cached``.
+            ``markets_cached``, ``watched_wallets``, ``trades_recorded``.
         """
         baseline_alerts = self._alerts_repo.recent(limit=10000)
         before = len(baseline_alerts)
+        trades_before = sum(self._wallet_trades_repo.count_by_wallet().values())
         events_scanned = await self._run_once_mispricing()
         await self._run_once_smart_money()
         await self._run_once_whales()
+        await self._run_once_collectors()
         after_alerts = self._alerts_repo.recent(limit=10000)
         markets = self._market_cache_repo.list_active()
         tracked = self._tracked_repo.list_all()
+        trades_after = sum(self._wallet_trades_repo.count_by_wallet().values())
         return {
             "events_scanned": events_scanned,
             "alerts_emitted": len(after_alerts) - before,
             "tracked_wallets": len(tracked),
             "markets_cached": len(markets),
+            "watched_wallets": len(self._watchlist_registry.addresses()),
+            "trades_recorded": trades_after - trades_before,
         }
+
+    async def _run_once_collectors(self) -> None:
+        """Drive a single iteration of each collector.
+
+        ``WatchlistSyncer.sync_smart_money`` mirrors any tracked wallets the
+        smart-money detector just upserted into the watchlist, so the trade
+        collector's subsequent ``refresh_subscriptions`` covers them too.
+        Errors are logged and swallowed — single-shot mode should report
+        whatever it can finish, not bail on the first transient failure.
+        """
+        syncer = self._collectors.get("watchlist_sync")
+        if isinstance(syncer, WatchlistSyncer):
+            try:
+                await syncer.sync_smart_money()
+            except Exception:
+                _LOG.exception("scanner.run_once.watchlist_sync.failed")
+        trades = self._collectors.get("trade_collector")
+        if isinstance(trades, TradeCollector):
+            try:
+                await trades.refresh_subscriptions()
+            except Exception:
+                _LOG.exception("scanner.run_once.trade_collector.failed")
 
     async def _run_once_mispricing(self) -> int:
         """Run the mispricing scan once over a bounded slice of the event catalogue.
@@ -336,10 +434,13 @@ class Scanner:
         if self._closed:
             return
         self._closed = True
+        self._collectors_stop.set()
         with contextlib.suppress(Exception):
             await self._renderer.stop()
         with contextlib.suppress(Exception):
             await self._clients.market_ws.close()
+        with contextlib.suppress(Exception):
+            await self._clients.trade_ws.close()
         if self._owns_clients:
             await self._close_owned_clients()
         with contextlib.suppress(sqlite3.Error):
