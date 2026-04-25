@@ -370,7 +370,7 @@ async def test_run_once_drives_collectors_with_active_watchlist(db_path: Path) -
         await scanner.aclose()
     assert result["watched_wallets"] == 1
     assert result["trades_recorded"] == 1
-    cast("AsyncMock", clients.data_client.get_activity).assert_awaited_with(
+    cast("AsyncMock", clients.data_client.get_activity).assert_any_await(
         "0xabc",
         type="TRADE",
         limit=200,
