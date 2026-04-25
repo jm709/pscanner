@@ -127,6 +127,7 @@ class DataClient:
         address: str,
         *,
         limit: int = 500,
+        offset: int = 0,
         type: str | None = None,  # noqa: A002  # mirrors the API query param name
     ) -> list[dict[str, Any]]:
         """Return raw activity events for a wallet (heterogeneous shape).
@@ -139,12 +140,15 @@ class DataClient:
         Args:
             address: 0x-prefixed proxy wallet address.
             limit: Max number of events to fetch.
+            offset: Zero-based pagination offset; ``0`` returns the first page.
             type: Optional filter for a single activity type.
 
         Returns:
             A list of raw JSON event dicts.
         """
         params: dict[str, Any] = {"user": address, "limit": limit}
+        if offset:
+            params["offset"] = offset
         if type is not None:
             params["type"] = type
         payload = await self._data_http.get("/activity", params=params)

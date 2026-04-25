@@ -41,6 +41,8 @@ snapshot_interval_seconds = 300
 enabled = true
 poll_interval_seconds = 300
 activity_page_limit = 200
+max_pages = 10
+dup_lookback = 50
 
 [markets]
 enabled = true

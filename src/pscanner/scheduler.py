@@ -193,6 +193,8 @@ class Scanner:
                 activity_repo=self._activity_repo,
                 poll_interval_seconds=self._config.activity.poll_interval_seconds,
                 activity_page_limit=self._config.activity.activity_page_limit,
+                max_pages=self._config.activity.max_pages,
+                dup_lookback=self._config.activity.dup_lookback,
             )
         if self._config.markets.enabled:
             collectors["market_collector"] = MarketCollector(

@@ -205,6 +205,38 @@ async def test_get_activity_passes_type_filter(
     )
 
 
+async def test_get_activity_forwards_offset(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    """A non-zero ``offset`` is forwarded as the ``offset`` query param."""
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    data_http.get.return_value = []
+
+    await client.get_activity("0xabc", limit=200, offset=400)
+
+    data_http.get.assert_awaited_once_with(
+        "/activity",
+        params={"user": "0xabc", "limit": 200, "offset": 400},
+    )
+
+
+async def test_get_activity_omits_offset_when_zero(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    """``offset=0`` is omitted from the query string for backward compatibility."""
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    data_http.get.return_value = []
+
+    await client.get_activity("0xabc", limit=200, offset=0)
+
+    data_http.get.assert_awaited_once_with(
+        "/activity",
+        params={"user": "0xabc", "limit": 200},
+    )
+
+
 async def test_get_first_activity_timestamp_returns_smallest(
     fake_http_factory: list[_FakePolyHttpClient],
     sample_activity_json: list[dict[str, Any]],
