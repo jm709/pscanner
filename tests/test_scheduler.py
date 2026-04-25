@@ -290,7 +290,12 @@ async def test_shutdown_closes_owned_clients(db_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_run_once_with_disabled_detectors_does_no_work(db_path: Path) -> None:
-    config = _make_config(enable_smart=False, enable_misprice=False, enable_whales=False)
+    config = _make_config(
+        enable_smart=False,
+        enable_misprice=False,
+        enable_whales=False,
+        enable_events=False,
+    )
     clients = _make_clients()
     scanner = Scanner(config=config, db_path=db_path, clients=clients)
     try:
