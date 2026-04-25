@@ -153,12 +153,12 @@ async def test_event_within_threshold_does_not_alert() -> None:
     assert captured == []
 
 
-async def test_event_with_group_item_threshold_markets_is_skipped() -> None:
-    """Numeric-bucket layouts (date ranges, value thresholds) are skipped."""
+async def test_iso_date_bucket_event_is_skipped() -> None:
+    """ISO-format date-bucket layouts are skipped."""
     markets = [
-        _market(market_id="m1", yes_price=0.5, group_item_threshold="0"),
-        _market(market_id="m2", yes_price=0.5, group_item_threshold="1"),
-        _market(market_id="m3", yes_price=0.5, group_item_threshold="2"),
+        _market(market_id="m1", yes_price=0.5, group_item_title="2025-12-31"),
+        _market(market_id="m2", yes_price=0.5, group_item_title="2026-12-31"),
+        _market(market_id="m3", yes_price=0.5, group_item_title="2027-12-31"),
     ]
     event = _event(markets=markets)
     detector, _ = _make_detector([event])
@@ -169,12 +169,77 @@ async def test_event_with_group_item_threshold_markets_is_skipped() -> None:
     assert captured == []
 
 
-async def test_candidate_mutex_event_with_titles_but_no_threshold_alerts() -> None:
-    """Candidate-style mutex events (titles set, threshold empty) still alert."""
+async def test_month_name_date_bucket_event_is_skipped() -> None:
+    """Month-name date-bucket layouts are skipped."""
+    markets = [
+        _market(market_id="m1", yes_price=0.75, group_item_title="December 31, 2025"),
+        _market(market_id="m2", yes_price=0.75, group_item_title="December 31, 2026"),
+    ]
+    event = _event(markets=markets)
+    detector, _ = _make_detector([event])
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert captured == []
+
+
+async def test_numeric_threshold_bucket_event_is_skipped() -> None:
+    """Numeric/dollar-threshold bucket layouts are skipped."""
+    markets = [
+        _market(market_id="m1", yes_price=0.5, group_item_title="$300M"),
+        _market(market_id="m2", yes_price=0.5, group_item_title=">$1B"),
+        _market(market_id="m3", yes_price=0.5, group_item_title="<$100M"),
+    ]
+    event = _event(markets=markets)
+    detector, _ = _make_detector([event])
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert captured == []
+
+
+async def test_candidate_mutex_event_with_arbitrary_names_alerts() -> None:
+    """Candidate-style mutex events (arbitrary string titles) still alert."""
     markets = [
         _market(market_id="m1", yes_price=0.5, group_item_title="Trump"),
         _market(market_id="m2", yes_price=0.4, group_item_title="Harris"),
         _market(market_id="m3", yes_price=0.2, group_item_title="Other"),
+    ]
+    event = _event(markets=markets)
+    detector, _ = _make_detector([event])
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert len(captured) == 1
+    assert captured[0].body["price_sum"] == pytest.approx(1.1)
+
+
+async def test_mixed_bucket_and_non_bucket_titles_alerts() -> None:
+    """One non-bucket title means the whole event is treated as eligible."""
+    markets = [
+        _market(market_id="m1", yes_price=0.5, group_item_title="December 31, 2025"),
+        _market(market_id="m2", yes_price=0.4, group_item_title="December 31, 2026"),
+        _market(market_id="m3", yes_price=0.2, group_item_title="Other"),
+    ]
+    event = _event(markets=markets)
+    detector, _ = _make_detector([event])
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert len(captured) == 1
+    assert captured[0].body["price_sum"] == pytest.approx(1.1)
+
+
+async def test_all_empty_group_item_title_event_alerts() -> None:
+    """Regression: events with no groupItemTitle on any market still alert."""
+    markets = [
+        _market(market_id="m1", yes_price=0.5, group_item_title=None),
+        _market(market_id="m2", yes_price=0.4, group_item_title=None),
+        _market(market_id="m3", yes_price=0.2, group_item_title=None),
     ]
     event = _event(markets=markets)
     detector, _ = _make_detector([event])
