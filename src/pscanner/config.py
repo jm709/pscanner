@@ -88,6 +88,8 @@ class ActivityConfig(_Section):
     enabled: bool = True
     poll_interval_seconds: float = 300.0
     activity_page_limit: int = 200
+    max_pages: int = 10
+    dup_lookback: int = 50
 
 
 class MarketsConfig(_Section):

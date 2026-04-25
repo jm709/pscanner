@@ -49,6 +49,9 @@ def _make_collector(
     registry: MagicMock,
     data_client: MagicMock,
     poll_interval_seconds: float = 60.0,
+    activity_page_limit: int = 200,
+    max_pages: int = 10,
+    dup_lookback: int = 50,
 ) -> tuple[ActivityCollector, WalletActivityEventsRepo]:
     """Wire up a collector with the supplied mocks plus a real repo."""
     repo = WalletActivityEventsRepo(tmp_db)
@@ -57,6 +60,9 @@ def _make_collector(
         data_client=data_client,  # type: ignore[arg-type]
         activity_repo=repo,
         poll_interval_seconds=poll_interval_seconds,
+        activity_page_limit=activity_page_limit,
+        max_pages=max_pages,
+        dup_lookback=dup_lookback,
     )
     return collector, repo
 
@@ -286,3 +292,139 @@ async def test_non_serialisable_event_is_skipped(tmp_db: sqlite3.Connection) -> 
     assert len(rows) == 1
     assert rows[0].event_type == "SPLIT"
     assert _OTHER_WALLET not in repo.count_by_wallet()
+
+
+def _page_of(*, count: int, start_ts: int, event_type: str = "TRADE") -> list[dict[str, Any]]:
+    """Build a page of ``count`` events with strictly-increasing timestamps."""
+    return [_make_event(event_type=event_type, timestamp=start_ts + i, idx=i) for i in range(count)]
+
+
+@pytest.mark.asyncio
+async def test_pagination_walks_until_short_page(tmp_db: sqlite3.Connection) -> None:
+    """Three pages of distinct events are fully fetched and persisted."""
+    page_size = 200
+    page_a = _page_of(count=page_size, start_ts=_BASE_TS)
+    page_b = _page_of(count=page_size, start_ts=_BASE_TS + page_size)
+    page_c = _page_of(count=50, start_ts=_BASE_TS + 2 * page_size)
+    data = MagicMock()
+    data.get_activity = AsyncMock(side_effect=[page_a, page_b, page_c])
+    registry = _make_registry({_WALLET})
+    collector, repo = _make_collector(
+        tmp_db=tmp_db,
+        registry=registry,
+        data_client=data,
+        activity_page_limit=page_size,
+    )
+
+    inserted = await collector.poll_all_wallets()
+
+    assert inserted == 450
+    assert data.get_activity.await_count == 3
+    offsets = [call.kwargs["offset"] for call in data.get_activity.await_args_list]
+    assert offsets == [0, page_size, 2 * page_size]
+    assert repo.count_by_wallet() == {_WALLET: 450}
+
+
+@pytest.mark.asyncio
+async def test_pagination_stops_on_dup_streak(tmp_db: sqlite3.Connection) -> None:
+    """A second page of pure PK-collisions trips the dup-streak break."""
+    page_size = 200
+    fresh = _page_of(count=page_size, start_ts=_BASE_TS)
+    duplicates = list(fresh)  # exact same wallet/timestamp/event_type → all dupes.
+    data = MagicMock()
+    data.get_activity = AsyncMock(side_effect=[fresh, duplicates])
+    registry = _make_registry({_WALLET})
+    collector, repo = _make_collector(
+        tmp_db=tmp_db,
+        registry=registry,
+        data_client=data,
+        activity_page_limit=page_size,
+        dup_lookback=50,
+    )
+
+    inserted = await collector.poll_all_wallets()
+
+    assert inserted == page_size
+    # First page (full, all new) + second page (full, all dupes) = 2 calls.
+    assert data.get_activity.await_count == 2
+    assert repo.count_by_wallet() == {_WALLET: page_size}
+
+
+@pytest.mark.asyncio
+async def test_pagination_stops_on_short_page(tmp_db: sqlite3.Connection) -> None:
+    """A short second page ends pagination; only two pages are fetched."""
+    page_size = 200
+    page_a = _page_of(count=page_size, start_ts=_BASE_TS)
+    page_b = _page_of(count=100, start_ts=_BASE_TS + page_size)
+    data = MagicMock()
+    data.get_activity = AsyncMock(side_effect=[page_a, page_b])
+    registry = _make_registry({_WALLET})
+    collector, repo = _make_collector(
+        tmp_db=tmp_db,
+        registry=registry,
+        data_client=data,
+        activity_page_limit=page_size,
+    )
+
+    inserted = await collector.poll_all_wallets()
+
+    assert inserted == 300
+    assert data.get_activity.await_count == 2
+    assert repo.count_by_wallet() == {_WALLET: 300}
+
+
+@pytest.mark.asyncio
+async def test_pagination_stops_at_max_pages(tmp_db: sqlite3.Connection) -> None:
+    """A wallet that only emits full pages of fresh events is capped at max_pages."""
+    page_size = 200
+    max_pages = 4
+
+    def _page(call_idx: int) -> list[dict[str, Any]]:
+        return _page_of(count=page_size, start_ts=_BASE_TS + call_idx * page_size)
+
+    data = MagicMock()
+    data.get_activity = AsyncMock(side_effect=[_page(i) for i in range(max_pages + 2)])
+    registry = _make_registry({_WALLET})
+    collector, repo = _make_collector(
+        tmp_db=tmp_db,
+        registry=registry,
+        data_client=data,
+        activity_page_limit=page_size,
+        max_pages=max_pages,
+        dup_lookback=10_000,  # disable the dup-streak break for this test.
+    )
+
+    inserted = await collector.poll_all_wallets()
+
+    assert inserted == page_size * max_pages
+    assert data.get_activity.await_count == max_pages
+    assert repo.count_by_wallet() == {_WALLET: page_size * max_pages}
+
+
+@pytest.mark.asyncio
+async def test_page_exception_returns_partial_count(tmp_db: sqlite3.Connection) -> None:
+    """A failure on page 2 keeps page 1's rows and reports the partial count."""
+    page_size = 200
+    page_a = _page_of(count=page_size, start_ts=_BASE_TS)
+
+    async def _get(_address: str, **kwargs: Any) -> list[dict[str, Any]]:
+        if kwargs["offset"] == 0:
+            return page_a
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    data = MagicMock()
+    data.get_activity = AsyncMock(side_effect=_get)
+    registry = _make_registry({_WALLET})
+    collector, repo = _make_collector(
+        tmp_db=tmp_db,
+        registry=registry,
+        data_client=data,
+        activity_page_limit=page_size,
+    )
+
+    inserted = await collector.poll_all_wallets()
+
+    assert inserted == page_size
+    assert data.get_activity.await_count == 2
+    assert repo.count_by_wallet() == {_WALLET: page_size}

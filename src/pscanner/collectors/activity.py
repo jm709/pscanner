@@ -47,6 +47,8 @@ class ActivityCollector:
         activity_repo: WalletActivityEventsRepo,
         poll_interval_seconds: float = 300.0,
         activity_page_limit: int = 200,
+        max_pages: int = 10,
+        dup_lookback: int = 50,
     ) -> None:
         """Build the collector.
 
@@ -56,12 +58,17 @@ class ActivityCollector:
             activity_repo: Append-only, dedupe-on-PK repo for events.
             poll_interval_seconds: Cadence for full-watchlist polling cycles.
             activity_page_limit: Per-wallet ``/activity`` page size.
+            max_pages: Hard cap on pages fetched per wallet per cycle.
+            dup_lookback: Stop paging when this many consecutive inserts are
+                duplicates — i.e. we have caught up to the previous poll.
         """
         self._registry = registry
         self._data_client = data_client
         self._activity_repo = activity_repo
         self._poll_interval_seconds = poll_interval_seconds
         self._activity_page_limit = activity_page_limit
+        self._max_pages = max_pages
+        self._dup_lookback = dup_lookback
 
     async def run(self, stop_event: asyncio.Event) -> None:
         """Loop: poll all wallets every interval until ``stop_event`` is set.
@@ -109,34 +116,88 @@ class ActivityCollector:
         return total
 
     async def _poll_wallet(self, address: str) -> int:
-        """Poll one wallet's ``/activity`` feed and persist new events.
+        """Page through ``/activity`` for one wallet until a stop condition.
+
+        Stops on: short page (end of stream), ``dup_lookback`` consecutive
+        duplicate inserts (caught up to the previous poll's tail), or
+        ``max_pages`` reached (hard cap). Per-page exceptions are caught so a
+        single failing page does not lose the rows already persisted.
 
         Args:
             address: 0x-prefixed proxy wallet to poll.
 
         Returns:
-            Number of newly-inserted rows for this wallet (0 on error).
+            Number of newly-inserted rows for this wallet (0 on first-page
+            error, otherwise the partial count up to the failing page).
         """
-        try:
-            events = await self._data_client.get_activity(
-                address,
-                limit=self._activity_page_limit,
-            )
-        except Exception:
-            _LOG.exception("activity.get_activity_failed", wallet=address)
-            return 0
         recorded_at = int(time.time())
         inserted = 0
-        for event in events:
-            if self._persist_event(event, address=address, recorded_at=recorded_at):
-                inserted += 1
+        duplicates_in_a_row = 0
+        pages = 0
+        for page_idx in range(self._max_pages):
+            offset = page_idx * self._activity_page_limit
+            try:
+                page = await self._data_client.get_activity(
+                    address,
+                    limit=self._activity_page_limit,
+                    offset=offset,
+                )
+            except Exception:
+                _LOG.exception("activity.page_failed", wallet=address, offset=offset)
+                return inserted
+            if not page:
+                break
+            page_inserted, duplicates_in_a_row = self._persist_page(
+                address,
+                page,
+                recorded_at=recorded_at,
+                dup_streak=duplicates_in_a_row,
+            )
+            inserted += page_inserted
+            pages += 1
+            if duplicates_in_a_row >= self._dup_lookback:
+                break
+            if len(page) < self._activity_page_limit:
+                break
         _LOG.debug(
             "activity.poll",
             wallet=address,
-            events_returned=len(events),
+            pages=pages,
             inserted=inserted,
+            duplicates=duplicates_in_a_row,
         )
         return inserted
+
+    def _persist_page(
+        self,
+        address: str,
+        page: list[dict[str, Any]],
+        *,
+        recorded_at: int,
+        dup_streak: int,
+    ) -> tuple[int, int]:
+        """Persist one page of events, threading the running dup-streak.
+
+        Args:
+            address: Wallet column for every row on the page.
+            page: Raw event dicts as returned by ``/activity``.
+            recorded_at: Shared poll-cycle timestamp written on each row.
+            dup_streak: Consecutive duplicate inserts seen on prior pages.
+
+        Returns:
+            ``(page_inserted, final_dup_streak)`` — the count of newly-inserted
+            rows on this page and the running dup-streak after the page. The
+            streak resets to 0 on every fresh insert and increments on every
+            ``False`` from :meth:`WalletActivityEventsRepo.insert`.
+        """
+        page_inserted = 0
+        for event in page:
+            if self._persist_event(event, address=address, recorded_at=recorded_at):
+                page_inserted += 1
+                dup_streak = 0
+            else:
+                dup_streak += 1
+        return page_inserted, dup_streak
 
     def _persist_event(
         self,
