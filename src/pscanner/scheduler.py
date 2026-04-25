@@ -39,6 +39,7 @@ from pscanner.collectors.positions import PositionCollector
 from pscanner.collectors.trades import TradeCollector
 from pscanner.collectors.watchlist import WatchlistRegistry, WatchlistSyncer
 from pscanner.config import Config
+from pscanner.detectors.convergence import ConvergenceDetector
 from pscanner.detectors.mispricing import MispricingDetector
 from pscanner.detectors.smart_money import SmartMoneyDetector
 from pscanner.detectors.whales import WhalesDetector
@@ -137,16 +138,24 @@ class Scanner:
         self._closed = False
 
     def _wire_trade_callbacks(self) -> None:
-        """Wire trade-collector → whales detector callback (DC-1.5)."""
+        """Wire trade-collector callbacks for the whales + convergence detectors.
+
+        Both detectors evaluate per-trade and need their ``_sink`` populated
+        before the run-loop starts so callbacks fire correctly during the
+        first poll cycle.
+        """
         trade_collector = self._collectors.get("trade_collector")
-        whales_detector = self._detectors.get("whales")
         if not isinstance(trade_collector, TradeCollector):
             return
-        if not isinstance(whales_detector, WhalesDetector):
-            return
-        # Set sink directly so handle_trade works even before whales.run() is called.
-        whales_detector._sink = self._sink
-        trade_collector.subscribe_new_trade(whales_detector.handle_trade_sync)
+        whales_detector = self._detectors.get("whales")
+        if isinstance(whales_detector, WhalesDetector):
+            whales_detector._sink = self._sink
+            trade_collector.subscribe_new_trade(whales_detector.handle_trade_sync)
+        convergence_detector = self._detectors.get("convergence")
+        if isinstance(convergence_detector, ConvergenceDetector):
+            convergence_detector._sink = self._sink
+            trade_collector.subscribe_new_trade(convergence_detector.handle_trade_sync)
+            _LOG.info("scanner.convergence_detector_wired")
 
     def _build_default_clients(self) -> SchedulerClients:
         """Construct the production HTTP/WS clients from config."""
@@ -245,6 +254,15 @@ class Scanner:
                 data_client=self._clients.data_client,
                 market_cache=self._market_cache_repo,
                 wallet_first_seen=self._first_seen_repo,
+            )
+        if self._config.convergence.enabled:
+            detectors["convergence"] = ConvergenceDetector(
+                config=self._config.convergence,
+                trades_repo=self._wallet_trades_repo,
+                category_repo=self._categories_repo,
+                market_cache=self._market_cache_repo,
+                event_tag_cache=self._event_tag_cache_repo,
+                smart_money_config=self._config.smart_money,
             )
         return detectors
 

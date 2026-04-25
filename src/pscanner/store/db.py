@@ -49,7 +49,9 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
       volume_usd REAL,
       outcome_prices_json TEXT,
       active INTEGER NOT NULL,
-      cached_at INTEGER NOT NULL
+      cached_at INTEGER NOT NULL,
+      condition_id TEXT,
+      event_slug TEXT
     )
     """,
     """
@@ -188,6 +190,8 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
       cached_at INTEGER NOT NULL
     )
     """,
+    "CREATE INDEX IF NOT EXISTS idx_market_cache_condition ON market_cache(condition_id)",
+    "CREATE INDEX IF NOT EXISTS idx_market_cache_event_slug ON market_cache(event_slug)",
 )
 
 _MIGRATIONS: tuple[str, ...] = (
@@ -195,6 +199,8 @@ _MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE tracked_wallets ADD COLUMN weighted_edge REAL",
     "ALTER TABLE tracked_wallets ADD COLUMN excess_pnl_usd REAL",
     "ALTER TABLE tracked_wallets ADD COLUMN total_stake_usd REAL",
+    "ALTER TABLE market_cache ADD COLUMN condition_id TEXT",
+    "ALTER TABLE market_cache ADD COLUMN event_slug TEXT",
 )
 
 _PRAGMAS: tuple[str, ...] = (

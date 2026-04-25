@@ -37,6 +37,13 @@ ws_resubscribe_interval_seconds = 1800
 subscription_max_markets = 2000
 subscription_min_volume_usd = 100
 
+[convergence]
+enabled = true
+convergence_min_wallets = 2
+window_seconds_thesis = 172800
+window_seconds_sports = 21600
+window_seconds_esports = 86400
+
 [ratelimit]
 gamma_rpm = 50
 data_rpm = 50

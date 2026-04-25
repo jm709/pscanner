@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 _BASE_MODEL_CONFIG: ConfigDict = ConfigDict(populate_by_name=True, extra="ignore")
 
@@ -99,6 +99,7 @@ class Market(BaseModel):
         Field(alias="clobTokenIds", default_factory=list),
     ] = Field(default_factory=list)
     event_id: str | None = None
+    event_slug: Annotated[str | None, Field(alias="eventSlug", default=None)] = None
     group_item_title: Annotated[str | None, Field(alias="groupItemTitle", default=None)] = None
     group_item_threshold: Annotated[
         str | None,
@@ -123,6 +124,34 @@ class Market(BaseModel):
     def _decode_money(cls, value: Any) -> float | None:
         """Coerce ``"123.4"``-style strings to float."""
         return _coerce_optional_float(value)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _hoist_event_fields(cls, data: Any) -> Any:
+        """Backfill ``event_id`` / ``event_slug`` from the gamma ``events`` array.
+
+        The gamma ``/markets`` payload nests the parent event(s) under
+        ``events: [{id, slug, ...}]``. When the caller hasn't passed explicit
+        ``event_id`` / ``event_slug`` / ``eventSlug`` keys, copy the first
+        event's ``id`` and ``slug`` so consumers can rely on the flat fields.
+        """
+        if not isinstance(data, dict):
+            return data
+        events = data.get("events")
+        if not isinstance(events, list) or not events:
+            return data
+        first = events[0]
+        if not isinstance(first, dict):
+            return data
+        if data.get("event_id") in (None, ""):
+            event_id = first.get("id")
+            if isinstance(event_id, (str, int)):
+                data["event_id"] = str(event_id)
+        if data.get("event_slug") in (None, "") and data.get("eventSlug") in (None, ""):
+            event_slug = first.get("slug")
+            if isinstance(event_slug, str):
+                data["event_slug"] = event_slug
+        return data
 
 
 class Event(BaseModel):

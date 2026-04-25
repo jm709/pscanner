@@ -25,6 +25,7 @@ from pscanner.collectors.watchlist import WatchlistSyncer
 from pscanner.config import (
     ActivityConfig,
     Config,
+    ConvergenceConfig,
     EventsConfig,
     MarketsConfig,
     MispricingConfig,
@@ -34,6 +35,7 @@ from pscanner.config import (
     SmartMoneyConfig,
     WhalesConfig,
 )
+from pscanner.detectors.convergence import ConvergenceDetector
 from pscanner.poly.models import Event, LeaderboardEntry, Market, Position
 from pscanner.scheduler import Scanner, SchedulerClients
 
@@ -82,6 +84,7 @@ def _make_config(
     enable_smart: bool = True,
     enable_misprice: bool = True,
     enable_whales: bool = True,
+    enable_convergence: bool = True,
     enable_positions: bool = True,
     enable_activity: bool = True,
     enable_markets: bool = True,
@@ -92,6 +95,7 @@ def _make_config(
         smart_money=SmartMoneyConfig(enabled=enable_smart),
         mispricing=MispricingConfig(enabled=enable_misprice),
         whales=WhalesConfig(enabled=enable_whales),
+        convergence=ConvergenceConfig(enabled=enable_convergence),
         ratelimit=RatelimitConfig(),
         positions=PositionsConfig(enabled=enable_positions),
         activity=ActivityConfig(enabled=enable_activity),
@@ -442,14 +446,48 @@ async def test_scanner_wires_whales_to_trade_collector_callback(db_path: Path) -
 
 @pytest.mark.asyncio
 async def test_scanner_skips_whales_callback_when_disabled(db_path: Path) -> None:
-    """When whales is disabled, the trade collector has no whales callback."""
-    config = _make_config(enable_smart=False, enable_misprice=False, enable_whales=False)
+    """When whales+convergence are disabled, the trade collector has no callbacks."""
+    config = _make_config(
+        enable_smart=False,
+        enable_misprice=False,
+        enable_whales=False,
+        enable_convergence=False,
+    )
     clients = _make_clients()
     scanner = Scanner(config=config, db_path=db_path, clients=clients)
     try:
         trades = scanner._collectors["trade_collector"]
         assert isinstance(trades, TradeCollector)
         assert trades._new_trade_callbacks == []
+    finally:
+        await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_scanner_wires_convergence_to_trade_collector_callback(db_path: Path) -> None:
+    """DC-1.8.B: convergence detector's sink + trade-collector callback wired at init."""
+    config = _make_config()
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    try:
+        convergence = scanner._detectors["convergence"]
+        trades = scanner._collectors["trade_collector"]
+        assert isinstance(convergence, ConvergenceDetector)
+        assert isinstance(trades, TradeCollector)
+        assert convergence._sink is scanner.sink
+        assert convergence.handle_trade_sync in trades._new_trade_callbacks
+    finally:
+        await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_scanner_skips_convergence_when_disabled(db_path: Path) -> None:
+    """When convergence is disabled, no detector entry is created."""
+    config = _make_config(enable_convergence=False)
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    try:
+        assert "convergence" not in scanner._detectors
     finally:
         await scanner.aclose()
 

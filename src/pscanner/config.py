@@ -76,6 +76,36 @@ class MispricingConfig(_Section):
     excluded_tags: tuple[str, ...] = ("Sports", "Esports")
 
 
+class ConvergenceConfig(_Section):
+    """Thresholds + window settings for the convergence detector.
+
+    Convergence fires when at least ``convergence_min_wallets`` smart wallets
+    in the same category enter the same condition_id within the configured
+    window. Window length varies by category: thesis events stay active for
+    weeks so we use a 48h window, sports markets resolve in hours so we use
+    6h, esports lands in between at 24h.
+    """
+
+    enabled: bool = True
+    convergence_min_wallets: int = 2
+    window_seconds_thesis: int = 48 * 3600
+    window_seconds_sports: int = 6 * 3600
+    window_seconds_esports: int = 24 * 3600
+
+    def window_seconds_for(self, category: str) -> int:
+        """Return the configured window (seconds) for ``category``.
+
+        Falls back to the thesis window for unknown categories. Categories
+        not in the {thesis, sports, esports} set should not occur in practice
+        but are tolerated to keep the detector resilient to schema drift.
+        """
+        return {
+            "thesis": self.window_seconds_thesis,
+            "sports": self.window_seconds_sports,
+            "esports": self.window_seconds_esports,
+        }.get(category, self.window_seconds_thesis)
+
+
 class WhalesConfig(_Section):
     """Thresholds for the whale detector."""
 
@@ -139,6 +169,7 @@ class Config(BaseModel):
     smart_money: SmartMoneyConfig = Field(default_factory=SmartMoneyConfig)
     mispricing: MispricingConfig = Field(default_factory=MispricingConfig)
     whales: WhalesConfig = Field(default_factory=WhalesConfig)
+    convergence: ConvergenceConfig = Field(default_factory=ConvergenceConfig)
     ratelimit: RatelimitConfig = Field(default_factory=RatelimitConfig)
     positions: PositionsConfig = Field(default_factory=PositionsConfig)
     activity: ActivityConfig = Field(default_factory=ActivityConfig)

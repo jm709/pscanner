@@ -387,6 +387,57 @@ def test_market_cache_handles_empty_outcome_prices(
     assert cached.outcome_prices == []
 
 
+def test_market_cache_round_trips_condition_id_and_event_slug(
+    tmp_db: sqlite3.Connection,
+    sample_market_json: dict[str, Any],
+) -> None:
+    market = Market.model_validate(sample_market_json)
+    repo = MarketCacheRepo(tmp_db)
+    repo.upsert(market)
+
+    cached = repo.get(market.id)
+    assert cached is not None
+    assert cached.condition_id == market.condition_id
+    assert cached.condition_id is not None
+    assert cached.event_slug == market.event_slug
+    assert cached.event_slug is not None
+
+
+def test_market_cache_get_by_condition_id_returns_match(
+    tmp_db: sqlite3.Connection,
+    sample_market_json: dict[str, Any],
+) -> None:
+    market = Market.model_validate(sample_market_json)
+    repo = MarketCacheRepo(tmp_db)
+    repo.upsert(market)
+
+    assert market.condition_id is not None
+    fetched = repo.get_by_condition_id(market.condition_id)
+    assert fetched is not None
+    assert fetched.market_id == market.id
+    assert fetched.condition_id == market.condition_id
+
+
+def test_market_cache_get_by_condition_id_unknown_returns_none(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = MarketCacheRepo(tmp_db)
+    assert repo.get_by_condition_id("0xunknown") is None
+
+
+def test_market_cache_get_by_condition_id_handles_null_condition(
+    tmp_db: sqlite3.Connection,
+    sample_market_json: dict[str, Any],
+) -> None:
+    payload = dict(sample_market_json)
+    payload.pop("conditionId", None)
+    market = Market.model_validate(payload)
+    repo = MarketCacheRepo(tmp_db)
+    repo.upsert(market)
+    # An empty-string lookup must not match the NULL row.
+    assert repo.get_by_condition_id("") is None
+
+
 def _make_alert(
     *,
     key: str = "k1",
@@ -611,6 +662,39 @@ def test_wallet_trades_count_by_wallet_groups_correctly(tmp_db: sqlite3.Connecti
     repo.insert(_make_trade(txn="0x3", wallet="0xb"))
 
     assert repo.count_by_wallet() == {"0xa": 2, "0xb": 1}
+
+
+def test_distinct_wallets_for_condition_returns_unique_set(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = WalletTradesRepo(tmp_db)
+    repo.insert(_make_trade(txn="0x1", wallet="0xa", condition_id="cond-1", timestamp=100))
+    repo.insert(_make_trade(txn="0x2", wallet="0xa", condition_id="cond-1", timestamp=200))
+    repo.insert(_make_trade(txn="0x3", wallet="0xb", condition_id="cond-1", timestamp=150))
+    repo.insert(_make_trade(txn="0x4", wallet="0xc", condition_id="cond-2", timestamp=200))
+
+    wallets = repo.distinct_wallets_for_condition("cond-1", since=0)
+    assert wallets == {"0xa", "0xb"}
+
+
+def test_distinct_wallets_for_condition_respects_since_filter(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = WalletTradesRepo(tmp_db)
+    repo.insert(_make_trade(txn="0x1", wallet="0xold", condition_id="cond-1", timestamp=50))
+    repo.insert(_make_trade(txn="0x2", wallet="0xnew", condition_id="cond-1", timestamp=200))
+
+    assert repo.distinct_wallets_for_condition("cond-1", since=100) == {"0xnew"}
+    assert repo.distinct_wallets_for_condition("cond-1", since=0) == {"0xold", "0xnew"}
+    assert repo.distinct_wallets_for_condition("cond-1", since=300) == set()
+
+
+def test_distinct_wallets_for_unknown_condition_returns_empty_set(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    repo = WalletTradesRepo(tmp_db)
+    repo.insert(_make_trade(txn="0x1", wallet="0xa", condition_id="cond-1", timestamp=100))
+    assert repo.distinct_wallets_for_condition("cond-other", since=0) == set()
 
 
 def _make_history_row(

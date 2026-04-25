@@ -75,6 +75,8 @@ class CachedMarket:
     outcome_prices: list[float]
     active: bool
     cached_at: int
+    condition_id: str | None = None
+    event_slug: str | None = None
 
 
 def _now_seconds() -> int:
@@ -355,8 +357,9 @@ class MarketCacheRepo:
             """
             INSERT INTO market_cache (
               market_id, event_id, title, liquidity_usd, volume_usd,
-              outcome_prices_json, active, cached_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              outcome_prices_json, active, cached_at,
+              condition_id, event_slug
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(market_id) DO UPDATE SET
               event_id = excluded.event_id,
               title = excluded.title,
@@ -364,7 +367,9 @@ class MarketCacheRepo:
               volume_usd = excluded.volume_usd,
               outcome_prices_json = excluded.outcome_prices_json,
               active = excluded.active,
-              cached_at = excluded.cached_at
+              cached_at = excluded.cached_at,
+              condition_id = excluded.condition_id,
+              event_slug = excluded.event_slug
             """,
             (
                 market.id,
@@ -375,6 +380,8 @@ class MarketCacheRepo:
                 prices_json,
                 1 if market.active else 0,
                 now,
+                market.condition_id,
+                market.event_slug,
             ),
         )
         self._conn.commit()
@@ -384,11 +391,39 @@ class MarketCacheRepo:
         row = self._conn.execute(
             """
             SELECT market_id, event_id, title, liquidity_usd, volume_usd,
-                   outcome_prices_json, active, cached_at
+                   outcome_prices_json, active, cached_at,
+                   condition_id, event_slug
               FROM market_cache
              WHERE market_id = ?
             """,
             (market_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _row_to_cached_market(row)
+
+    def get_by_condition_id(self, condition_id: str) -> CachedMarket | None:
+        """Return the cached row whose ``condition_id`` matches, or ``None``.
+
+        Args:
+            condition_id: Polymarket condition identifier (the on-chain id used
+                by the CLOB and the data-api activity stream).
+
+        Returns:
+            The first matching ``CachedMarket``, or ``None`` if no row carries
+            this condition id. Multiple rows would be a data-corruption signal
+            but are tolerated — only the first is returned.
+        """
+        row = self._conn.execute(
+            """
+            SELECT market_id, event_id, title, liquidity_usd, volume_usd,
+                   outcome_prices_json, active, cached_at,
+                   condition_id, event_slug
+              FROM market_cache
+             WHERE condition_id = ?
+             LIMIT 1
+            """,
+            (condition_id,),
         ).fetchone()
         if row is None:
             return None
@@ -399,7 +434,8 @@ class MarketCacheRepo:
         rows = self._conn.execute(
             """
             SELECT market_id, event_id, title, liquidity_usd, volume_usd,
-                   outcome_prices_json, active, cached_at
+                   outcome_prices_json, active, cached_at,
+                   condition_id, event_slug
               FROM market_cache
              WHERE active = 1
              ORDER BY market_id ASC
@@ -430,6 +466,8 @@ def _row_to_cached_market(row: sqlite3.Row) -> CachedMarket:
         outcome_prices=prices,
         active=bool(row["active"]),
         cached_at=row["cached_at"],
+        condition_id=row["condition_id"],
+        event_slug=row["event_slug"],
     )
 
 
@@ -730,6 +768,32 @@ class WalletTradesRepo:
             "SELECT wallet, COUNT(*) AS c FROM wallet_trades GROUP BY wallet",
         ).fetchall()
         return {row["wallet"]: int(row["c"]) for row in rows}
+
+    def distinct_wallets_for_condition(
+        self,
+        condition_id: str,
+        *,
+        since: int,
+    ) -> set[str]:
+        """Return distinct wallets that traded ``condition_id`` since a timestamp.
+
+        Args:
+            condition_id: Polymarket condition identifier.
+            since: Inclusive lower bound on ``timestamp`` (Unix seconds).
+
+        Returns:
+            Distinct wallet addresses with at least one ``wallet_trades`` row
+            for ``condition_id`` whose ``timestamp >= since``.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT DISTINCT wallet
+              FROM wallet_trades
+             WHERE condition_id = ? AND timestamp >= ?
+            """,
+            (condition_id, since),
+        ).fetchall()
+        return {row["wallet"] for row in rows}
 
 
 def _row_to_wallet_trade(row: sqlite3.Row) -> WalletTrade:
