@@ -6,14 +6,15 @@ hints at either an arbitrage opportunity or a stale book; either way it is
 worth a human eyeball.
 
 Non-mutex layouts (date-range or threshold buckets, e.g. "Measles cases in
-2026 above N") have markets with a non-empty ``groupItemTitle`` and are
-skipped: their outcomes are independent, so the sum-to-1 invariant doesn't
-apply.
+2026 above N") have markets whose ``groupItemTitle`` looks like a date or
+numeric threshold and are skipped: their outcomes are independent, so the
+sum-to-1 invariant doesn't apply.
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Any
 
@@ -30,6 +31,43 @@ _LOGGER = structlog.get_logger(__name__)
 _HIGH_SEVERITY_DEVIATION = 0.10
 _MED_SEVERITY_DEVIATION = 0.05
 _MIN_VALID_MARKETS = 2
+
+_DATE_PATTERNS = (
+    re.compile(r"^\d{4}-\d{2}-\d{2}"),
+    re.compile(r"^(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d+(?:,\s*\d{4})?$"),
+)
+_NUMERIC_THRESHOLD_PATTERN = re.compile(r"^[<>]?=?\s*\$?\d")
+
+
+def _looks_like_bucket_label(label: str | None) -> bool:
+    """Return True if a market's groupItemTitle looks like a date or numeric bucket.
+
+    Used to detect range/threshold-style events (where outcomes overlap and the
+    sum-to-1 invariant does not apply) vs candidate-style mutex events (where
+    titles are arbitrary names).
+    """
+    if not label:
+        return False
+    text = label.strip()
+    if not text:
+        return False
+    for pattern in _DATE_PATTERNS:
+        if pattern.match(text):
+            return True
+    return bool(_NUMERIC_THRESHOLD_PATTERN.match(text))
+
+
+def _is_range_bucket_event(event: Event) -> bool:
+    """Return True if every market in the event has a date-or-numeric title.
+
+    Pure mutex (candidate-style) events have None or arbitrary string titles
+    and produce False. Mixed events (some buckets, some non-buckets) produce
+    False — we err toward eligibility, since a single non-bucket market means
+    the event is not a clean threshold layout.
+    """
+    if not event.markets:
+        return False
+    return all(_looks_like_bucket_label(m.group_item_title) for m in event.markets)
 
 
 class MispricingDetector:
@@ -102,19 +140,18 @@ class MispricingDetector:
         await sink.emit(alert)
 
     def _is_eligible(self, event: Event) -> bool:
-        """Apply pre-filters that don't depend on outcome prices.
+        """Apply the cheap pre-filters that don't depend on outcome prices.
 
-        Skips events that aren't true mutex layouts: a non-empty
-        A non-empty ``groupItemThreshold`` on any market signals a numeric
-        bucket layout (date ranges, value thresholds) where outcomes are
-        independent and the sum-to-1 invariant does not apply. Candidate-
-        style mutex events leave this field empty and still qualify.
+        Skips events whose markets all carry date-like or numeric-threshold
+        ``groupItemTitle`` values — those are bucket layouts where outcomes can
+        overlap and the sum-to-1 invariant does not apply. Candidate-style mutex
+        events (Trump/Harris/Other) leave the field arbitrary and remain eligible.
         """
         if len(event.markets) < _MIN_VALID_MARKETS:
             return False
         if any(not market.enable_order_book for market in event.markets):
             return False
-        if any(market.group_item_threshold for market in event.markets):
+        if _is_range_bucket_event(event):
             return False
         return not (
             event.liquidity is None or event.liquidity < self._config.min_event_liquidity_usd
