@@ -193,18 +193,16 @@ def _walk_back_to_burst_start(
 ) -> int:
     """Step back in ``check_window_seconds`` chunks; return the burst-start ts.
 
-    A window is "quiescent" when its trade count is below ``threshold`` AND its
-    lower bound is within the fetched data range. Two consecutive quiescent
-    windows stop the walk; otherwise the walk hits ``floor_ts``.
+    A window is "quiescent" when its trade count is below ``threshold``. Two
+    consecutive quiescent windows stop the walk; otherwise the walk hits
+    ``floor_ts``.
     """
-    min_data_ts = min(timestamps) if timestamps else floor_ts
     consecutive_quiescent = 0
     cursor = alert_ts
     while cursor > floor_ts:
         window_lo = max(cursor - cfg.backwalk_check_window_seconds, floor_ts)
         in_window = sum(1 for t in timestamps if window_lo <= t < cursor)
-        within_data_range = window_lo >= min_data_ts
-        if within_data_range and in_window < threshold:
+        if in_window < threshold:
             consecutive_quiescent += 1
             if consecutive_quiescent >= _REQUIRED_QUIESCENT_WINDOWS:
                 return cursor

@@ -183,7 +183,9 @@ async def test_backwalk_stops_on_quiescence() -> None:
 async def test_backwalk_caps_at_max_backwalk_seconds() -> None:
     # Constant-rate market: burst rate never drops, must hit the 7200s cap
     alert_ts = 1_700_000_000
-    page = _gen_trades(ts_start=alert_ts - 7300, ts_end=alert_ts, gap=5)[:500]
+    # gap=20 yields ~366 trades spanning the full 7200s cap in one short page,
+    # mirroring real-API pagination termination (page len < 500 → stop).
+    page = _gen_trades(ts_start=alert_ts - 7300, ts_end=alert_ts, gap=20)
     respx.get(f"{_DATA}/trades").mock(return_value=httpx.Response(200, json=page))
     client = _backwalk_client()
     try:
