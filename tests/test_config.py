@@ -8,7 +8,7 @@ from pscanner.config import Config, MoveAttributionConfig
 def test_move_attribution_defaults() -> None:
     cfg = MoveAttributionConfig()
     assert cfg.enabled is True
-    assert cfg.trigger_detectors == ("velocity", "mispricing", "convergence")
+    assert cfg.trigger_detectors == ("velocity", "convergence")
     assert cfg.lookback_seconds_baseline == 86400
     assert cfg.backwalk_multiplier == 3.0
     assert cfg.backwalk_check_window_seconds == 300

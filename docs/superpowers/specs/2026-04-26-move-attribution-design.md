@@ -32,8 +32,10 @@ emit `cluster.discovered`.
 
 ## Decisions (locked during brainstorming)
 
-1. **Trigger** — hooks off existing alerts (`velocity`, `mispricing`,
-   `convergence`). No independent scan.
+1. **Trigger** — hooks off existing alerts (`velocity`, `convergence`).
+   Mispricing was originally in scope but later moved to "Out of scope"
+   because its alerts don't carry a single `condition_id`. No independent
+   scan.
 2. **Emission** — emits a `cluster.candidate` alert *and* upserts contributors
    into `wallet_watchlist`. Does not auto-create `wallet_clusters` rows or
    auto-run cluster expansion.
@@ -269,6 +271,13 @@ Estimated count: ~15 unit + ~7 detector + 1 wiring = ~23 tests.
 
 ## Out of scope
 
+- **Mispricing-triggered attribution.** The mispricing detector emits
+  alerts whose body has `event_id` + `markets: [...]` rather than a single
+  `condition_id`. Per-market backwalk for mispricing would require either
+  extending `_resolve_market` to walk the `markets` list and run one
+  backwalk per market (more API budget) or changing mispricing's emission
+  shape. Both options are deferrable; v1 ships with `trigger_detectors =
+  ("velocity", "convergence")`.
 - Independent periodic scan over markets that moved but didn't trip an
   upstream detector. Could be added later as Option B from brainstorming if
   recall on Option A feels too low.

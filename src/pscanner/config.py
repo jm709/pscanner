@@ -258,7 +258,11 @@ class MoveAttributionConfig(_Section):
     """
 
     enabled: bool = True
-    trigger_detectors: tuple[str, ...] = ("velocity", "mispricing", "convergence")
+    # Note: mispricing is intentionally NOT in the default trigger set.
+    # Mispricing alerts carry an `event_id` + `markets: [...]` list, not a
+    # single `condition_id`, so per-market backwalk is out of scope for v1.
+    # See docs/superpowers/specs/2026-04-26-move-attribution-design.md.
+    trigger_detectors: tuple[str, ...] = ("velocity", "convergence")
     lookback_seconds_baseline: int = 86400
     backwalk_multiplier: float = 3.0
     backwalk_check_window_seconds: int = 300
