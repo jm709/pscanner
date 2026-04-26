@@ -43,6 +43,7 @@ from pscanner.config import Config
 from pscanner.detectors.cluster import ClusterDetector
 from pscanner.detectors.convergence import ConvergenceDetector
 from pscanner.detectors.mispricing import MispricingDetector
+from pscanner.detectors.move_attribution import MoveAttributionDetector
 from pscanner.detectors.smart_money import SmartMoneyDetector
 from pscanner.detectors.trade_driven import TradeDrivenDetector
 from pscanner.detectors.velocity import PriceVelocityDetector
@@ -153,6 +154,7 @@ class Scanner:
         self._collectors = self._build_collectors()
         self._detectors = self._build_detectors()
         self._wire_trade_callbacks()
+        self._wire_alert_subscribers()
         self._collectors_stop = asyncio.Event()
         self._closed = False
 
@@ -174,6 +176,21 @@ class Scanner:
                 detector._sink = self._sink
                 trade_collector.subscribe_new_trade(detector.handle_trade_sync)
                 _LOG.info("scanner.trade_driven_detector_wired", detector=detector.name)
+
+    def _wire_alert_subscribers(self) -> None:
+        """Register every alert-driven detector as a subscriber on the sink.
+
+        Mirrors :meth:`_wire_trade_callbacks` but for detectors that listen
+        to upstream alerts rather than per-trade callbacks. The detector's
+        ``_sink`` must be populated before its run-loop starts so the
+        synchronous ``handle_alert_sync`` callback can spawn ``evaluate``
+        tasks correctly during the very first ``AlertSink.emit`` call.
+        """
+        for detector in self._detectors.values():
+            if isinstance(detector, MoveAttributionDetector):
+                detector._sink = self._sink
+                self._sink.subscribe(detector.handle_alert_sync)
+                _LOG.info("scanner.alert_driven_detector_wired", detector=detector.name)
 
     def _build_default_clients(self) -> SchedulerClients:
         """Construct the production HTTP/WS clients from config."""
@@ -308,6 +325,12 @@ class Scanner:
                 clusters_repo=self._clusters_repo,
                 members_repo=self._cluster_members_repo,
                 clock=self._clock,
+            )
+        if self._config.move_attribution.enabled:
+            detectors["move_attribution"] = MoveAttributionDetector(
+                config=self._config.move_attribution,
+                data_client=self._clients.data_client,
+                watchlist_repo=self._watchlist_repo,
             )
         self._maybe_attach_velocity_detector(detectors)
         return detectors

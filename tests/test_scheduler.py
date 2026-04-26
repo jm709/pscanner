@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from pscanner.alerts.models import Alert
 from pscanner.alerts.sink import AlertSink
 from pscanner.collectors.activity import ActivityCollector
 from pscanner.collectors.events import EventCollector
@@ -31,6 +32,7 @@ from pscanner.config import (
     EventsConfig,
     MarketsConfig,
     MispricingConfig,
+    MoveAttributionConfig,
     PositionsConfig,
     RatelimitConfig,
     ScannerConfig,
@@ -40,6 +42,7 @@ from pscanner.config import (
     WhalesConfig,
 )
 from pscanner.detectors.convergence import ConvergenceDetector
+from pscanner.detectors.move_attribution import MoveAttributionDetector
 from pscanner.detectors.velocity import PriceVelocityDetector
 from pscanner.poly.models import Event, LeaderboardEntry, Market, Position
 from pscanner.scheduler import Scanner, SchedulerClients
@@ -98,6 +101,7 @@ def _make_config(
     enable_ticks: bool = True,
     enable_velocity: bool = True,
     enable_cluster: bool = True,
+    enable_move_attribution: bool = True,
 ) -> Config:
     return Config(
         scanner=ScannerConfig(),
@@ -113,6 +117,7 @@ def _make_config(
         ticks=TicksConfig(enabled=enable_ticks),
         velocity=VelocityConfig(enabled=enable_velocity),
         cluster=ClusterConfig(enabled=enable_cluster),
+        move_attribution=MoveAttributionConfig(enabled=enable_move_attribution),
     )
 
 
@@ -156,6 +161,7 @@ def _make_clients(
     data_client.get_positions = AsyncMock(return_value=positions or [])
     data_client.get_closed_positions = AsyncMock(return_value=[])
     data_client.get_activity = AsyncMock(return_value=[])
+    data_client.get_market_trades = AsyncMock(return_value=[])
     data_client.aclose = AsyncMock()
 
     ticks_ws = MagicMock()
@@ -777,3 +783,95 @@ async def test_run_once_includes_tick_snapshots_key(db_path: Path) -> None:
         await scanner.aclose()
     assert "tick_snapshots" in result
     assert result["tick_snapshots"] == 0
+
+
+@pytest.mark.asyncio
+async def test_scanner_wires_move_attribution_to_alert_sink(db_path: Path) -> None:
+    """T8: move-attribution detector's sink + AlertSink subscription wired at init."""
+    config = _make_config()
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    try:
+        detector = scanner._detectors["move_attribution"]
+        assert isinstance(detector, MoveAttributionDetector)
+        assert detector._sink is scanner.sink
+        assert detector.handle_alert_sync in scanner.sink._subscribers
+    finally:
+        await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_scanner_skips_move_attribution_when_disabled(db_path: Path) -> None:
+    """When ``move_attribution`` is disabled, no detector entry is created."""
+    config = _make_config(enable_move_attribution=False)
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    try:
+        assert "move_attribution" not in scanner._detectors
+        # And no MoveAttributionDetector callback is wired to the sink.
+        assert all(
+            getattr(cb, "__self__", None).__class__.__name__ != "MoveAttributionDetector"
+            for cb in scanner.sink._subscribers
+        )
+    finally:
+        await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_scanner_move_attribution_smoke_emits_cluster_candidate(
+    db_path: Path,
+) -> None:
+    """End-to-end: a velocity alert through the live AlertSink reaches the
+    MoveAttributionDetector, which emits a ``cluster.candidate`` alert and
+    upserts contributors into ``wallet_watchlist``."""
+    alert_ts = 1_700_086_400
+    burst_trades = [
+        {
+            "proxyWallet": f"0x{i:04d}",
+            "timestamp": alert_ts - 30,
+            "side": "BUY",
+            "outcome": "Yes",
+            "size": 500.0 + i,
+            "price": 0.95,
+        }
+        for i in range(6)
+    ]
+    config = _make_config(
+        enable_smart=False,
+        enable_misprice=False,
+        enable_whales=False,
+        enable_convergence=False,
+        enable_cluster=False,
+        enable_positions=False,
+        enable_activity=False,
+        enable_markets=False,
+        enable_events=False,
+        enable_ticks=False,
+        enable_velocity=False,
+        enable_move_attribution=True,
+    )
+    clients = _make_clients()
+    cast("AsyncMock", clients.data_client.get_market_trades).return_value = burst_trades
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    detector = scanner._detectors["move_attribution"]
+    assert isinstance(detector, MoveAttributionDetector)
+    try:
+        await scanner.sink.emit(
+            Alert(
+                detector="velocity",
+                alert_key="velocity:0xabc:1",
+                severity="med",
+                title="market moved",
+                body={"condition_id": "0xabc"},
+                created_at=alert_ts,
+            )
+        )
+        await detector.aclose()
+        cast("AsyncMock", clients.data_client.get_market_trades).assert_awaited_once()
+        recent = scanner._alerts_repo.recent(limit=10)
+        candidates = [a for a in recent if a.detector == "move_attribution"]
+        assert len(candidates) >= 1
+        watchlist = scanner._watchlist_repo.list_active()
+        assert any(w.source == "cluster.candidate" for w in watchlist)
+    finally:
+        await scanner.aclose()
