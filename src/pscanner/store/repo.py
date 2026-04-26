@@ -338,6 +338,41 @@ class WalletFirstSeenRepo:
         )
         self._conn.commit()
 
+    def list_recent(self, *, within: int) -> list[WalletFirstSeen]:
+        """Return rows whose ``first_activity_at`` is within the trailing window.
+
+        Args:
+            within: Trailing window length in days. Rows whose
+                ``first_activity_at`` is older than ``now - within * 86400``
+                seconds are excluded. Rows with NULL ``first_activity_at``
+                are also excluded — the cluster detector only cares about
+                wallets we have a creation timestamp for.
+
+        Returns:
+            Matching rows ordered by ``first_activity_at`` ascending.
+        """
+        now = _now_seconds()
+        cutoff = now - within * 86400
+        rows = self._conn.execute(
+            """
+            SELECT address, first_activity_at, total_trades, cached_at
+              FROM wallet_first_seen
+             WHERE first_activity_at IS NOT NULL
+               AND first_activity_at >= ?
+             ORDER BY first_activity_at ASC
+            """,
+            (cutoff,),
+        ).fetchall()
+        return [
+            WalletFirstSeen(
+                address=row["address"],
+                first_activity_at=row["first_activity_at"],
+                total_trades=row["total_trades"],
+                cached_at=row["cached_at"],
+            )
+            for row in rows
+        ]
+
 
 class MarketCacheRepo:
     """CRUD for the ``market_cache`` table."""
@@ -1822,3 +1857,169 @@ def _row_to_market_tick(row: sqlite3.Row) -> MarketTick:
         ask_depth_top5=_optional_float(row["ask_depth_top5"]),
         last_trade_price=_optional_float(row["last_trade_price"]),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class WalletCluster:
+    """A coordinated-wallet cluster persisted by the cluster detector."""
+
+    cluster_id: str
+    member_count: int
+    first_member_created_at: int
+    last_member_created_at: int
+    shared_market_count: int
+    behavior_tag: str | None
+    detection_score: int
+    first_detected_at: int
+    last_active_at: int
+
+
+class WalletClustersRepo:
+    """CRUD for the ``wallet_clusters`` table."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        """Bind the repo to an already-initialised connection."""
+        self._conn = conn
+
+    def upsert(self, cluster: WalletCluster) -> None:
+        """Insert or update one ``wallet_clusters`` row by ``cluster_id``.
+
+        Args:
+            cluster: Fully-populated ``WalletCluster`` to persist.
+        """
+        self._conn.execute(
+            """
+            INSERT INTO wallet_clusters (
+              cluster_id, member_count,
+              first_member_created_at, last_member_created_at,
+              shared_market_count, behavior_tag, detection_score,
+              first_detected_at, last_active_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(cluster_id) DO UPDATE SET
+              member_count = excluded.member_count,
+              first_member_created_at = excluded.first_member_created_at,
+              last_member_created_at = excluded.last_member_created_at,
+              shared_market_count = excluded.shared_market_count,
+              behavior_tag = excluded.behavior_tag,
+              detection_score = excluded.detection_score,
+              first_detected_at = excluded.first_detected_at,
+              last_active_at = excluded.last_active_at
+            """,
+            (
+                cluster.cluster_id,
+                cluster.member_count,
+                cluster.first_member_created_at,
+                cluster.last_member_created_at,
+                cluster.shared_market_count,
+                cluster.behavior_tag,
+                cluster.detection_score,
+                cluster.first_detected_at,
+                cluster.last_active_at,
+            ),
+        )
+        self._conn.commit()
+
+    def get(self, cluster_id: str) -> WalletCluster | None:
+        """Return the cluster row for ``cluster_id``, or ``None`` if absent."""
+        row = self._conn.execute(
+            """
+            SELECT cluster_id, member_count,
+                   first_member_created_at, last_member_created_at,
+                   shared_market_count, behavior_tag, detection_score,
+                   first_detected_at, last_active_at
+              FROM wallet_clusters
+             WHERE cluster_id = ?
+            """,
+            (cluster_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _row_to_wallet_cluster(row)
+
+    def list_all(self) -> list[WalletCluster]:
+        """Return every cluster row, ordered by ``first_detected_at`` desc."""
+        rows = self._conn.execute(
+            """
+            SELECT cluster_id, member_count,
+                   first_member_created_at, last_member_created_at,
+                   shared_market_count, behavior_tag, detection_score,
+                   first_detected_at, last_active_at
+              FROM wallet_clusters
+             ORDER BY first_detected_at DESC
+            """,
+        ).fetchall()
+        return [_row_to_wallet_cluster(row) for row in rows]
+
+    def update_last_active(self, cluster_id: str, ts: int) -> None:
+        """Stamp ``last_active_at`` for ``cluster_id`` to ``ts``."""
+        self._conn.execute(
+            "UPDATE wallet_clusters SET last_active_at = ? WHERE cluster_id = ?",
+            (ts, cluster_id),
+        )
+        self._conn.commit()
+
+
+def _row_to_wallet_cluster(row: sqlite3.Row) -> WalletCluster:
+    """Convert a ``wallet_clusters`` row to a ``WalletCluster`` dataclass."""
+    return WalletCluster(
+        cluster_id=row["cluster_id"],
+        member_count=int(row["member_count"]),
+        first_member_created_at=int(row["first_member_created_at"]),
+        last_member_created_at=int(row["last_member_created_at"]),
+        shared_market_count=int(row["shared_market_count"]),
+        behavior_tag=row["behavior_tag"],
+        detection_score=int(row["detection_score"]),
+        first_detected_at=int(row["first_detected_at"]),
+        last_active_at=int(row["last_active_at"]),
+    )
+
+
+class WalletClusterMembersRepo:
+    """CRUD for the ``wallet_cluster_members`` table."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        """Bind the repo to an already-initialised connection."""
+        self._conn = conn
+
+    def add_member(self, cluster_id: str, wallet: str) -> None:
+        """Add ``wallet`` to ``cluster_id``. No-ops if already a member."""
+        self._conn.execute(
+            """
+            INSERT OR IGNORE INTO wallet_cluster_members (cluster_id, wallet)
+            VALUES (?, ?)
+            """,
+            (cluster_id, wallet),
+        )
+        self._conn.commit()
+
+    def members_of(self, cluster_id: str) -> list[str]:
+        """Return every wallet in ``cluster_id``, sorted ascending."""
+        rows = self._conn.execute(
+            """
+            SELECT wallet FROM wallet_cluster_members
+             WHERE cluster_id = ?
+             ORDER BY wallet ASC
+            """,
+            (cluster_id,),
+        ).fetchall()
+        return [row["wallet"] for row in rows]
+
+    def cluster_for_wallet(self, wallet: str) -> str | None:
+        """Return the first cluster_id ``wallet`` belongs to, or ``None``.
+
+        A wallet should only belong to one cluster in the current detector
+        design, but the schema allows membership in multiple. The repo
+        returns the first match (by insertion order) for callers that need
+        a single answer.
+        """
+        row = self._conn.execute(
+            """
+            SELECT cluster_id FROM wallet_cluster_members
+             WHERE wallet = ?
+             LIMIT 1
+            """,
+            (wallet,),
+        ).fetchone()
+        if row is None:
+            return None
+        return row["cluster_id"]

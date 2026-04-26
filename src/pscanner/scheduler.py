@@ -40,6 +40,7 @@ from pscanner.collectors.ticks import MarketTickCollector
 from pscanner.collectors.trades import TradeCollector
 from pscanner.collectors.watchlist import WatchlistRegistry, WatchlistSyncer
 from pscanner.config import Config
+from pscanner.detectors.cluster import ClusterDetector
 from pscanner.detectors.convergence import ConvergenceDetector
 from pscanner.detectors.mispricing import MispricingDetector
 from pscanner.detectors.smart_money import SmartMoneyDetector
@@ -63,6 +64,8 @@ from pscanner.store.repo import (
     TrackedWalletCategoriesRepo,
     TrackedWalletsRepo,
     WalletActivityEventsRepo,
+    WalletClusterMembersRepo,
+    WalletClustersRepo,
     WalletFirstSeenRepo,
     WalletPositionsHistoryRepo,
     WalletTradesRepo,
@@ -138,6 +141,8 @@ class Scanner:
         self._categories_repo = TrackedWalletCategoriesRepo(self._db)
         self._event_tag_cache_repo = EventTagCacheRepo(self._db)
         self._ticks_repo = MarketTicksRepo(self._db)
+        self._clusters_repo = WalletClustersRepo(self._db)
+        self._cluster_members_repo = WalletClusterMembersRepo(self._db)
         self._owns_clients = clients is None
         self._clients = clients or self._build_default_clients()
         self._renderer = TerminalRenderer()
@@ -150,17 +155,20 @@ class Scanner:
         self._closed = False
 
     def _wire_trade_callbacks(self) -> None:
-        """Wire trade-collector callbacks for every ``TradeDrivenDetector``.
+        """Wire trade-collector callbacks for every trade-driven detector.
 
         Each trade-driven detector evaluates per-trade and needs its
         ``_sink`` populated before the run-loop starts so callbacks fire
-        correctly during the first poll cycle.
+        correctly during the first poll cycle. The cluster detector has a
+        hybrid loop+callback shape and so doesn't inherit from
+        :class:`TradeDrivenDetector`; it is wired explicitly alongside the
+        TradeDrivenDetector subclasses.
         """
         trade_collector = self._collectors.get("trade_collector")
         if not isinstance(trade_collector, TradeCollector):
             return
         for detector in self._detectors.values():
-            if isinstance(detector, TradeDrivenDetector):
+            if isinstance(detector, TradeDrivenDetector | ClusterDetector):
                 detector._sink = self._sink
                 trade_collector.subscribe_new_trade(detector.handle_trade_sync)
                 _LOG.info("scanner.trade_driven_detector_wired", detector=detector.name)
@@ -286,6 +294,16 @@ class Scanner:
                 market_cache=self._market_cache_repo,
                 event_tag_cache=self._event_tag_cache_repo,
                 smart_money_config=self._config.smart_money,
+            )
+        if self._config.cluster.enabled:
+            detectors["cluster"] = ClusterDetector(
+                config=self._config.cluster,
+                wallet_first_seen=self._first_seen_repo,
+                trades_repo=self._wallet_trades_repo,
+                market_cache=self._market_cache_repo,
+                clusters_repo=self._clusters_repo,
+                members_repo=self._cluster_members_repo,
+                clock=self._clock,
             )
         self._maybe_attach_velocity_detector(detectors)
         return detectors

@@ -27,6 +27,9 @@ from pscanner.store.repo import (
     TrackedWalletsRepo,
     WalletActivityEvent,
     WalletActivityEventsRepo,
+    WalletCluster,
+    WalletClusterMembersRepo,
+    WalletClustersRepo,
     WalletFirstSeenRepo,
     WalletPositionsHistoryRepo,
     WalletPositionsHistoryRow,
@@ -1518,3 +1521,111 @@ def test_market_ticks_distinct_count_and_count_by_asset(
 
     assert repo.distinct_snapshot_count() == 2
     assert repo.count_by_asset() == {"asset-1": 2, "asset-2": 1}
+
+
+def _make_cluster(**overrides: Any) -> WalletCluster:
+    """Build a ``WalletCluster`` with sensible defaults plus overrides."""
+    base: dict[str, Any] = {
+        "cluster_id": "cluster-aaa",
+        "member_count": 4,
+        "first_member_created_at": 1_700_000_000,
+        "last_member_created_at": 1_700_080_000,
+        "shared_market_count": 3,
+        "behavior_tag": "farmer",
+        "detection_score": 6,
+        "first_detected_at": 1_700_100_000,
+        "last_active_at": 1_700_100_000,
+    }
+    base.update(overrides)
+    return WalletCluster(**base)
+
+
+def test_wallet_clusters_upsert_round_trip(tmp_db: sqlite3.Connection) -> None:
+    repo = WalletClustersRepo(tmp_db)
+    cluster = _make_cluster()
+
+    repo.upsert(cluster)
+    fetched = repo.get("cluster-aaa")
+
+    assert fetched == cluster
+
+
+def test_wallet_clusters_upsert_overwrites_existing(tmp_db: sqlite3.Connection) -> None:
+    repo = WalletClustersRepo(tmp_db)
+    repo.upsert(_make_cluster(detection_score=5, behavior_tag="mixed"))
+    repo.upsert(_make_cluster(detection_score=8, behavior_tag="trader"))
+
+    fetched = repo.get("cluster-aaa")
+    assert fetched is not None
+    assert fetched.detection_score == 8
+    assert fetched.behavior_tag == "trader"
+
+
+def test_wallet_clusters_get_returns_none_when_missing(tmp_db: sqlite3.Connection) -> None:
+    repo = WalletClustersRepo(tmp_db)
+    assert repo.get("cluster-missing") is None
+
+
+def test_wallet_clusters_list_all_orders_by_first_detected(tmp_db: sqlite3.Connection) -> None:
+    repo = WalletClustersRepo(tmp_db)
+    repo.upsert(_make_cluster(cluster_id="c-old", first_detected_at=100))
+    repo.upsert(_make_cluster(cluster_id="c-new", first_detected_at=200))
+
+    rows = repo.list_all()
+    assert [r.cluster_id for r in rows] == ["c-new", "c-old"]
+
+
+def test_wallet_clusters_update_last_active(tmp_db: sqlite3.Connection) -> None:
+    repo = WalletClustersRepo(tmp_db)
+    repo.upsert(_make_cluster(last_active_at=1_700_100_000))
+
+    repo.update_last_active("cluster-aaa", 1_700_999_999)
+
+    fetched = repo.get("cluster-aaa")
+    assert fetched is not None
+    assert fetched.last_active_at == 1_700_999_999
+
+
+def test_wallet_cluster_members_add_and_query(tmp_db: sqlite3.Connection) -> None:
+    repo = WalletClusterMembersRepo(tmp_db)
+    repo.add_member("cluster-aaa", "0xwallet-a")
+    repo.add_member("cluster-aaa", "0xwallet-b")
+    repo.add_member("cluster-bbb", "0xwallet-c")
+
+    assert repo.members_of("cluster-aaa") == ["0xwallet-a", "0xwallet-b"]
+    assert repo.members_of("cluster-bbb") == ["0xwallet-c"]
+    assert repo.cluster_for_wallet("0xwallet-a") == "cluster-aaa"
+    assert repo.cluster_for_wallet("0xwallet-c") == "cluster-bbb"
+    assert repo.cluster_for_wallet("0xunknown") is None
+
+
+def test_wallet_cluster_members_add_member_is_idempotent(tmp_db: sqlite3.Connection) -> None:
+    repo = WalletClusterMembersRepo(tmp_db)
+    repo.add_member("cluster-aaa", "0xwallet-a")
+    repo.add_member("cluster-aaa", "0xwallet-a")
+
+    assert repo.members_of("cluster-aaa") == ["0xwallet-a"]
+
+
+def test_wallet_first_seen_list_recent_filters_by_window(tmp_db: sqlite3.Connection) -> None:
+    repo = WalletFirstSeenRepo(tmp_db)
+    now = int(time.time())
+    repo.upsert("0xrecent", first_activity_at=now - 86400, total_trades=5)
+    repo.upsert("0xancient", first_activity_at=now - 90 * 86400, total_trades=20)
+    repo.upsert("0xnull-ts", first_activity_at=None, total_trades=0)
+
+    rows = repo.list_recent(within=30)
+
+    addresses = [r.address for r in rows]
+    assert addresses == ["0xrecent"]
+
+
+def test_wallet_first_seen_list_recent_orders_ascending(tmp_db: sqlite3.Connection) -> None:
+    repo = WalletFirstSeenRepo(tmp_db)
+    now = int(time.time())
+    repo.upsert("0xb", first_activity_at=now - 1000, total_trades=1)
+    repo.upsert("0xa", first_activity_at=now - 5000, total_trades=1)
+
+    rows = repo.list_recent(within=30)
+
+    assert [r.address for r in rows] == ["0xa", "0xb"]
