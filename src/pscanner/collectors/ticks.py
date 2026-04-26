@@ -13,6 +13,7 @@ Subscription scope = (assets held by watched wallets) U (active markets above
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextlib
 import time
 from dataclasses import dataclass, field
@@ -26,7 +27,7 @@ from pscanner.poly.clob_ws import MarketWebSocket
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.models import Position, WsBookMessage
-from pscanner.store.repo import MarketTick, MarketTicksRepo
+from pscanner.store.repo import CachedMarket, MarketCacheRepo, MarketTick, MarketTicksRepo
 
 _LOG = structlog.get_logger(__name__)
 
@@ -64,17 +65,33 @@ class MarketTickCollector:
         data_client: DataClient,
         registry: WatchlistRegistry,
         ticks_repo: MarketTicksRepo,
+        market_cache: MarketCacheRepo | None = None,
     ) -> None:
-        """Build the collector. See module docstring for behaviour."""
+        """Build the collector. See module docstring for behaviour.
+
+        Args:
+            config: Ticks-section settings (cadence, scope, caps).
+            ws: Owned ``MarketWebSocket`` connection.
+            gamma_client: Source of active markets for the volume-floor scope.
+            data_client: Source of wallet positions for the wallet scope.
+            registry: Watchlist registry naming the wallets to follow.
+            ticks_repo: Persistence for the per-asset tick rows.
+            market_cache: Optional repo used to resolve ``asset_id`` →
+                :class:`CachedMarket` for downstream detector enrichment. When
+                ``None``, ``get_market_for_asset`` always returns ``None``.
+        """
         self._config = config
         self._ws = ws
         self._gamma = gamma_client
         self._data = data_client
         self._registry = registry
         self._repo = ticks_repo
+        self._market_cache = market_cache
         self._books: dict[str, _Orderbook] = {}
         self._asset_to_condition: dict[str, str] = {}
         self._mid_history: dict[str, list[tuple[int, float]]] = {}
+        self._tick_history: dict[str, collections.deque[MarketTick]] = {}
+        self._asset_to_market: dict[str, CachedMarket] = {}
         self._subscribed: set[str] = set()
         self._lock = asyncio.Lock()
 
@@ -193,18 +210,40 @@ class MarketTickCollector:
         async for market in self._gamma.iter_markets(active=True, closed=False):
             if not market.enable_order_book:
                 continue
-            volume = market.volume or 0.0
-            if volume < floor:
+            if (market.volume or 0.0) < floor:
                 continue
-            for asset_id in market.clob_token_ids:
-                if not asset_id:
-                    continue
-                assets.add(asset_id)
-                if market.condition_id:
-                    lookup[asset_id] = market.condition_id
+            self._ingest_market(market, assets=assets, lookup=lookup)
             if existing_count + len(assets) >= cap:
                 break
         return assets, lookup
+
+    def _ingest_market(
+        self,
+        market: Any,
+        *,
+        assets: set[str],
+        lookup: dict[str, str],
+    ) -> None:
+        """Add ``market``'s clob token ids to ``assets`` + side maps."""
+        cached = self._lookup_cached_market(market.id)
+        for asset_id in market.clob_token_ids:
+            if not asset_id:
+                continue
+            assets.add(asset_id)
+            if market.condition_id:
+                lookup[asset_id] = market.condition_id
+            if cached is not None:
+                self._asset_to_market[asset_id] = cached
+
+    def _lookup_cached_market(self, market_id: str) -> CachedMarket | None:
+        """Return the cached market for ``market_id`` or ``None`` if unwired."""
+        if self._market_cache is None or not market_id:
+            return None
+        try:
+            return self._market_cache.get(market_id)
+        except Exception:
+            _LOG.exception("ticks.market_cache_lookup_failed", market_id=market_id)
+            return None
 
     def _cap_target(
         self,
@@ -401,8 +440,10 @@ class MarketTickCollector:
         except Exception:
             _LOG.exception("ticks.insert_failed", asset_id=asset_id)
             return False
-        if inserted and mid is not None:
-            self._record_mid_history(asset_id, snapshot_at=snapshot_at, mid=mid)
+        if inserted:
+            self._record_tick_history(asset_id, tick=tick)
+            if mid is not None:
+                self._record_mid_history(asset_id, snapshot_at=snapshot_at, mid=mid)
         return inserted
 
     def _record_mid_history(self, asset_id: str, *, snapshot_at: int, mid: float) -> None:
@@ -411,6 +452,14 @@ class MarketTickCollector:
         history.append((snapshot_at, mid))
         if len(history) > _MID_HISTORY_CAP:
             del history[: len(history) - _MID_HISTORY_CAP]
+
+    def _record_tick_history(self, asset_id: str, *, tick: MarketTick) -> None:
+        """Append a full ``MarketTick`` row to the asset's tick ring buffer."""
+        history = self._tick_history.get(asset_id)
+        if history is None:
+            history = collections.deque(maxlen=_MID_HISTORY_CAP)
+            self._tick_history[asset_id] = history
+        history.append(tick)
 
     def get_recent_mids(
         self,
@@ -434,6 +483,47 @@ class MarketTickCollector:
         cutoff = now - window_seconds
         history = self._mid_history.get(asset_id, [])
         return [(ts, mid) for ts, mid in history if ts > cutoff]
+
+    def get_recent_ticks(
+        self,
+        asset_id: str,
+        *,
+        window_seconds: int,
+    ) -> list[MarketTick]:
+        """Return ``MarketTick`` rows for ``asset_id`` within the trailing window.
+
+        FROZEN API: detectors call this to apply liquidity-aware filters that
+        need full tick fields (depth, spread) rather than just the mid pair.
+
+        Args:
+            asset_id: CLOB token id.
+            window_seconds: Inclusive trailing window length (seconds).
+
+        Returns:
+            ``MarketTick`` rows ordered by ``snapshot_at`` ascending.
+        """
+        now = int(time.time())
+        cutoff = now - window_seconds
+        history = self._tick_history.get(asset_id)
+        if history is None:
+            return []
+        return [tick for tick in history if tick.snapshot_at > cutoff]
+
+    def get_market_for_asset(self, asset_id: str) -> CachedMarket | None:
+        """Return the cached market for ``asset_id`` or ``None`` if unknown.
+
+        FROZEN API: detectors call this to enrich alerts with market metadata
+        without paying a fresh lookup. Populated during ``_refresh_subscriptions``
+        from the volume-floor market iteration.
+
+        Args:
+            asset_id: CLOB token id.
+
+        Returns:
+            The mapped :class:`CachedMarket`, or ``None`` if no mapping exists
+            (asset unknown, market cache not wired, or wallet-only asset).
+        """
+        return self._asset_to_market.get(asset_id)
 
     def subscribed_asset_ids(self) -> set[str]:
         """Return a copy of the currently-subscribed asset id set."""

@@ -82,3 +82,5 @@ enabled = true
 velocity_threshold_pct = 0.05
 velocity_window_seconds = 60
 poll_interval_seconds = 5
+depth_asymmetry_floor = 0.05
+min_mid_liquidity_usd = 100

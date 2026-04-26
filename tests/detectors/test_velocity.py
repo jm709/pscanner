@@ -16,6 +16,7 @@ import pytest
 from pscanner.alerts.models import Alert
 from pscanner.config import VelocityConfig
 from pscanner.detectors.velocity import PriceVelocityDetector
+from pscanner.store.repo import CachedMarket, MarketTick
 
 
 def _capturing_sink() -> tuple[AsyncMock, list[Alert]]:
@@ -31,25 +32,67 @@ def _capturing_sink() -> tuple[AsyncMock, list[Alert]]:
     return sink, captured
 
 
+def _balanced_tick(
+    *,
+    bid_depth: float = 1000.0,
+    ask_depth: float = 1000.0,
+    mid: float = 0.5,
+    snapshot_at: int = 130,
+) -> MarketTick:
+    """Build a ``MarketTick`` with balanced, liquid depth that passes filters."""
+    return MarketTick(
+        asset_id="A1",
+        condition_id="0xcond",
+        snapshot_at=snapshot_at,
+        mid_price=mid,
+        best_bid=mid - 0.01,
+        best_ask=mid + 0.01,
+        spread=0.02,
+        bid_depth_top5=bid_depth,
+        ask_depth_top5=ask_depth,
+        last_trade_price=mid,
+    )
+
+
+def _ticks_mock_with_defaults(
+    *,
+    mids: list[tuple[int, float]] | None = None,
+    tick: MarketTick | None = None,
+    market: CachedMarket | None = None,
+) -> MagicMock:
+    """Build a tick-collector mock with balanced depth + no market by default."""
+    mock = MagicMock()
+    mock.get_recent_mids.return_value = mids if mids is not None else [(100, 0.40), (130, 0.46)]
+    mock.get_recent_ticks.return_value = [tick if tick is not None else _balanced_tick()]
+    mock.get_market_for_asset.return_value = market
+    return mock
+
+
 def _make_detector(
     *,
     threshold: float = 0.05,
     window: int = 60,
     poll_interval: float = 5.0,
+    depth_asymmetry_floor: float = 0.05,
+    min_mid_liquidity_usd: float = 100.0,
     ticks: MagicMock | None = None,
     market_cache: MagicMock | None = None,
 ) -> tuple[PriceVelocityDetector, MagicMock, MagicMock]:
     """Build a detector wired to mocked collaborators.
 
     Returns ``(detector, ticks_mock, market_cache_mock)`` so tests can assert
-    on call args after driving the detector.
+    on call args after driving the detector. When ``ticks`` is ``None``, the
+    helper installs a tick mock that returns balanced depth and a 15% move so
+    the happy-path defaults emit an alert.
     """
-    ticks_mock = ticks if ticks is not None else MagicMock()
+    ticks_mock = ticks if ticks is not None else _ticks_mock_with_defaults()
     cache_mock = market_cache if market_cache is not None else MagicMock()
     config = VelocityConfig(
         velocity_threshold_pct=threshold,
         velocity_window_seconds=window,
         poll_interval_seconds=poll_interval,
+        depth_asymmetry_floor=depth_asymmetry_floor,
+        min_mid_liquidity_usd=min_mid_liquidity_usd,
     )
     detector = PriceVelocityDetector(
         config=config,
@@ -61,8 +104,7 @@ def _make_detector(
 
 async def test_six_percent_move_emits_med_alert() -> None:
     """6% move > 5% threshold but ≤ 2x threshold → med severity."""
-    ticks = MagicMock()
-    ticks.get_recent_mids.return_value = [(100, 0.50), (130, 0.53)]
+    ticks = _ticks_mock_with_defaults(mids=[(100, 0.50), (130, 0.53)])
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
@@ -83,8 +125,7 @@ async def test_six_percent_move_emits_med_alert() -> None:
 
 async def test_fifteen_percent_move_emits_high_alert() -> None:
     """15% move > 2x 5% threshold → high severity."""
-    ticks = MagicMock()
-    ticks.get_recent_mids.return_value = [(100, 0.40), (130, 0.46)]
+    ticks = _ticks_mock_with_defaults(mids=[(100, 0.40), (130, 0.46)])
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
@@ -98,8 +139,7 @@ async def test_fifteen_percent_move_emits_high_alert() -> None:
 
 async def test_move_within_threshold_does_not_alert() -> None:
     """2% move below 5% threshold → no alert."""
-    ticks = MagicMock()
-    ticks.get_recent_mids.return_value = [(100, 0.50), (130, 0.51)]
+    ticks = _ticks_mock_with_defaults(mids=[(100, 0.50), (130, 0.51)])
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
@@ -111,8 +151,7 @@ async def test_move_within_threshold_does_not_alert() -> None:
 
 async def test_negative_move_triggers_high_severity() -> None:
     """A 20% drop is > 2x threshold and registers as high with negative change."""
-    ticks = MagicMock()
-    ticks.get_recent_mids.return_value = [(100, 0.50), (130, 0.40)]
+    ticks = _ticks_mock_with_defaults(mids=[(100, 0.50), (130, 0.40)])
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
@@ -127,8 +166,7 @@ async def test_negative_move_triggers_high_severity() -> None:
 
 
 async def test_fewer_than_two_mids_does_not_alert() -> None:
-    ticks = MagicMock()
-    ticks.get_recent_mids.return_value = [(100, 0.40)]
+    ticks = _ticks_mock_with_defaults(mids=[(100, 0.40)])
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
@@ -139,8 +177,7 @@ async def test_fewer_than_two_mids_does_not_alert() -> None:
 
 
 async def test_empty_mids_does_not_alert() -> None:
-    ticks = MagicMock()
-    ticks.get_recent_mids.return_value = []
+    ticks = _ticks_mock_with_defaults(mids=[])
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
@@ -151,8 +188,7 @@ async def test_empty_mids_does_not_alert() -> None:
 
 async def test_zero_start_price_does_not_alert() -> None:
     """Degenerate start_price avoids division by zero — no alert, no error."""
-    ticks = MagicMock()
-    ticks.get_recent_mids.return_value = [(100, 0.0), (130, 0.42)]
+    ticks = _ticks_mock_with_defaults(mids=[(100, 0.0), (130, 0.42)])
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
@@ -164,7 +200,7 @@ async def test_zero_start_price_does_not_alert() -> None:
 
 async def test_alert_key_uses_60s_bucket() -> None:
     """Two evaluations within the same 60s bucket share the alert_key."""
-    ticks = MagicMock()
+    ticks = _ticks_mock_with_defaults()
     ticks.get_recent_mids.side_effect = [
         [(100, 0.40), (130, 0.46)],
         [(100, 0.40), (155, 0.46)],
@@ -182,7 +218,7 @@ async def test_alert_key_uses_60s_bucket() -> None:
 
 async def test_alert_keys_distinct_across_buckets() -> None:
     """Evaluations in different 60s buckets produce different keys."""
-    ticks = MagicMock()
+    ticks = _ticks_mock_with_defaults()
     ticks.get_recent_mids.side_effect = [
         [(100, 0.40), (130, 0.46)],
         [(100, 0.40), (200, 0.46)],
@@ -199,7 +235,7 @@ async def test_alert_keys_distinct_across_buckets() -> None:
 
 async def test_per_asset_isolation() -> None:
     """Alerts for distinct asset ids carry distinct keys and metadata."""
-    ticks = MagicMock()
+    ticks = _ticks_mock_with_defaults()
 
     def _by_asset(asset_id: str, *, window_seconds: int) -> list[tuple[int, float]]:
         del window_seconds
@@ -226,9 +262,8 @@ async def test_per_asset_isolation() -> None:
 
 async def test_run_polls_all_subscribed_assets_then_cancels() -> None:
     """``run`` iterates every subscribed asset and exits cleanly on cancel."""
-    ticks = MagicMock()
+    ticks = _ticks_mock_with_defaults(mids=[(100, 0.40), (130, 0.41)])
     ticks.subscribed_asset_ids.return_value = {"A1", "A2"}
-    ticks.get_recent_mids.return_value = [(100, 0.40), (130, 0.41)]
     detector, _, _ = _make_detector(ticks=ticks, poll_interval=0.05)
     sink, _ = _capturing_sink()
 
@@ -274,3 +309,128 @@ async def test_run_swallows_evaluate_exceptions() -> None:
         await task
 
     assert call_count >= 3
+
+
+async def test_alert_skipped_on_depth_asymmetry() -> None:
+    """Lopsided book depth (ratio < ``depth_asymmetry_floor``) suppresses alerts."""
+    tick = _balanced_tick(bid_depth=1_000_000.0, ask_depth=500.0)
+    ticks = _ticks_mock_with_defaults(
+        mids=[(100, 0.40), (130, 0.46)],  # +15% — well above threshold
+        tick=tick,
+    )
+    detector, _, _ = _make_detector(ticks=ticks)
+    sink, captured = _capturing_sink()
+
+    await detector.evaluate_asset("A1", sink)
+
+    assert captured == []
+    sink.emit.assert_not_called()
+
+
+async def test_alert_skipped_on_insufficient_usd_depth() -> None:
+    """``min_side * mid`` below ``min_mid_liquidity_usd`` suppresses alerts."""
+    # bid=ask=50 shares, mid=0.5 → 25 USD per side, below the 100 USD floor.
+    tick = _balanced_tick(bid_depth=50.0, ask_depth=50.0, mid=0.5)
+    ticks = _ticks_mock_with_defaults(
+        mids=[(100, 0.40), (130, 0.46)],
+        tick=tick,
+    )
+    detector, _, _ = _make_detector(ticks=ticks)
+    sink, captured = _capturing_sink()
+
+    await detector.evaluate_asset("A1", sink)
+
+    assert captured == []
+    sink.emit.assert_not_called()
+
+
+async def test_alert_skipped_when_recent_ticks_empty() -> None:
+    """Empty tick history disables the filter check and suppresses the alert."""
+    ticks = _ticks_mock_with_defaults(mids=[(100, 0.40), (130, 0.46)])
+    ticks.get_recent_ticks.return_value = []
+    detector, _, _ = _make_detector(ticks=ticks)
+    sink, captured = _capturing_sink()
+
+    await detector.evaluate_asset("A1", sink)
+
+    assert captured == []
+
+
+async def test_alert_skipped_when_depth_fields_missing() -> None:
+    """A latest tick with NULL depth fields cannot be qualified — skip."""
+    tick = MarketTick(
+        asset_id="A1",
+        condition_id="0xcond",
+        snapshot_at=130,
+        mid_price=0.5,
+        best_bid=0.49,
+        best_ask=0.51,
+        spread=0.02,
+        bid_depth_top5=None,
+        ask_depth_top5=None,
+        last_trade_price=0.5,
+    )
+    ticks = _ticks_mock_with_defaults(mids=[(100, 0.40), (130, 0.46)], tick=tick)
+    detector, _, _ = _make_detector(ticks=ticks)
+    sink, captured = _capturing_sink()
+
+    await detector.evaluate_asset("A1", sink)
+
+    assert captured == []
+
+
+async def test_alert_emitted_with_balanced_depth() -> None:
+    """Balanced 1000-share depth at mid=0.5 (500 USD/side) clears every filter."""
+    tick = _balanced_tick(bid_depth=1000.0, ask_depth=1000.0, mid=0.5)
+    ticks = _ticks_mock_with_defaults(
+        mids=[(100, 0.40), (130, 0.46)],
+        tick=tick,
+    )
+    detector, _, _ = _make_detector(ticks=ticks)
+    sink, captured = _capturing_sink()
+
+    await detector.evaluate_asset("A1", sink)
+
+    assert len(captured) == 1
+    assert captured[0].body["change_pct"] == pytest.approx(0.15)
+
+
+async def test_alert_body_includes_market_metadata() -> None:
+    """``market_title`` and ``condition_id`` propagate into the alert body."""
+    market = CachedMarket(
+        market_id="m1",
+        event_id=None,
+        title="Foo",
+        liquidity_usd=None,
+        volume_usd=None,
+        outcome_prices=[0.5, 0.5],
+        active=True,
+        cached_at=0,
+        condition_id="0xCOND",
+        event_slug=None,
+    )
+    ticks = _ticks_mock_with_defaults(market=market)
+    detector, _, _ = _make_detector(ticks=ticks)
+    sink, captured = _capturing_sink()
+
+    await detector.evaluate_asset("A1", sink)
+
+    assert len(captured) == 1
+    body = captured[0].body
+    assert body["market_title"] == "Foo"
+    assert body["condition_id"] == "0xCOND"
+    ticks.get_market_for_asset.assert_called_once_with("A1")
+
+
+async def test_alert_body_handles_missing_market() -> None:
+    """A wallet-only / unknown asset still alerts with ``None`` metadata."""
+    ticks = _ticks_mock_with_defaults(market=None)
+    detector, _, _ = _make_detector(ticks=ticks)
+    sink, captured = _capturing_sink()
+
+    await detector.evaluate_asset("A1", sink)
+
+    assert len(captured) == 1
+    body = captured[0].body
+    assert body["market_title"] is None
+    assert body["condition_id"] is None
