@@ -180,6 +180,13 @@ class VelocityConfig(_Section):
     ``min(bid_depth, ask_depth) / max(bid_depth, ask_depth)`` against the
     floor; the second requires ``min(bid_depth, ask_depth) * mid`` to clear
     the USD floor on both sides.
+
+    ``spread_compression_floor`` separates real price-discovery moves from
+    quote-consolidation events: when ``spread_before / spread_after`` over the
+    window exceeds the floor, the move is dominated by a market-maker
+    tightening a stale book rather than directional flow. Alerts are still
+    emitted but demoted to ``low`` severity with ``consolidation=True`` in the
+    body so backtesting can study the transition.
     """
 
     enabled: bool = True
@@ -188,6 +195,7 @@ class VelocityConfig(_Section):
     poll_interval_seconds: float = 5.0
     depth_asymmetry_floor: float = 0.05
     min_mid_liquidity_usd: float = 100.0
+    spread_compression_floor: float = 5.0
 
 
 class Config(BaseModel):

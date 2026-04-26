@@ -92,3 +92,4 @@ velocity_window_seconds = 60
 poll_interval_seconds = 5
 depth_asymmetry_floor = 0.05
 min_mid_liquidity_usd = 100
+spread_compression_floor = 5

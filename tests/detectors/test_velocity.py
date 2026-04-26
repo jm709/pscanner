@@ -3,21 +3,27 @@
 The detector is exercised against ``MagicMock`` stand-ins for the tick
 collector and market-cache repo — no SQLite, no network. The async sink is
 captured with an ``AsyncMock`` whose ``emit`` side-effect appends to a list.
+
+A handful of tests use a real ``AlertSink`` + ``AlertsRepo`` against an
+in-memory SQLite database (via the ``tmp_db`` fixture) to verify that the
+alert_key dedupe path collapses YES/NO pairs into a single row.
 """
 
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from pscanner.alerts.models import Alert
+from pscanner.alerts.sink import AlertSink
 from pscanner.config import VelocityConfig
 from pscanner.detectors.velocity import PriceVelocityDetector
 from pscanner.poly.ids import AssetId, ConditionId, MarketId
-from pscanner.store.repo import CachedMarket, MarketTick
+from pscanner.store.repo import AlertsRepo, CachedMarket, MarketTick
 
 
 def _capturing_sink() -> tuple[AsyncMock, list[Alert]]:
@@ -39,6 +45,7 @@ def _balanced_tick(
     ask_depth: float = 1000.0,
     mid: float = 0.5,
     snapshot_at: int = 130,
+    spread: float | None = 0.02,
 ) -> MarketTick:
     """Build a ``MarketTick`` with balanced, liquid depth that passes filters."""
     return MarketTick(
@@ -48,7 +55,7 @@ def _balanced_tick(
         mid_price=mid,
         best_bid=mid - 0.01,
         best_ask=mid + 0.01,
-        spread=0.02,
+        spread=spread,
         bid_depth_top5=bid_depth,
         ask_depth_top5=ask_depth,
         last_trade_price=mid,
@@ -59,12 +66,24 @@ def _ticks_mock_with_defaults(
     *,
     mids: list[tuple[int, float]] | None = None,
     tick: MarketTick | None = None,
+    ticks: list[MarketTick] | None = None,
     market: CachedMarket | None = None,
 ) -> MagicMock:
-    """Build a tick-collector mock with balanced depth + no market by default."""
+    """Build a tick-collector mock with balanced depth + no market by default.
+
+    ``tick`` overrides the latest-tick history (a single-element list).
+    ``ticks`` overrides the full window for consolidation classifier tests.
+    Pass at most one of the two.
+    """
+    if tick is not None and ticks is not None:
+        msg = "pass either tick or ticks, not both"
+        raise ValueError(msg)
     mock = MagicMock()
     mock.get_recent_mids.return_value = mids if mids is not None else [(100, 0.40), (130, 0.46)]
-    mock.get_recent_ticks.return_value = [tick if tick is not None else _balanced_tick()]
+    if ticks is not None:
+        mock.get_recent_ticks.return_value = ticks
+    else:
+        mock.get_recent_ticks.return_value = [tick if tick is not None else _balanced_tick()]
     mock.get_market_for_asset.return_value = market
     return mock
 
@@ -435,3 +454,154 @@ async def test_alert_body_handles_missing_market() -> None:
     body = captured[0].body
     assert body["market_title"] is None
     assert body["condition_id"] is None
+
+
+def _make_cached_market(condition_id: str, *, market_id: str = "m1") -> CachedMarket:
+    """Build a minimal ``CachedMarket`` whose only meaningful field is ``condition_id``."""
+    return CachedMarket(
+        market_id=MarketId(market_id),
+        event_id=None,
+        title="Binary market",
+        liquidity_usd=None,
+        volume_usd=None,
+        outcome_prices=[0.5, 0.5],
+        active=True,
+        cached_at=0,
+        condition_id=ConditionId(condition_id),
+        event_slug=None,
+    )
+
+
+async def test_alert_key_uses_condition_id_when_available() -> None:
+    """Binary YES/NO velocity alerts share an alert_key by ``condition_id``."""
+    market = _make_cached_market("0xCOND")
+    ticks = _ticks_mock_with_defaults(market=market)
+    detector, _, _ = _make_detector(ticks=ticks)
+    sink, captured = _capturing_sink()
+
+    await detector.evaluate_asset(AssetId("A1"), sink)
+
+    assert len(captured) == 1
+    assert captured[0].alert_key == "velocity:0xCOND:2"  # 130 // 60 == 2
+
+
+async def test_alert_key_falls_back_to_asset_id_when_market_missing() -> None:
+    """When the market cache has not populated, fall back to asset-keyed format."""
+    ticks = _ticks_mock_with_defaults(market=None)
+    detector, _, _ = _make_detector(ticks=ticks)
+    sink, captured = _capturing_sink()
+
+    await detector.evaluate_asset(AssetId("A1"), sink)
+
+    assert len(captured) == 1
+    assert captured[0].alert_key == "velocity:A1:2"
+
+
+async def test_yes_no_dedupe_via_alerts_repo(tmp_db: sqlite3.Connection) -> None:
+    """YES + NO alerts on the same condition_id within one bucket → one row.
+
+    Wires a real ``AlertSink`` + ``AlertsRepo`` so the dedupe path runs through
+    the SQLite ``INSERT OR IGNORE`` PK conflict on ``alert_key``. After both
+    detector evaluations the table holds exactly one row keyed by
+    ``condition_id``, and the post-insert subscriber fired only once (proof
+    the second emit hit the dedupe path and returned ``False``).
+    """
+    market = _make_cached_market("0xCOND")
+    ticks = _ticks_mock_with_defaults(market=market)
+    ticks.get_recent_mids.side_effect = [
+        [(100, 0.40), (130, 0.46)],  # YES side, +15%
+        [(100, 0.60), (130, 0.50)],  # NO side, opposite move, same end_ts bucket
+    ]
+    detector, _, _ = _make_detector(ticks=ticks)
+
+    sink = AlertSink(AlertsRepo(tmp_db))
+    forwarded: list[Alert] = []
+    sink.subscribe(forwarded.append)
+
+    await detector.evaluate_asset(AssetId("A_YES"), sink)
+    await detector.evaluate_asset(AssetId("A_NO"), sink)
+
+    rows = tmp_db.execute("SELECT alert_key FROM alerts").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["alert_key"] == "velocity:0xCOND:2"
+    # Subscribers only fire on newly-inserted alerts; second emit was a dedupe hit.
+    assert len(forwarded) == 1
+
+
+async def test_consolidation_demotes_to_low_severity() -> None:
+    """Spread compresses 307x (Youngkin shape) → severity demoted to ``low``."""
+    first = _balanced_tick(snapshot_at=70, spread=0.92)
+    last = _balanced_tick(snapshot_at=130, spread=0.003)
+    ticks = _ticks_mock_with_defaults(
+        mids=[(100, 0.40), (130, 0.46)],  # +15% would normally be high
+        ticks=[first, last],
+    )
+    detector, _, _ = _make_detector(ticks=ticks)
+    sink, captured = _capturing_sink()
+
+    await detector.evaluate_asset(AssetId("A1"), sink)
+
+    assert len(captured) == 1
+    alert = captured[0]
+    assert alert.severity == "low"
+    assert alert.body["consolidation"] is True
+    assert alert.body["spread_ratio"] == pytest.approx(306.7, abs=0.5)
+    assert alert.body["spread_before"] == pytest.approx(0.92)
+    assert alert.body["spread_after"] == pytest.approx(0.003)
+
+
+async def test_real_move_is_not_consolidation() -> None:
+    """Spread ratio 1.25x is below the 5.0 floor → severity follows magnitude."""
+    first = _balanced_tick(snapshot_at=70, spread=0.05)
+    last = _balanced_tick(snapshot_at=130, spread=0.04)
+    ticks = _ticks_mock_with_defaults(
+        mids=[(100, 0.40), (130, 0.46)],  # +15% — high severity
+        ticks=[first, last],
+    )
+    detector, _, _ = _make_detector(ticks=ticks)
+    sink, captured = _capturing_sink()
+
+    await detector.evaluate_asset(AssetId("A1"), sink)
+
+    assert len(captured) == 1
+    alert = captured[0]
+    assert alert.severity == "high"
+    assert alert.body["consolidation"] is False
+    assert "spread_ratio" not in alert.body
+
+
+async def test_zero_last_spread_does_not_raise() -> None:
+    """A latest tick with ``spread=0`` cannot be classified — treat as not consolidation."""
+    first = _balanced_tick(snapshot_at=70, spread=0.05)
+    last = _balanced_tick(snapshot_at=130, spread=0.0)
+    ticks = _ticks_mock_with_defaults(
+        mids=[(100, 0.40), (130, 0.46)],
+        ticks=[first, last],
+    )
+    detector, _, _ = _make_detector(ticks=ticks)
+    sink, captured = _capturing_sink()
+
+    await detector.evaluate_asset(AssetId("A1"), sink)
+
+    assert len(captured) == 1
+    alert = captured[0]
+    assert alert.severity == "high"
+    assert alert.body["consolidation"] is False
+
+
+async def test_single_tick_history_skips_consolidation() -> None:
+    """One tick in the window → cannot compute ratio → not consolidation."""
+    only = _balanced_tick(snapshot_at=130, spread=0.003)
+    ticks = _ticks_mock_with_defaults(
+        mids=[(100, 0.40), (130, 0.46)],
+        ticks=[only],
+    )
+    detector, _, _ = _make_detector(ticks=ticks)
+    sink, captured = _capturing_sink()
+
+    await detector.evaluate_asset(AssetId("A1"), sink)
+
+    assert len(captured) == 1
+    alert = captured[0]
+    assert alert.severity == "high"
+    assert alert.body["consolidation"] is False
