@@ -1,9 +1,13 @@
 """Tests for ``WhalesDetector`` (DC-1.5 callback-driven).
 
-These exercise :meth:`WhalesDetector.handle_trade` directly with synthesised
+These exercise :meth:`WhalesDetector.evaluate` directly with synthesised
 ``WalletTrade`` objects and verify :meth:`_refresh_market_cache` populates
 the in-memory ``condition_id -> CachedMarket`` map. All collaborators are
 stubbed in-process — no network, no SQLite.
+
+Shared trade-callback plumbing (``handle_trade_sync`` task tracking, the
+defensive ``_sink``-unwired short-circuit on the base class) is covered
+once in :mod:`tests.detectors.test_trade_driven`.
 """
 
 from __future__ import annotations
@@ -228,14 +232,14 @@ def _make_detector(
 
 
 @pytest.mark.asyncio
-async def test_handle_trade_emits_when_thresholds_met() -> None:
+async def test_evaluate_emits_when_thresholds_met() -> None:
     sink = CapturingSink()
     market_cache = StubMarketCache({_MARKET_ID: _make_cached_market()})
     first_seen = StubFirstSeen({_WALLET: _make_first_seen()})
     detector = _make_detector(market_cache=market_cache, first_seen=first_seen, sink=sink)
 
     trade = _make_trade(size=4000.0, price=1.0, usd_value=4000.0)
-    await detector.handle_trade(trade)
+    await detector.evaluate(trade)
 
     assert len(sink.alerts) == 1
     alert = sink.alerts[0]
@@ -246,66 +250,55 @@ async def test_handle_trade_emits_when_thresholds_met() -> None:
 
 
 @pytest.mark.asyncio
-async def test_handle_trade_skips_aged_wallet() -> None:
+async def test_evaluate_skips_aged_wallet() -> None:
     sink = CapturingSink()
     market_cache = StubMarketCache({_MARKET_ID: _make_cached_market()})
     aged_seen = _make_first_seen(first_activity_at=_NOW - 60 * 86400)
     first_seen = StubFirstSeen({_WALLET: aged_seen})
     detector = _make_detector(market_cache=market_cache, first_seen=first_seen, sink=sink)
 
-    await detector.handle_trade(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
+    await detector.evaluate(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
 
     assert sink.alerts == []
 
 
 @pytest.mark.asyncio
-async def test_handle_trade_skips_when_usd_below_min() -> None:
+async def test_evaluate_skips_when_usd_below_min() -> None:
     sink = CapturingSink()
     market_cache = StubMarketCache({_MARKET_ID: _make_cached_market()})
     first_seen = StubFirstSeen({_WALLET: _make_first_seen()})
     detector = _make_detector(market_cache=market_cache, first_seen=first_seen, sink=sink)
 
-    await detector.handle_trade(_make_trade(size=10.0, price=0.10, usd_value=1.0))
+    await detector.evaluate(_make_trade(size=10.0, price=0.10, usd_value=1.0))
 
     assert sink.alerts == []
 
 
 @pytest.mark.asyncio
-async def test_handle_trade_skips_when_market_too_liquid() -> None:
+async def test_evaluate_skips_when_market_too_liquid() -> None:
     sink = CapturingSink()
     big_market = _make_cached_market(liquidity_usd=200000.0)
     market_cache = StubMarketCache({_MARKET_ID: big_market})
     first_seen = StubFirstSeen({_WALLET: _make_first_seen()})
     detector = _make_detector(market_cache=market_cache, first_seen=first_seen, sink=sink)
 
-    await detector.handle_trade(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
+    await detector.evaluate(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
 
     assert sink.alerts == []
 
 
 @pytest.mark.asyncio
-async def test_handle_trade_skips_unknown_condition() -> None:
+async def test_evaluate_skips_unknown_condition() -> None:
     sink = CapturingSink()
     detector = _make_detector(sink=sink, seed_condition_map=False)
 
-    await detector.handle_trade(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
+    await detector.evaluate(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
 
     assert sink.alerts == []
 
 
 @pytest.mark.asyncio
-async def test_handle_trade_returns_when_sink_unwired() -> None:
-    """Defensive: a detector with no sink must return without raising."""
-    market_cache = StubMarketCache({_MARKET_ID: _make_cached_market()})
-    first_seen = StubFirstSeen({_WALLET: _make_first_seen()})
-    detector = _make_detector(market_cache=market_cache, first_seen=first_seen, sink=None)
-
-    # Should not raise.
-    await detector.handle_trade(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
-
-
-@pytest.mark.asyncio
-async def test_handle_trade_refreshes_when_first_seen_missing() -> None:
+async def test_evaluate_refreshes_when_first_seen_missing() -> None:
     sink = CapturingSink()
     market_cache = StubMarketCache({_MARKET_ID: _make_cached_market()})
     first_seen = StubFirstSeen()  # empty
@@ -320,7 +313,7 @@ async def test_handle_trade_refreshes_when_first_seen_missing() -> None:
         sink=sink,
     )
 
-    await detector.handle_trade(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
+    await detector.evaluate(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
 
     assert data.first_calls == [_WALLET]
     assert data.activity_calls == [(_WALLET, 200)]
@@ -330,7 +323,7 @@ async def test_handle_trade_refreshes_when_first_seen_missing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_handle_trade_refreshes_stale_cache() -> None:
+async def test_evaluate_refreshes_stale_cache() -> None:
     sink = CapturingSink()
     market_cache = StubMarketCache({_MARKET_ID: _make_cached_market()})
     # cached_at is 2 days ago — TTL is 1 day, so this row is stale.
@@ -347,7 +340,7 @@ async def test_handle_trade_refreshes_stale_cache() -> None:
         sink=sink,
     )
 
-    await detector.handle_trade(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
+    await detector.evaluate(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
 
     assert data.first_calls == [_WALLET]
     assert first_seen.upserts == [(_WALLET, _NOW - 5 * 86400, 9)]
@@ -355,7 +348,7 @@ async def test_handle_trade_refreshes_stale_cache() -> None:
 
 
 @pytest.mark.asyncio
-async def test_handle_trade_skips_when_first_activity_unknown() -> None:
+async def test_evaluate_skips_when_first_activity_unknown() -> None:
     sink = CapturingSink()
     market_cache = StubMarketCache({_MARKET_ID: _make_cached_market()})
     first_seen = StubFirstSeen()
@@ -367,39 +360,39 @@ async def test_handle_trade_skips_when_first_activity_unknown() -> None:
         sink=sink,
     )
 
-    await detector.handle_trade(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
+    await detector.evaluate(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
 
     assert sink.alerts == []
 
 
 @pytest.mark.asyncio
-async def test_handle_trade_skips_when_total_trades_exceeds_cap() -> None:
+async def test_evaluate_skips_when_total_trades_exceeds_cap() -> None:
     sink = CapturingSink()
     market_cache = StubMarketCache({_MARKET_ID: _make_cached_market()})
     seen = _make_first_seen(total_trades=999)
     first_seen = StubFirstSeen({_WALLET: seen})
     detector = _make_detector(market_cache=market_cache, first_seen=first_seen, sink=sink)
 
-    await detector.handle_trade(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
+    await detector.evaluate(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
 
     assert sink.alerts == []
 
 
 @pytest.mark.asyncio
-async def test_handle_trade_alert_key_falls_back_when_no_tx_hash() -> None:
+async def test_evaluate_alert_key_falls_back_when_no_tx_hash() -> None:
     sink = CapturingSink()
     market_cache = StubMarketCache({_MARKET_ID: _make_cached_market()})
     first_seen = StubFirstSeen({_WALLET: _make_first_seen()})
     detector = _make_detector(market_cache=market_cache, first_seen=first_seen, sink=sink)
 
     trade = _make_trade(size=4000.0, price=1.0, usd_value=4000.0, transaction_hash="")
-    await detector.handle_trade(trade)
+    await detector.evaluate(trade)
 
     assert sink.alerts[0].alert_key == f"whale:{_CONDITION_ID}:{_WALLET}:{_NOW}"
 
 
 @pytest.mark.asyncio
-async def test_handle_trade_severity_med_for_modest_bet() -> None:
+async def test_evaluate_severity_med_for_modest_bet() -> None:
     sink = CapturingSink()
     # Liquidity 50000 (right at the small-market boundary); usd=2500 -> 5% pct, < $10k abs.
     market = _make_cached_market(liquidity_usd=50000.0)
@@ -407,7 +400,7 @@ async def test_handle_trade_severity_med_for_modest_bet() -> None:
     first_seen = StubFirstSeen({_WALLET: _make_first_seen()})
     detector = _make_detector(market_cache=market_cache, first_seen=first_seen, sink=sink)
 
-    await detector.handle_trade(_make_trade(size=2500.0, price=1.0, usd_value=2500.0))
+    await detector.evaluate(_make_trade(size=2500.0, price=1.0, usd_value=2500.0))
 
     assert sink.alerts[0].severity == "med"
 
@@ -575,23 +568,6 @@ async def test_refresh_market_cache_skips_low_volume_markets() -> None:
 
     assert [m.id for m in market_cache.upserts] == ["m-busy"]
     assert set(detector._condition_to_market.keys()) == {"cond-busy"}
-
-
-@pytest.mark.asyncio
-async def test_handle_trade_sync_spawns_async_handler() -> None:
-    """``handle_trade_sync`` schedules ``handle_trade`` on the running loop."""
-    sink = CapturingSink()
-    market_cache = StubMarketCache({_MARKET_ID: _make_cached_market()})
-    first_seen = StubFirstSeen({_WALLET: _make_first_seen()})
-    detector = _make_detector(market_cache=market_cache, first_seen=first_seen, sink=sink)
-
-    detector.handle_trade_sync(_make_trade(size=4000.0, price=1.0, usd_value=4000.0))
-    # Drain the spawned task.
-    for _ in range(10):
-        await asyncio.sleep(0)
-
-    assert len(sink.alerts) == 1
-    assert not detector._pending_tasks
 
 
 @pytest.mark.asyncio

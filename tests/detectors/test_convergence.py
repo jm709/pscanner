@@ -1,13 +1,13 @@
 """Tests for ``ConvergenceDetector`` (DC-1.8.B).
 
-Exercise :meth:`ConvergenceDetector.evaluate` and the sync handler entry
-point with synthesised collaborators. All collaborators are stubbed
-in-process — no network, no SQLite.
+Exercise :meth:`ConvergenceDetector.evaluate` with synthesised collaborators.
+All collaborators are stubbed in-process — no network, no SQLite. Shared
+trade-callback plumbing (``handle_trade_sync`` task tracking, ``run``
+parking) is covered once in :mod:`tests.detectors.test_trade_driven`.
 """
 
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import Any
 
@@ -332,73 +332,3 @@ async def test_window_filter_excludes_old_co_traders() -> None:
     assert sink.alerts == []
     # Verify the detector queried the trades repo with the thesis window.
     assert trades_repo.distinct_calls == [(_CONDITION_ID, trade.timestamp - 48 * 3600)]
-
-
-async def test_run_stores_sink_and_blocks_until_cancelled() -> None:
-    sink = CapturingSink()
-    detector = _make_detector()
-
-    task = asyncio.create_task(detector.run(sink))  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
-    for _ in range(5):
-        await asyncio.sleep(0)
-
-    assert detector._sink is sink
-
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-
-async def test_handle_trade_sync_spawns_and_tracks_task() -> None:
-    sink = CapturingSink()
-    cached = _make_cached_market()
-    market_cache = StubMarketCache({_CONDITION_ID: cached})
-    event_tag_cache = StubEventTagCache({_EVENT_SLUG: ["Politics"]})
-    category_repo = StubCategoryRepo(
-        {"thesis": [_make_category_row(_TRADER), _make_category_row(_OTHER_WALLET)]},
-    )
-    trades_repo = StubTradesRepo(
-        distinct_by_condition={_CONDITION_ID: {_TRADER, _OTHER_WALLET}},
-    )
-    detector = _make_detector(
-        market_cache=market_cache,
-        event_tag_cache=event_tag_cache,
-        category_repo=category_repo,
-        trades_repo=trades_repo,
-        sink=sink,
-    )
-
-    detector.handle_trade_sync(_make_trade())
-    # Immediately after scheduling, the pending-task set must hold the new task.
-    assert len(detector._pending_tasks) == 1
-
-    # Drain.
-    for _ in range(10):
-        await asyncio.sleep(0)
-
-    assert detector._pending_tasks == set()
-    assert len(sink.alerts) == 1
-
-
-async def test_evaluate_without_sink_does_not_crash_and_does_not_emit() -> None:
-    """Defensive: evaluate must short-circuit when ``_sink`` is unwired."""
-    cached = _make_cached_market()
-    market_cache = StubMarketCache({_CONDITION_ID: cached})
-    event_tag_cache = StubEventTagCache({_EVENT_SLUG: ["Politics"]})
-    category_repo = StubCategoryRepo(
-        {"thesis": [_make_category_row(_TRADER), _make_category_row(_OTHER_WALLET)]},
-    )
-    trades_repo = StubTradesRepo(
-        distinct_by_condition={_CONDITION_ID: {_TRADER, _OTHER_WALLET}},
-    )
-    detector = _make_detector(
-        market_cache=market_cache,
-        event_tag_cache=event_tag_cache,
-        category_repo=category_repo,
-        trades_repo=trades_repo,
-        sink=None,
-    )
-
-    # Must not raise.
-    await detector.evaluate(_make_trade())
-    assert detector._sink is None

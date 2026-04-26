@@ -2,7 +2,7 @@
 
 DC-1.8.B. The detector is driven by :class:`TradeCollector` callbacks: every
 freshly-inserted ``wallet_trades`` row triggers
-:meth:`ConvergenceDetector.handle_trade_sync`, which spawns
+:meth:`TradeDrivenDetector.handle_trade_sync`, which spawns
 :meth:`ConvergenceDetector.evaluate` on the running event loop.
 
 Logic:
@@ -24,14 +24,13 @@ Alerts dedupe per ``condition_id`` per UTC day via the alert key.
 
 from __future__ import annotations
 
-import asyncio
 import time
 
 import structlog
 
 from pscanner.alerts.models import Alert, Severity
-from pscanner.alerts.sink import AlertSink
 from pscanner.config import ConvergenceConfig, SmartMoneyConfig
+from pscanner.detectors.trade_driven import TradeDrivenDetector
 from pscanner.store.repo import (
     CachedMarket,
     EventTagCacheRepo,
@@ -48,7 +47,7 @@ _KNOWN_CATEGORIES: tuple[str, ...] = ("thesis", "sports", "esports")
 _MIN_EXCESS_PNL_FOR_ROSTER = 0.0
 
 
-class ConvergenceDetector:
+class ConvergenceDetector(TradeDrivenDetector):
     """Detector that emits alerts when smart wallets cluster on a condition."""
 
     name = "convergence"
@@ -75,48 +74,13 @@ class ConvergenceDetector:
             smart_money_config: Source of ``category_min_edge`` thresholds
                 applied when reading the per-category roster.
         """
+        super().__init__()
         self._config = config
         self._trades_repo = trades_repo
         self._category_repo = category_repo
         self._market_cache = market_cache
         self._event_tag_cache = event_tag_cache
         self._smart_config = smart_money_config
-        self._sink: AlertSink | None = None
-        self._pending_tasks: set[asyncio.Task[None]] = set()
-
-    async def run(self, sink: AlertSink) -> None:
-        """Long-running stub: store the sink and block until cancelled.
-
-        Convergence has no periodic work — every evaluation is driven by a
-        trade-collector callback. The :class:`Detector` protocol still expects
-        a long-running coroutine, so we record the sink (defensively, in case
-        the scheduler did not pre-wire it via ``_wire_trade_callbacks``) and
-        wait forever.
-
-        Args:
-            sink: Shared alert sink used by :meth:`evaluate` for emission.
-        """
-        if self._sink is None:
-            self._sink = sink
-        await asyncio.Event().wait()
-
-    def handle_trade_sync(self, trade: WalletTrade) -> None:
-        """Sync entry point invoked from the trade-collector callback.
-
-        Spawns :meth:`evaluate` on the running event loop. Called from inside
-        the trade collector's poll loop, so it must not block.
-
-        Args:
-            trade: Newly-inserted ``WalletTrade`` row.
-        """
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            _LOG.debug("convergence.no_event_loop", tx=trade.transaction_hash)
-            return
-        task = loop.create_task(self.evaluate(trade))
-        self._pending_tasks.add(task)
-        task.add_done_callback(self._pending_tasks.discard)
 
     async def evaluate(self, trade: WalletTrade) -> None:
         """Apply the convergence filter to a freshly-inserted trade.

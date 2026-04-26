@@ -14,8 +14,9 @@ needs. The detector now fires when:
 Wallet age and total-trade counts are cached in ``wallet_first_seen`` for 24h
 to keep data-API request volume bounded. The :meth:`run` loop only refreshes
 the market metadata cache used for the liquidity filter; trade evaluation is
-driven by :meth:`handle_trade_sync`, registered with the trade collector via
-``TradeCollector.subscribe_new_trade``.
+driven by :meth:`evaluate`, dispatched via the inherited
+:meth:`TradeDrivenDetector.handle_trade_sync` and registered with the trade
+collector via ``TradeCollector.subscribe_new_trade``.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ import structlog
 from pscanner.alerts.models import Alert
 from pscanner.alerts.sink import AlertSink
 from pscanner.config import WhalesConfig
+from pscanner.detectors.trade_driven import TradeDrivenDetector
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
 from pscanner.store.repo import (
@@ -46,7 +48,7 @@ _HIGH_SEVERITY_PCT = 0.20
 _ACTIVITY_PROBE_LIMIT = 200
 
 
-class WhalesDetector:
+class WhalesDetector(TradeDrivenDetector):
     """Detector that emits alerts for big trades by new wallets on tiny markets."""
 
     name = "whales"
@@ -73,26 +75,25 @@ class WhalesDetector:
             clock: Injectable :class:`Clock`. Defaults to :class:`RealClock`
                 so production wiring needs no changes.
         """
+        super().__init__()
         self._config = config
         self._gamma_client = gamma_client
         self._data_client = data_client
         self._market_cache = market_cache
         self._wallet_first_seen = wallet_first_seen
-        self._sink: AlertSink | None = None
         self._condition_to_market: dict[str, CachedMarket] = {}
-        self._pending_tasks: set[asyncio.Task[None]] = set()
         self._clock: Clock = clock if clock is not None else RealClock()
 
     async def run(self, sink: AlertSink) -> None:
         """Long-running task: periodically refresh the market cache.
 
         Trade alerts are NOT driven from this loop. They fire via
-        :meth:`handle_trade` invoked by the trade collector callback. This
-        loop only keeps the ``market_cache`` fresh so liquidity lookups in
-        :meth:`handle_trade` are accurate.
+        :meth:`evaluate` invoked by the trade collector callback. This loop
+        only keeps the ``market_cache`` fresh so liquidity lookups in
+        :meth:`evaluate` are accurate.
 
         Args:
-            sink: Alert sink used by :meth:`handle_trade` for emission.
+            sink: Alert sink used by :meth:`evaluate` for emission.
         """
         if self._sink is None:
             self._sink = sink
@@ -124,30 +125,13 @@ class WhalesDetector:
         self._condition_to_market = fresh
         _LOG.info("whales.market_cache.refreshed", markets=count)
 
-    def handle_trade_sync(self, trade: WalletTrade) -> None:
-        """Sync entry point for the TradeCollector callback.
-
-        Spawns the async handler on the running loop. Called from inside the
-        trade collector's poll loop, so it must not block.
-
-        Args:
-            trade: Newly-inserted ``WalletTrade`` row.
-        """
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            _LOG.warning("whales.no_event_loop", tx=trade.transaction_hash)
-            return
-        task = loop.create_task(self.handle_trade(trade))
-        self._pending_tasks.add(task)
-        task.add_done_callback(self._pending_tasks.discard)
-
-    async def handle_trade(self, trade: WalletTrade) -> None:
+    async def evaluate(self, trade: WalletTrade) -> None:
         """Apply the new+small+big filter to a freshly-inserted trade.
 
-        Wired via :meth:`TradeCollector.subscribe_new_trade`. Fires only when
-        the trade was a new insert (callback contract). Skips silently when
-        the sink has not been wired yet (defensive — Scanner sets it at
+        Wired via :meth:`TradeCollector.subscribe_new_trade` (through
+        :meth:`TradeDrivenDetector.handle_trade_sync`). Fires only when the
+        trade was a new insert (callback contract). Skips silently when the
+        sink has not been wired yet (defensive — Scanner sets it at
         construction).
 
         Args:
@@ -206,7 +190,7 @@ class WhalesDetector:
     ) -> Alert:
         """Construct the ``Alert`` payload for an emitted whale event."""
         liquidity = cached.liquidity_usd
-        # liquidity is non-None — handle_trade rejects None upstream — but assert
+        # liquidity is non-None — evaluate rejects None upstream — but assert
         # for the type-checker.
         assert liquidity is not None  # noqa: S101
         pct = usd / liquidity
