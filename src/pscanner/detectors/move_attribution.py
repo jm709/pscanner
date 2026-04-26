@@ -301,7 +301,8 @@ class MoveAttributionDetector:
 
     async def run(self, sink: AlertSink) -> None:
         """Park forever — this detector is alert-driven, not periodic."""
-        self._sink = sink
+        if self._sink is None:
+            self._sink = sink
         await asyncio.Event().wait()
 
     def handle_alert_sync(self, alert: Alert) -> None:
