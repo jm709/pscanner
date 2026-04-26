@@ -37,6 +37,7 @@ import structlog
 
 from pscanner.collectors.watchlist import WatchlistRegistry
 from pscanner.poly.data import DataClient
+from pscanner.poly.ids import AssetId, ConditionId
 from pscanner.store.repo import WalletTrade, WalletTradesRepo
 
 _LOG = structlog.get_logger(__name__)
@@ -240,9 +241,9 @@ def _build_trade_from_activity(
     tx_hash = _coerce_str(event.get("transactionHash") or event.get("tx_hash"))
     if not tx_hash:
         return None
-    asset_id = _coerce_str(event.get("asset"))
+    asset_id = AssetId(_coerce_str(event.get("asset")))
     side = _coerce_str(event.get("side")).upper()
-    condition_id = _coerce_str(event.get("conditionId"))
+    condition_id = ConditionId(_coerce_str(event.get("conditionId")))
     size = _coerce_float(event.get("size"))
     price = _coerce_float(event.get("price"))
     if size is None or price is None:

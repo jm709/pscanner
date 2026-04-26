@@ -13,6 +13,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
+from pscanner.poly.ids import AssetId, ConditionId, EventId, EventSlug, MarketId
+
 _BASE_MODEL_CONFIG: ConfigDict = ConfigDict(populate_by_name=True, extra="ignore")
 
 
@@ -80,8 +82,8 @@ class Market(BaseModel):
 
     model_config = _BASE_MODEL_CONFIG
 
-    id: str
-    condition_id: Annotated[str | None, Field(alias="conditionId", default=None)] = None
+    id: MarketId
+    condition_id: Annotated[ConditionId | None, Field(alias="conditionId", default=None)] = None
     question: str
     slug: str
     outcomes: list[str] = Field(default_factory=list)
@@ -95,11 +97,11 @@ class Market(BaseModel):
     active: bool = True
     closed: bool = False
     clob_token_ids: Annotated[
-        list[str],
+        list[AssetId],
         Field(alias="clobTokenIds", default_factory=list),
     ] = Field(default_factory=list)
-    event_id: str | None = None
-    event_slug: Annotated[str | None, Field(alias="eventSlug", default=None)] = None
+    event_id: EventId | None = None
+    event_slug: Annotated[EventSlug | None, Field(alias="eventSlug", default=None)] = None
     group_item_title: Annotated[str | None, Field(alias="groupItemTitle", default=None)] = None
     group_item_threshold: Annotated[
         str | None,
@@ -159,9 +161,9 @@ class Event(BaseModel):
 
     model_config = _BASE_MODEL_CONFIG
 
-    id: str
+    id: EventId
     title: str
-    slug: str
+    slug: EventSlug
     markets: list[Market] = Field(default_factory=list)
     liquidity: float | None = None
     volume: float | None = None
@@ -219,9 +221,9 @@ class Position(BaseModel):
     model_config = _BASE_MODEL_CONFIG
 
     proxy_wallet: Annotated[str, Field(alias="proxyWallet")]
-    asset: str
-    condition_id: Annotated[str, Field(alias="conditionId")]
-    market_id: str | None = None
+    asset: AssetId
+    condition_id: Annotated[ConditionId, Field(alias="conditionId")]
+    market_id: MarketId | None = None
     outcome: str
     outcome_index: Annotated[int, Field(alias="outcomeIndex")]
     size: float = 0.0
@@ -234,7 +236,7 @@ class Position(BaseModel):
     mergeable: bool = False
     title: str | None = None
     slug: str | None = None
-    event_slug: Annotated[str | None, Field(alias="eventSlug", default=None)] = None
+    event_slug: Annotated[EventSlug | None, Field(alias="eventSlug", default=None)] = None
     end_date: Annotated[str | None, Field(alias="endDate", default=None)] = None
 
 
@@ -259,8 +261,8 @@ class Trade(BaseModel):
 
     transaction_hash: Annotated[str, Field(alias="transactionHash")]
     proxy_wallet: Annotated[str, Field(alias="proxyWallet")]
-    condition_id: Annotated[str, Field(alias="conditionId")]
-    asset: str
+    condition_id: Annotated[ConditionId, Field(alias="conditionId")]
+    asset: AssetId
     side: Literal["BUY", "SELL"]
     size: float
     price: float
@@ -297,8 +299,8 @@ class WsTradeMessage(BaseModel):
     model_config = _BASE_MODEL_CONFIG
 
     event_type: Literal["trade"]
-    condition_id: str
-    asset_id: str
+    condition_id: ConditionId
+    asset_id: AssetId
     side: str
     size: float
     price: float
@@ -328,8 +330,8 @@ class WsBookMessage(BaseModel):
     model_config = _BASE_MODEL_CONFIG
 
     event_type: Literal["book", "price_change", "tick_size_change", "last_trade_price"]
-    asset_id: str | None = None
-    market: str | None = None
+    asset_id: AssetId | None = None
+    market: ConditionId | None = None
     timestamp: str | None = None
     hash: str | None = None
     bids: list[Any] | None = None
@@ -340,7 +342,7 @@ class WsBookMessage(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
     @property
-    def affected_asset_ids(self) -> list[str]:
+    def affected_asset_ids(self) -> list[AssetId]:
         """Return the asset ids touched by this event.
 
         For ``book`` / ``last_trade_price`` events the result is the single
@@ -352,9 +354,9 @@ class WsBookMessage(BaseModel):
             return [self.asset_id] if self.asset_id else []
         if not self.price_changes:
             return []
-        ids: list[str] = []
+        ids: list[AssetId] = []
         for change in self.price_changes:
             asset_id = change.get("asset_id")
             if isinstance(asset_id, str) and asset_id:
-                ids.append(asset_id)
+                ids.append(AssetId(asset_id))
         return ids

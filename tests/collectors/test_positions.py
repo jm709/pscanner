@@ -108,7 +108,7 @@ async def test_snapshot_single_wallet_three_positions(
     assert inserted == 3
     rows = repo.recent_for_wallet(_WALLET_A)
     assert len(rows) == 3
-    by_cond = {row.condition_id: row for row in rows}
+    by_cond: dict[str, Any] = {str(row.condition_id): row for row in rows}
     row_b = by_cond["cond-B"]
     assert row_b.outcome == "No"
     assert row_b.size == 25.5

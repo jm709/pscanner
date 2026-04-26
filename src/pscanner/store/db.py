@@ -185,7 +185,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_twc_category ON tracked_wallet_categories(category)",
     """
     CREATE TABLE IF NOT EXISTS event_tag_cache (
-      event_id TEXT PRIMARY KEY,
+      event_slug TEXT PRIMARY KEY,
       tags_json TEXT NOT NULL,
       cached_at INTEGER NOT NULL
     )
@@ -219,6 +219,10 @@ _MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE tracked_wallets ADD COLUMN total_stake_usd REAL",
     "ALTER TABLE market_cache ADD COLUMN condition_id TEXT",
     "ALTER TABLE market_cache ADD COLUMN event_slug TEXT",
+    # Issue 18 / 21: the column historically named ``event_id`` always stored
+    # event slugs, never numeric ids. Rename it so the column type matches its
+    # contents (and the typed ``EventTagCacheRepo`` API).
+    "ALTER TABLE event_tag_cache RENAME COLUMN event_id TO event_slug",
 )
 
 _PRAGMAS: tuple[str, ...] = (
@@ -231,15 +235,19 @@ _PRAGMAS: tuple[str, ...] = (
 def _apply_migrations(conn: sqlite3.Connection) -> None:
     """Apply additive ALTER TABLE migrations. Idempotent.
 
-    SQLite has no IF NOT EXISTS for ADD COLUMN, so each migration is wrapped
-    in a try/except that swallows the "duplicate column name" OperationalError.
+    SQLite has no IF NOT EXISTS for ADD COLUMN, so each ``ADD COLUMN``
+    migration is wrapped to swallow ``duplicate column name`` errors. For
+    ``RENAME COLUMN`` migrations applied a second time (or against a fresh
+    schema where the new column name already exists), SQLite reports
+    ``no such column`` on the source side; we treat that the same way.
     Other DatabaseErrors propagate.
     """
     for stmt in _MIGRATIONS:
         try:
             conn.execute(stmt)
         except sqlite3.OperationalError as exc:
-            if "duplicate column name" in str(exc).lower():
+            msg = str(exc).lower()
+            if "duplicate column name" in msg or "no such column" in msg:
                 continue
             raise
     conn.commit()

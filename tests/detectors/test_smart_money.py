@@ -23,6 +23,7 @@ from pscanner.detectors.smart_money import (
     _compute_metrics,
     _severity,
 )
+from pscanner.poly.ids import EventSlug
 from pscanner.poly.models import ClosedPosition, Event, LeaderboardEntry, Position
 from pscanner.store.repo import EventTagCacheRepo, TrackedWallet
 
@@ -967,9 +968,9 @@ async def test_prewarm_populates_event_tag_cache_from_iter_events(
     inserted = await detector._prewarm_event_tag_cache()
 
     assert inserted == 3
-    assert cache.get("evt-a") == ["Politics"]
-    assert cache.get("evt-b") == ["Sports", "NFL"]
-    assert cache.get("evt-c") == ["Esports"]
+    assert cache.get(EventSlug("evt-a")) == ["Politics"]
+    assert cache.get(EventSlug("evt-b")) == ["Sports", "NFL"]
+    assert cache.get(EventSlug("evt-c")) == ["Esports"]
 
 
 @pytest.mark.asyncio
@@ -978,7 +979,7 @@ async def test_prewarm_skips_already_cached_events(
 ) -> None:
     """Existing cache entries are NOT overwritten by the pre-warm sweep."""
     cache = EventTagCacheRepo(tmp_db)
-    cache.upsert("evt-a", ["StalePolitics"])
+    cache.upsert(EventSlug("evt-a"), ["StalePolitics"])
     events = [
         _event(event_id="1", slug="evt-a", tags=["FreshPolitics"]),
         _event(event_id="2", slug="evt-b", tags=["Sports"]),
@@ -995,9 +996,9 @@ async def test_prewarm_skips_already_cached_events(
     inserted = await detector._prewarm_event_tag_cache()
 
     assert inserted == 2
-    assert cache.get("evt-a") == ["StalePolitics"]
-    assert cache.get("evt-b") == ["Sports"]
-    assert cache.get("evt-c") == ["Esports"]
+    assert cache.get(EventSlug("evt-a")) == ["StalePolitics"]
+    assert cache.get(EventSlug("evt-b")) == ["Sports"]
+    assert cache.get(EventSlug("evt-c")) == ["Esports"]
 
 
 @pytest.mark.asyncio
@@ -1079,9 +1080,9 @@ async def test_prewarm_tolerates_empty_tags_and_missing_slug(
     inserted = await detector._prewarm_event_tag_cache()
 
     assert inserted == 3
-    assert cache.get("evt-a") == ["Politics"]
-    assert cache.get("evt-empty") == []
+    assert cache.get(EventSlug("evt-a")) == ["Politics"]
+    assert cache.get(EventSlug("evt-empty")) == []
     # slug="" falls back to the event id "3".
-    assert cache.get("3") == ["Sports"]
+    assert cache.get(EventSlug("3")) == ["Sports"]
     # Both slug and id blank → skipped.
-    assert cache.get("") is None
+    assert cache.get(EventSlug("")) is None

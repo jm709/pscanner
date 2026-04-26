@@ -26,6 +26,7 @@ from pscanner.config import TicksConfig
 from pscanner.poly.clob_ws import MarketWebSocket
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
+from pscanner.poly.ids import AssetId, ConditionId, MarketId
 from pscanner.poly.models import Position, WsBookMessage
 from pscanner.store.repo import CachedMarket, MarketCacheRepo, MarketTick, MarketTicksRepo
 
@@ -43,7 +44,7 @@ class _Orderbook:
     bids: dict[float, float] = field(default_factory=dict)
     asks: dict[float, float] = field(default_factory=dict)
     last_trade_price: float | None = None
-    condition_id: str | None = None
+    condition_id: ConditionId | None = None
 
 
 class MarketTickCollector:
@@ -87,12 +88,12 @@ class MarketTickCollector:
         self._registry = registry
         self._repo = ticks_repo
         self._market_cache = market_cache
-        self._books: dict[str, _Orderbook] = {}
-        self._asset_to_condition: dict[str, str] = {}
-        self._mid_history: dict[str, list[tuple[int, float]]] = {}
-        self._tick_history: dict[str, collections.deque[MarketTick]] = {}
-        self._asset_to_market: dict[str, CachedMarket] = {}
-        self._subscribed: set[str] = set()
+        self._books: dict[AssetId, _Orderbook] = {}
+        self._asset_to_condition: dict[AssetId, ConditionId] = {}
+        self._mid_history: dict[AssetId, list[tuple[int, float]]] = {}
+        self._tick_history: dict[AssetId, collections.deque[MarketTick]] = {}
+        self._asset_to_market: dict[AssetId, CachedMarket] = {}
+        self._subscribed: set[AssetId] = set()
         self._lock = asyncio.Lock()
 
     async def run(self, stop_event: asyncio.Event) -> None:
@@ -163,7 +164,7 @@ class MarketTickCollector:
         )
         target = wallet_assets | volume_assets
         target = self._cap_target(target, wallet_assets)
-        merged_lookup: dict[str, str] = {}
+        merged_lookup: dict[AssetId, ConditionId] = {}
         merged_lookup.update(volume_lookup)
         merged_lookup.update(wallet_lookup)
 
@@ -183,10 +184,12 @@ class MarketTickCollector:
             new=len(new_ids),
         )
 
-    async def _collect_wallet_assets(self) -> tuple[set[str], dict[str, str]]:
+    async def _collect_wallet_assets(
+        self,
+    ) -> tuple[set[AssetId], dict[AssetId, ConditionId]]:
         """Return assets held by watched wallets and the asset→condition map."""
-        assets: set[str] = set()
-        lookup: dict[str, str] = {}
+        assets: set[AssetId] = set()
+        lookup: dict[AssetId, ConditionId] = {}
         for address in sorted(self._registry.addresses()):
             try:
                 positions = await self._data.get_positions(address)
@@ -201,10 +204,10 @@ class MarketTickCollector:
         self,
         *,
         existing_count: int,
-    ) -> tuple[set[str], dict[str, str]]:
+    ) -> tuple[set[AssetId], dict[AssetId, ConditionId]]:
         """Return assets from active markets above the volume floor."""
-        assets: set[str] = set()
-        lookup: dict[str, str] = {}
+        assets: set[AssetId] = set()
+        lookup: dict[AssetId, ConditionId] = {}
         floor = self._config.tick_volume_floor_usd
         cap = self._config.max_assets
         async for market in self._gamma.iter_markets(active=True, closed=False):
@@ -221,8 +224,8 @@ class MarketTickCollector:
         self,
         market: Any,
         *,
-        assets: set[str],
-        lookup: dict[str, str],
+        assets: set[AssetId],
+        lookup: dict[AssetId, ConditionId],
     ) -> None:
         """Add ``market``'s clob token ids to ``assets`` + side maps."""
         cached = self._lookup_cached_market(market.id)
@@ -235,7 +238,7 @@ class MarketTickCollector:
             if cached is not None:
                 self._asset_to_market[asset_id] = cached
 
-    def _lookup_cached_market(self, market_id: str) -> CachedMarket | None:
+    def _lookup_cached_market(self, market_id: MarketId) -> CachedMarket | None:
         """Return the cached market for ``market_id`` or ``None`` if unwired."""
         if self._market_cache is None or not market_id:
             return None
@@ -247,14 +250,14 @@ class MarketTickCollector:
 
     def _cap_target(
         self,
-        target: set[str],
-        wallet_assets: set[str],
-    ) -> set[str]:
+        target: set[AssetId],
+        wallet_assets: set[AssetId],
+    ) -> set[AssetId]:
         """Truncate ``target`` to ``max_assets``, preferring wallet assets."""
         cap = self._config.max_assets
         if len(target) <= cap:
             return target
-        capped: set[str] = set()
+        capped: set[AssetId] = set()
         for asset_id in sorted(wallet_assets & target):
             if len(capped) >= cap:
                 break
@@ -266,7 +269,7 @@ class MarketTickCollector:
             capped.add(asset_id)
         return capped
 
-    async def _subscribe_in_batches(self, asset_ids: list[str]) -> None:
+    async def _subscribe_in_batches(self, asset_ids: list[AssetId]) -> None:
         """Send subscription requests in chunks of ``_SUBSCRIBE_BATCH_SIZE``."""
         for start in range(0, len(asset_ids), _SUBSCRIBE_BATCH_SIZE):
             chunk = asset_ids[start : start + _SUBSCRIBE_BATCH_SIZE]
@@ -278,7 +281,7 @@ class MarketTickCollector:
     async def _handle_message(self, msg: WsBookMessage) -> None:
         """Apply one WS message to the in-memory orderbook state."""
         async with self._lock:
-            asset_id = msg.asset_id or ""
+            asset_id = msg.asset_id if msg.asset_id is not None else AssetId("")
             book = self._books.setdefault(asset_id, _Orderbook())
             if msg.market and not book.condition_id:
                 book.condition_id = msg.market
@@ -313,12 +316,13 @@ class MarketTickCollector:
         self,
         change: dict[str, Any],
         *,
-        market: str | None,
+        market: ConditionId | None,
     ) -> None:
         """Apply a single entry from a ``price_changes`` array."""
-        asset_id = change.get("asset_id")
-        if not isinstance(asset_id, str) or not asset_id:
+        asset_id_raw = change.get("asset_id")
+        if not isinstance(asset_id_raw, str) or not asset_id_raw:
             return
+        asset_id = AssetId(asset_id_raw)
         sub = self._books.setdefault(asset_id, _Orderbook())
         if market and not sub.condition_id:
             sub.condition_id = market
@@ -404,9 +408,9 @@ class MarketTickCollector:
     def _persist_tick(
         self,
         *,
-        asset_id: str,
+        asset_id: AssetId,
         book: _Orderbook,
-        condition_lookup: dict[str, str],
+        condition_lookup: dict[AssetId, ConditionId],
         snapshot_at: int,
     ) -> bool:
         """Build and insert one tick row; return True on insert."""
@@ -418,7 +422,7 @@ class MarketTickCollector:
         else:
             mid = None
             spread = None
-        condition_id = book.condition_id or condition_lookup.get(asset_id, "")
+        condition_id = book.condition_id or condition_lookup.get(asset_id, ConditionId(""))
         if not condition_id and mid is None:
             return False
         bid_depth = _depth_top_n(book.bids, top=_DEPTH_TOP_N, descending=True)
@@ -446,14 +450,14 @@ class MarketTickCollector:
                 self._record_mid_history(asset_id, snapshot_at=snapshot_at, mid=mid)
         return inserted
 
-    def _record_mid_history(self, asset_id: str, *, snapshot_at: int, mid: float) -> None:
+    def _record_mid_history(self, asset_id: AssetId, *, snapshot_at: int, mid: float) -> None:
         """Append ``(snapshot_at, mid)`` to the asset's history ring buffer."""
         history = self._mid_history.setdefault(asset_id, [])
         history.append((snapshot_at, mid))
         if len(history) > _MID_HISTORY_CAP:
             del history[: len(history) - _MID_HISTORY_CAP]
 
-    def _record_tick_history(self, asset_id: str, *, tick: MarketTick) -> None:
+    def _record_tick_history(self, asset_id: AssetId, *, tick: MarketTick) -> None:
         """Append a full ``MarketTick`` row to the asset's tick ring buffer."""
         history = self._tick_history.get(asset_id)
         if history is None:
@@ -463,7 +467,7 @@ class MarketTickCollector:
 
     def get_recent_mids(
         self,
-        asset_id: str,
+        asset_id: AssetId,
         *,
         window_seconds: int,
     ) -> list[tuple[int, float]]:
@@ -486,7 +490,7 @@ class MarketTickCollector:
 
     def get_recent_ticks(
         self,
-        asset_id: str,
+        asset_id: AssetId,
         *,
         window_seconds: int,
     ) -> list[MarketTick]:
@@ -509,7 +513,7 @@ class MarketTickCollector:
             return []
         return [tick for tick in history if tick.snapshot_at > cutoff]
 
-    def get_market_for_asset(self, asset_id: str) -> CachedMarket | None:
+    def get_market_for_asset(self, asset_id: AssetId) -> CachedMarket | None:
         """Return the cached market for ``asset_id`` or ``None`` if unknown.
 
         FROZEN API: detectors call this to enrich alerts with market metadata
@@ -525,7 +529,7 @@ class MarketTickCollector:
         """
         return self._asset_to_market.get(asset_id)
 
-    def subscribed_asset_ids(self) -> set[str]:
+    def subscribed_asset_ids(self) -> set[AssetId]:
         """Return a copy of the currently-subscribed asset id set."""
         return self._subscribed.copy()
 
@@ -533,8 +537,8 @@ class MarketTickCollector:
 def _ingest_position(
     pos: Position,
     *,
-    assets: set[str],
-    lookup: dict[str, str],
+    assets: set[AssetId],
+    lookup: dict[AssetId, ConditionId],
 ) -> None:
     """Add ``pos.asset`` to ``assets`` and map it to its condition id."""
     asset_id = pos.asset

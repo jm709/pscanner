@@ -31,6 +31,7 @@ import structlog
 from pscanner.alerts.models import Alert, Severity
 from pscanner.config import ConvergenceConfig, SmartMoneyConfig
 from pscanner.detectors.trade_driven import TradeDrivenDetector
+from pscanner.poly.ids import ConditionId
 from pscanner.store.repo import (
     CachedMarket,
     EventTagCacheRepo,
@@ -178,7 +179,7 @@ class ConvergenceDetector(TradeDrivenDetector):
 
     def _sum_recent_usd(
         self,
-        condition_id: str,
+        condition_id: ConditionId,
         wallets: list[str],
         *,
         since: int,

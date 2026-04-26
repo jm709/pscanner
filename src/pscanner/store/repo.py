@@ -17,6 +17,7 @@ import time
 from dataclasses import dataclass
 
 from pscanner.alerts.models import Alert, DetectorName, Severity
+from pscanner.poly.ids import AssetId, ConditionId, EventId, EventSlug, MarketId
 from pscanner.poly.models import Market
 
 
@@ -41,7 +42,7 @@ class PositionSnapshot:
     """A point-in-time record of a wallet's position on a market+side."""
 
     address: str
-    market_id: str
+    market_id: ConditionId
     side: str
     size: float
     avg_price: float
@@ -67,16 +68,16 @@ class CachedMarket:
     re-decode the column on every read.
     """
 
-    market_id: str
-    event_id: str | None
+    market_id: MarketId
+    event_id: EventId | None
     title: str | None
     liquidity_usd: float | None
     volume_usd: float | None
     outcome_prices: list[float]
     active: bool
     cached_at: int
-    condition_id: str | None = None
-    event_slug: str | None = None
+    condition_id: ConditionId | None = None
+    event_slug: EventSlug | None = None
 
 
 def _now_seconds() -> int:
@@ -231,7 +232,7 @@ class PositionSnapshotsRepo:
     def upsert(
         self,
         address: str,
-        market_id: str,
+        market_id: ConditionId,
         side: str,
         size: float,
         avg_price: float,
@@ -266,7 +267,7 @@ class PositionSnapshotsRepo:
         return [
             PositionSnapshot(
                 address=row["address"],
-                market_id=row["market_id"],
+                market_id=ConditionId(row["market_id"]),
                 side=row["side"],
                 size=row["size"],
                 avg_price=row["avg_price"],
@@ -275,7 +276,7 @@ class PositionSnapshotsRepo:
             for row in rows
         ]
 
-    def previous_size(self, address: str, market_id: str, side: str) -> float | None:
+    def previous_size(self, address: str, market_id: ConditionId, side: str) -> float | None:
         """Return the most-recently-stored size, or ``None`` if no row exists."""
         row = self._conn.execute(
             """
@@ -386,7 +387,7 @@ class MarketCacheRepo:
         )
         self._conn.commit()
 
-    def get(self, market_id: str) -> CachedMarket | None:
+    def get(self, market_id: MarketId) -> CachedMarket | None:
         """Return the cached row for a market, or ``None``."""
         row = self._conn.execute(
             """
@@ -402,7 +403,7 @@ class MarketCacheRepo:
             return None
         return _row_to_cached_market(row)
 
-    def get_by_condition_id(self, condition_id: str) -> CachedMarket | None:
+    def get_by_condition_id(self, condition_id: ConditionId) -> CachedMarket | None:
         """Return the cached row whose ``condition_id`` matches, or ``None``.
 
         Args:
@@ -457,17 +458,20 @@ def _row_to_cached_market(row: sqlite3.Row) -> CachedMarket:
             )
             raise ValueError(msg)
         prices = [float(item) for item in decoded]
+    raw_event_id = row["event_id"]
+    raw_condition_id = row["condition_id"]
+    raw_event_slug = row["event_slug"]
     return CachedMarket(
-        market_id=row["market_id"],
-        event_id=row["event_id"],
+        market_id=MarketId(row["market_id"]),
+        event_id=EventId(raw_event_id) if raw_event_id is not None else None,
         title=row["title"],
         liquidity_usd=row["liquidity_usd"],
         volume_usd=row["volume_usd"],
         outcome_prices=prices,
         active=bool(row["active"]),
         cached_at=row["cached_at"],
-        condition_id=row["condition_id"],
-        event_slug=row["event_slug"],
+        condition_id=ConditionId(raw_condition_id) if raw_condition_id is not None else None,
+        event_slug=EventSlug(raw_event_slug) if raw_event_slug is not None else None,
     )
 
 
@@ -679,10 +683,10 @@ class WalletTrade:
     """A single CONFIRMED trade by a watched wallet (append-only)."""
 
     transaction_hash: str
-    asset_id: str
+    asset_id: AssetId
     side: str
     wallet: str
-    condition_id: str
+    condition_id: ConditionId
     size: float
     price: float
     usd_value: float
@@ -771,7 +775,7 @@ class WalletTradesRepo:
 
     def distinct_wallets_for_condition(
         self,
-        condition_id: str,
+        condition_id: ConditionId,
         *,
         since: int,
     ) -> set[str]:
@@ -800,10 +804,10 @@ def _row_to_wallet_trade(row: sqlite3.Row) -> WalletTrade:
     """Convert a ``wallet_trades`` row to a ``WalletTrade`` dataclass."""
     return WalletTrade(
         transaction_hash=row["transaction_hash"],
-        asset_id=row["asset_id"],
+        asset_id=AssetId(row["asset_id"]),
         side=row["side"],
         wallet=row["wallet"],
-        condition_id=row["condition_id"],
+        condition_id=ConditionId(row["condition_id"]),
         size=float(row["size"]),
         price=float(row["price"]),
         usd_value=float(row["usd_value"]),
@@ -819,7 +823,7 @@ class WalletPositionsHistoryRow:
     """One row per (wallet, market-position) at a given timestamp."""
 
     wallet: str
-    condition_id: str
+    condition_id: ConditionId
     outcome: str
     size: float
     avg_price: float
@@ -919,7 +923,7 @@ def _row_to_positions_history(row: sqlite3.Row) -> WalletPositionsHistoryRow:
     redeemable = None if redeemable_raw is None else bool(redeemable_raw)
     return WalletPositionsHistoryRow(
         wallet=row["wallet"],
-        condition_id=row["condition_id"],
+        condition_id=ConditionId(row["condition_id"]),
         outcome=row["outcome"],
         size=float(row["size"]),
         avg_price=float(row["avg_price"]),
@@ -1066,8 +1070,8 @@ class MarketSnapshot:
     read without forcing this layer to know the ordering convention.
     """
 
-    market_id: str
-    event_id: str | None
+    market_id: MarketId
+    event_id: EventId | None
     outcome_prices_json: str
     liquidity_usd: float | None
     volume_usd: float | None
@@ -1118,7 +1122,7 @@ class MarketSnapshotsRepo:
 
     def recent_for_market(
         self,
-        market_id: str,
+        market_id: MarketId,
         *,
         limit: int = 200,
     ) -> list[MarketSnapshot]:
@@ -1163,9 +1167,10 @@ class MarketSnapshotsRepo:
 
 def _row_to_market_snapshot(row: sqlite3.Row) -> MarketSnapshot:
     """Convert a ``market_snapshots`` row to a ``MarketSnapshot`` dataclass."""
+    raw_event_id = row["event_id"]
     return MarketSnapshot(
-        market_id=row["market_id"],
-        event_id=row["event_id"],
+        market_id=MarketId(row["market_id"]),
+        event_id=EventId(raw_event_id) if raw_event_id is not None else None,
         outcome_prices_json=row["outcome_prices_json"],
         liquidity_usd=_optional_float(row["liquidity_usd"]),
         volume_usd=_optional_float(row["volume_usd"]),
@@ -1178,9 +1183,9 @@ def _row_to_market_snapshot(row: sqlite3.Row) -> MarketSnapshot:
 class EventSnapshot:
     """One row per (event, snapshot_at) — event-level metadata at a point in time."""
 
-    event_id: str
+    event_id: EventId
     title: str
-    slug: str
+    slug: EventSlug
     liquidity_usd: float | None
     volume_usd: float | None
     active: bool
@@ -1234,7 +1239,7 @@ class EventSnapshotsRepo:
 
     def recent_for_event(
         self,
-        event_id: str,
+        event_id: EventId,
         *,
         limit: int = 200,
     ) -> list[EventSnapshot]:
@@ -1280,9 +1285,9 @@ class EventSnapshotsRepo:
 def _row_to_event_snapshot(row: sqlite3.Row) -> EventSnapshot:
     """Convert an ``event_snapshots`` row to an ``EventSnapshot`` dataclass."""
     return EventSnapshot(
-        event_id=row["event_id"],
+        event_id=EventId(row["event_id"]),
         title=row["title"],
-        slug=row["slug"],
+        slug=EventSlug(row["slug"]),
         liquidity_usd=_optional_float(row["liquidity_usd"]),
         volume_usd=_optional_float(row["volume_usd"]),
         active=bool(row["active"]),
@@ -1296,7 +1301,7 @@ def _row_to_event_snapshot(row: sqlite3.Row) -> EventSnapshot:
 class EventOutcomeSumRow:
     """One row per (event, snapshot_at) — captured even when no alert fires."""
 
-    event_id: str
+    event_id: EventId
     market_count: int
     price_sum: float
     deviation: float
@@ -1363,7 +1368,7 @@ class EventOutcomeSumRepo:
         ).fetchall()
         return [_row_to_event_outcome_sum(row) for row in rows]
 
-    def by_event_id(self, event_id: str, *, limit: int = 200) -> list[EventOutcomeSumRow]:
+    def by_event_id(self, event_id: EventId, *, limit: int = 200) -> list[EventOutcomeSumRow]:
         """Return all rows for one event, newest first.
 
         Args:
@@ -1416,7 +1421,7 @@ class EventOutcomeSumRepo:
 def _row_to_event_outcome_sum(row: sqlite3.Row) -> EventOutcomeSumRow:
     """Convert an ``event_outcome_sum_history`` row to its dataclass."""
     return EventOutcomeSumRow(
-        event_id=row["event_id"],
+        event_id=EventId(row["event_id"]),
         market_count=int(row["market_count"]),
         price_sum=float(row["price_sum"]),
         deviation=float(row["deviation"]),
@@ -1599,40 +1604,44 @@ def _row_to_tracked_wallet_category(row: sqlite3.Row) -> TrackedWalletCategory:
 class EventTagCacheRepo:
     """CRUD for the ``event_tag_cache`` table.
 
-    Persists the gamma ``tags`` array per event so detectors can categorise
-    closed positions without re-fetching every event on every refresh.
+    Persists the gamma ``tags`` array per event slug so detectors can
+    categorise closed positions without re-fetching every event on every
+    refresh. The cache is keyed on ``EventSlug`` (not numeric event id)
+    because closed-position payloads expose ``eventSlug`` rather than a
+    numeric id; the column was renamed from ``event_id`` to ``event_slug``
+    by the typed-ids migration.
     """
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         """Bind the repo to an already-initialised connection."""
         self._conn = conn
 
-    def upsert(self, event_id: str, tags: list[str]) -> None:
-        """Persist ``tags`` for ``event_id`` as JSON, stamping ``cached_at``.
+    def upsert(self, event_slug: EventSlug, tags: list[str]) -> None:
+        """Persist ``tags`` for ``event_slug`` as JSON, stamping ``cached_at``.
 
         Args:
-            event_id: Polymarket event identifier.
+            event_slug: Polymarket event slug (URL fragment).
             tags: Tag labels (e.g. ``["Sports", "NFL"]``).
         """
         now = _now_seconds()
         tags_json = json.dumps(list(tags))
         self._conn.execute(
             """
-            INSERT INTO event_tag_cache (event_id, tags_json, cached_at)
+            INSERT INTO event_tag_cache (event_slug, tags_json, cached_at)
             VALUES (?, ?, ?)
-            ON CONFLICT(event_id) DO UPDATE SET
+            ON CONFLICT(event_slug) DO UPDATE SET
               tags_json = excluded.tags_json,
               cached_at = excluded.cached_at
             """,
-            (event_id, tags_json, now),
+            (event_slug, tags_json, now),
         )
         self._conn.commit()
 
-    def get(self, event_id: str) -> list[str] | None:
-        """Return cached tags for ``event_id``, or ``None`` if absent.
+    def get(self, event_slug: EventSlug) -> list[str] | None:
+        """Return cached tags for ``event_slug``, or ``None`` if absent.
 
         Args:
-            event_id: Polymarket event identifier.
+            event_slug: Polymarket event slug (URL fragment).
 
         Returns:
             The decoded tag list, or ``None`` if no cached row exists.
@@ -1641,8 +1650,8 @@ class EventTagCacheRepo:
             ValueError: If the stored JSON does not decode to a list.
         """
         row = self._conn.execute(
-            "SELECT tags_json FROM event_tag_cache WHERE event_id = ?",
-            (event_id,),
+            "SELECT tags_json FROM event_tag_cache WHERE event_slug = ?",
+            (event_slug,),
         ).fetchone()
         if row is None:
             return None
@@ -1663,8 +1672,8 @@ class MarketTick:
     these rows are expected to filter NULLs explicitly.
     """
 
-    asset_id: str
-    condition_id: str
+    asset_id: AssetId
+    condition_id: ConditionId
     snapshot_at: int
     mid_price: float | None
     best_bid: float | None
@@ -1720,7 +1729,7 @@ class MarketTicksRepo:
         self._conn.commit()
         return cur.rowcount == 1
 
-    def recent_for_asset(self, asset_id: str, *, limit: int = 200) -> list[MarketTick]:
+    def recent_for_asset(self, asset_id: AssetId, *, limit: int = 200) -> list[MarketTick]:
         """Return the asset's most recent ticks, newest first.
 
         Args:
@@ -1745,7 +1754,7 @@ class MarketTicksRepo:
 
     def recent_mids_in_window(
         self,
-        asset_id: str,
+        asset_id: AssetId,
         *,
         window_seconds: int,
         now_ts: int | None = None,
@@ -1802,8 +1811,8 @@ class MarketTicksRepo:
 def _row_to_market_tick(row: sqlite3.Row) -> MarketTick:
     """Convert a ``market_ticks`` row to a ``MarketTick`` dataclass."""
     return MarketTick(
-        asset_id=row["asset_id"],
-        condition_id=row["condition_id"],
+        asset_id=AssetId(row["asset_id"]),
+        condition_id=ConditionId(row["condition_id"]),
         snapshot_at=int(row["snapshot_at"]),
         mid_price=_optional_float(row["mid_price"]),
         best_bid=_optional_float(row["best_bid"]),

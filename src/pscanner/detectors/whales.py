@@ -32,6 +32,7 @@ from pscanner.config import WhalesConfig
 from pscanner.detectors.trade_driven import TradeDrivenDetector
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
+from pscanner.poly.ids import ConditionId
 from pscanner.store.repo import (
     CachedMarket,
     MarketCacheRepo,
@@ -81,7 +82,7 @@ class WhalesDetector(TradeDrivenDetector):
         self._data_client = data_client
         self._market_cache = market_cache
         self._wallet_first_seen = wallet_first_seen
-        self._condition_to_market: dict[str, CachedMarket] = {}
+        self._condition_to_market: dict[ConditionId, CachedMarket] = {}
         self._clock: Clock = clock if clock is not None else RealClock()
 
     async def run(self, sink: AlertSink) -> None:
@@ -108,7 +109,7 @@ class WhalesDetector(TradeDrivenDetector):
 
     async def _refresh_market_cache(self) -> None:
         """Page the active markets, upsert into market_cache, rebuild condition map."""
-        fresh: dict[str, CachedMarket] = {}
+        fresh: dict[ConditionId, CachedMarket] = {}
         count = 0
         async for market in self._gamma_client.iter_markets(active=True, closed=False):
             if not market.enable_order_book:

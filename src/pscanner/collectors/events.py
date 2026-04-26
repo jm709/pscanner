@@ -14,6 +14,7 @@ import time
 import structlog
 
 from pscanner.poly.gamma import GammaClient
+from pscanner.poly.ids import EventSlug
 from pscanner.poly.models import Event
 from pscanner.store.repo import EventSnapshot, EventSnapshotsRepo, EventTagCacheRepo
 
@@ -131,18 +132,21 @@ class EventCollector:
         The cache is keyed on ``event.slug`` because closed-position payloads
         expose ``eventSlug`` rather than a numeric event id; using slugs
         means the smart-money categoriser can hit the cache without a
-        secondary id-lookup step.
+        secondary id-lookup step. When the gamma payload is missing a slug
+        we fall back to the numeric event id so a partial row still
+        populates the cache; the cache key remains an :class:`EventSlug`
+        for type uniformity.
 
         Args:
             event: Validated gamma event whose tags should be cached.
         """
-        key = event.slug or event.id
+        key = event.slug or (EventSlug(event.id) if event.id else None)
         if not key:
             return
         try:
             self._event_tag_cache.upsert(key, list(event.tags))
         except Exception:
-            _LOG.exception("events.tag_cache_upsert_failed", event_slug=event.slug)
+            _LOG.exception("events.tag_cache_upsert_failed", event_slug=key)
 
 
 def _build_snapshot(event: Event, *, snapshot_at: int) -> EventSnapshot:
@@ -158,7 +162,7 @@ def _build_snapshot(event: Event, *, snapshot_at: int) -> EventSnapshot:
     return EventSnapshot(
         event_id=event.id,
         title=event.title or "",
-        slug=event.slug or "",
+        slug=event.slug if event.slug else EventSlug(""),
         liquidity_usd=event.liquidity,
         volume_usd=event.volume,
         active=bool(event.active),

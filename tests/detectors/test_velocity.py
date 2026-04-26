@@ -16,6 +16,7 @@ import pytest
 from pscanner.alerts.models import Alert
 from pscanner.config import VelocityConfig
 from pscanner.detectors.velocity import PriceVelocityDetector
+from pscanner.poly.ids import AssetId, ConditionId, MarketId
 from pscanner.store.repo import CachedMarket, MarketTick
 
 
@@ -41,8 +42,8 @@ def _balanced_tick(
 ) -> MarketTick:
     """Build a ``MarketTick`` with balanced, liquid depth that passes filters."""
     return MarketTick(
-        asset_id="A1",
-        condition_id="0xcond",
+        asset_id=AssetId("A1"),
+        condition_id=ConditionId("0xcond"),
         snapshot_at=snapshot_at,
         mid_price=mid,
         best_bid=mid - 0.01,
@@ -108,7 +109,7 @@ async def test_six_percent_move_emits_med_alert() -> None:
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
-    await detector.evaluate_asset("A1", sink)
+    await detector.evaluate_asset(AssetId("A1"), sink)
 
     assert len(captured) == 1
     alert = captured[0]
@@ -129,7 +130,7 @@ async def test_fifteen_percent_move_emits_high_alert() -> None:
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
-    await detector.evaluate_asset("A1", sink)
+    await detector.evaluate_asset(AssetId("A1"), sink)
 
     assert len(captured) == 1
     alert = captured[0]
@@ -143,7 +144,7 @@ async def test_move_within_threshold_does_not_alert() -> None:
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
-    await detector.evaluate_asset("A1", sink)
+    await detector.evaluate_asset(AssetId("A1"), sink)
 
     assert captured == []
     sink.emit.assert_not_called()
@@ -155,7 +156,7 @@ async def test_negative_move_triggers_high_severity() -> None:
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
-    await detector.evaluate_asset("A1", sink)
+    await detector.evaluate_asset(AssetId("A1"), sink)
 
     assert len(captured) == 1
     alert = captured[0]
@@ -170,7 +171,7 @@ async def test_fewer_than_two_mids_does_not_alert() -> None:
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
-    await detector.evaluate_asset("A1", sink)
+    await detector.evaluate_asset(AssetId("A1"), sink)
 
     assert captured == []
     sink.emit.assert_not_called()
@@ -181,7 +182,7 @@ async def test_empty_mids_does_not_alert() -> None:
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
-    await detector.evaluate_asset("A1", sink)
+    await detector.evaluate_asset(AssetId("A1"), sink)
 
     assert captured == []
 
@@ -192,7 +193,7 @@ async def test_zero_start_price_does_not_alert() -> None:
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
-    await detector.evaluate_asset("A1", sink)
+    await detector.evaluate_asset(AssetId("A1"), sink)
 
     assert captured == []
     sink.emit.assert_not_called()
@@ -208,8 +209,8 @@ async def test_alert_key_uses_60s_bucket() -> None:
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
-    await detector.evaluate_asset("A1", sink)
-    await detector.evaluate_asset("A1", sink)
+    await detector.evaluate_asset(AssetId("A1"), sink)
+    await detector.evaluate_asset(AssetId("A1"), sink)
 
     assert len(captured) == 2
     assert captured[0].alert_key == captured[1].alert_key
@@ -226,8 +227,8 @@ async def test_alert_keys_distinct_across_buckets() -> None:
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
-    await detector.evaluate_asset("A1", sink)
-    await detector.evaluate_asset("A1", sink)
+    await detector.evaluate_asset(AssetId("A1"), sink)
+    await detector.evaluate_asset(AssetId("A1"), sink)
 
     assert len(captured) == 2
     assert captured[0].alert_key != captured[1].alert_key
@@ -249,8 +250,8 @@ async def test_per_asset_isolation() -> None:
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
-    await detector.evaluate_asset("A1", sink)
-    await detector.evaluate_asset("A2", sink)
+    await detector.evaluate_asset(AssetId("A1"), sink)
+    await detector.evaluate_asset(AssetId("A2"), sink)
 
     assert len(captured) == 2
     keys = {a.alert_key for a in captured}
@@ -321,7 +322,7 @@ async def test_alert_skipped_on_depth_asymmetry() -> None:
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
-    await detector.evaluate_asset("A1", sink)
+    await detector.evaluate_asset(AssetId("A1"), sink)
 
     assert captured == []
     sink.emit.assert_not_called()
@@ -338,7 +339,7 @@ async def test_alert_skipped_on_insufficient_usd_depth() -> None:
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
-    await detector.evaluate_asset("A1", sink)
+    await detector.evaluate_asset(AssetId("A1"), sink)
 
     assert captured == []
     sink.emit.assert_not_called()
@@ -351,7 +352,7 @@ async def test_alert_skipped_when_recent_ticks_empty() -> None:
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
-    await detector.evaluate_asset("A1", sink)
+    await detector.evaluate_asset(AssetId("A1"), sink)
 
     assert captured == []
 
@@ -359,8 +360,8 @@ async def test_alert_skipped_when_recent_ticks_empty() -> None:
 async def test_alert_skipped_when_depth_fields_missing() -> None:
     """A latest tick with NULL depth fields cannot be qualified — skip."""
     tick = MarketTick(
-        asset_id="A1",
-        condition_id="0xcond",
+        asset_id=AssetId("A1"),
+        condition_id=ConditionId("0xcond"),
         snapshot_at=130,
         mid_price=0.5,
         best_bid=0.49,
@@ -374,7 +375,7 @@ async def test_alert_skipped_when_depth_fields_missing() -> None:
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
-    await detector.evaluate_asset("A1", sink)
+    await detector.evaluate_asset(AssetId("A1"), sink)
 
     assert captured == []
 
@@ -389,7 +390,7 @@ async def test_alert_emitted_with_balanced_depth() -> None:
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
-    await detector.evaluate_asset("A1", sink)
+    await detector.evaluate_asset(AssetId("A1"), sink)
 
     assert len(captured) == 1
     assert captured[0].body["change_pct"] == pytest.approx(0.15)
@@ -398,7 +399,7 @@ async def test_alert_emitted_with_balanced_depth() -> None:
 async def test_alert_body_includes_market_metadata() -> None:
     """``market_title`` and ``condition_id`` propagate into the alert body."""
     market = CachedMarket(
-        market_id="m1",
+        market_id=MarketId("m1"),
         event_id=None,
         title="Foo",
         liquidity_usd=None,
@@ -406,14 +407,14 @@ async def test_alert_body_includes_market_metadata() -> None:
         outcome_prices=[0.5, 0.5],
         active=True,
         cached_at=0,
-        condition_id="0xCOND",
+        condition_id=ConditionId("0xCOND"),
         event_slug=None,
     )
     ticks = _ticks_mock_with_defaults(market=market)
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
-    await detector.evaluate_asset("A1", sink)
+    await detector.evaluate_asset(AssetId("A1"), sink)
 
     assert len(captured) == 1
     body = captured[0].body
@@ -428,7 +429,7 @@ async def test_alert_body_handles_missing_market() -> None:
     detector, _, _ = _make_detector(ticks=ticks)
     sink, captured = _capturing_sink()
 
-    await detector.evaluate_asset("A1", sink)
+    await detector.evaluate_asset(AssetId("A1"), sink)
 
     assert len(captured) == 1
     body = captured[0].body

@@ -23,6 +23,7 @@ import pytest
 from pscanner.alerts.models import Alert
 from pscanner.config import WhalesConfig
 from pscanner.detectors.whales import WhalesDetector
+from pscanner.poly.ids import AssetId, ConditionId, MarketId
 from pscanner.poly.models import Market
 from pscanner.store.repo import CachedMarket, WalletFirstSeen, WalletTrade
 
@@ -30,9 +31,9 @@ from pscanner.store.repo import CachedMarket, WalletFirstSeen, WalletTrade
 # the wallet-first-seen cache TTL check (which uses real time) sees a fresh row.
 _NOW = int(time.time())
 _WALLET = "0xnewwhale"
-_ASSET_ID = "asset-1"
-_MARKET_ID = "market-1"
-_CONDITION_ID = "cond-1"
+_ASSET_ID = AssetId("asset-1")
+_MARKET_ID = MarketId("market-1")
+_CONDITION_ID = ConditionId("cond-1")
 
 
 def _make_config(**overrides: Any) -> WhalesConfig:

@@ -8,6 +8,7 @@ import time
 from typing import Any
 
 from pscanner.alerts.models import Alert
+from pscanner.poly.ids import AssetId, ConditionId, EventId, EventSlug, MarketId
 from pscanner.poly.models import Market
 from pscanner.store.repo import (
     AlertsRepo,
@@ -226,7 +227,7 @@ def test_position_snapshot_upsert_round_trip(tmp_db: sqlite3.Connection) -> None
     repo = PositionSnapshotsRepo(tmp_db)
     repo.upsert(
         address="0xabc",
-        market_id="m1",
+        market_id=ConditionId("m1"),
         side="YES",
         size=100.0,
         avg_price=0.42,
@@ -244,8 +245,9 @@ def test_position_snapshot_upsert_round_trip(tmp_db: sqlite3.Connection) -> None
 
 def test_position_snapshot_second_upsert_updates(tmp_db: sqlite3.Connection) -> None:
     repo = PositionSnapshotsRepo(tmp_db)
-    repo.upsert(address="0xabc", market_id="m1", side="YES", size=100.0, avg_price=0.42)
-    repo.upsert(address="0xabc", market_id="m1", side="YES", size=250.0, avg_price=0.50)
+    cond_m1 = ConditionId("m1")
+    repo.upsert(address="0xabc", market_id=cond_m1, side="YES", size=100.0, avg_price=0.42)
+    repo.upsert(address="0xabc", market_id=cond_m1, side="YES", size=250.0, avg_price=0.50)
 
     snaps = repo.get_for_wallet("0xabc")
     assert len(snaps) == 1
@@ -255,9 +257,11 @@ def test_position_snapshot_second_upsert_updates(tmp_db: sqlite3.Connection) -> 
 
 def test_position_snapshot_distinct_sides_kept(tmp_db: sqlite3.Connection) -> None:
     repo = PositionSnapshotsRepo(tmp_db)
-    repo.upsert(address="0xabc", market_id="m1", side="YES", size=100.0, avg_price=0.42)
-    repo.upsert(address="0xabc", market_id="m1", side="NO", size=50.0, avg_price=0.55)
-    repo.upsert(address="0xabc", market_id="m2", side="YES", size=10.0, avg_price=0.10)
+    cond_m1 = ConditionId("m1")
+    cond_m2 = ConditionId("m2")
+    repo.upsert(address="0xabc", market_id=cond_m1, side="YES", size=100.0, avg_price=0.42)
+    repo.upsert(address="0xabc", market_id=cond_m1, side="NO", size=50.0, avg_price=0.55)
+    repo.upsert(address="0xabc", market_id=cond_m2, side="YES", size=10.0, avg_price=0.10)
 
     snaps = repo.get_for_wallet("0xabc")
     assert len(snaps) == 3
@@ -270,8 +274,8 @@ def test_position_snapshot_distinct_sides_kept(tmp_db: sqlite3.Connection) -> No
 
 def test_position_snapshot_get_for_wallet_isolates_addresses(tmp_db: sqlite3.Connection) -> None:
     repo = PositionSnapshotsRepo(tmp_db)
-    repo.upsert(address="0xabc", market_id="m1", side="YES", size=1.0, avg_price=0.1)
-    repo.upsert(address="0xdef", market_id="m1", side="YES", size=2.0, avg_price=0.2)
+    repo.upsert(address="0xabc", market_id=ConditionId("m1"), side="YES", size=1.0, avg_price=0.1)
+    repo.upsert(address="0xdef", market_id=ConditionId("m1"), side="YES", size=2.0, avg_price=0.2)
 
     assert len(repo.get_for_wallet("0xabc")) == 1
     assert len(repo.get_for_wallet("0xdef")) == 1
@@ -280,12 +284,13 @@ def test_position_snapshot_get_for_wallet_isolates_addresses(tmp_db: sqlite3.Con
 
 def test_position_snapshot_previous_size(tmp_db: sqlite3.Connection) -> None:
     repo = PositionSnapshotsRepo(tmp_db)
-    assert repo.previous_size("0xabc", "m1", "YES") is None
+    cond_m1 = ConditionId("m1")
+    assert repo.previous_size("0xabc", cond_m1, "YES") is None
 
-    repo.upsert(address="0xabc", market_id="m1", side="YES", size=42.5, avg_price=0.3)
-    assert repo.previous_size("0xabc", "m1", "YES") == 42.5
-    assert repo.previous_size("0xabc", "m1", "NO") is None
-    assert repo.previous_size("0xother", "m1", "YES") is None
+    repo.upsert(address="0xabc", market_id=cond_m1, side="YES", size=42.5, avg_price=0.3)
+    assert repo.previous_size("0xabc", cond_m1, "YES") == 42.5
+    assert repo.previous_size("0xabc", cond_m1, "NO") is None
+    assert repo.previous_size("0xother", cond_m1, "YES") is None
 
 
 def test_wallet_first_seen_round_trip(tmp_db: sqlite3.Connection) -> None:
@@ -356,7 +361,7 @@ def test_market_cache_upsert_updates_in_place(
 
 def test_market_cache_get_unknown_returns_none(tmp_db: sqlite3.Connection) -> None:
     repo = MarketCacheRepo(tmp_db)
-    assert repo.get("does-not-exist") is None
+    assert repo.get(MarketId("does-not-exist")) is None
 
 
 def test_market_cache_list_active_filters(
@@ -424,7 +429,7 @@ def test_market_cache_get_by_condition_id_unknown_returns_none(
     tmp_db: sqlite3.Connection,
 ) -> None:
     repo = MarketCacheRepo(tmp_db)
-    assert repo.get_by_condition_id("0xunknown") is None
+    assert repo.get_by_condition_id(ConditionId("0xunknown")) is None
 
 
 def test_market_cache_get_by_condition_id_handles_null_condition(
@@ -437,7 +442,7 @@ def test_market_cache_get_by_condition_id_handles_null_condition(
     repo = MarketCacheRepo(tmp_db)
     repo.upsert(market)
     # An empty-string lookup must not match the NULL row.
-    assert repo.get_by_condition_id("") is None
+    assert repo.get_by_condition_id(ConditionId("")) is None
 
 
 def _make_alert(
@@ -588,10 +593,10 @@ def _make_trade(
 ) -> WalletTrade:
     return WalletTrade(
         transaction_hash=txn,
-        asset_id=asset_id,
+        asset_id=AssetId(asset_id),
         side=side,
         wallet=wallet,
-        condition_id=condition_id,
+        condition_id=ConditionId(condition_id),
         size=10.0,
         price=0.42,
         usd_value=4.2,
@@ -613,10 +618,10 @@ def test_wallet_trades_insert_round_trips_all_fields(tmp_db: sqlite3.Connection)
     repo = WalletTradesRepo(tmp_db)
     trade = WalletTrade(
         transaction_hash="0xtx9",
-        asset_id="asset-9",
+        asset_id=AssetId("asset-9"),
         side="SELL",
         wallet="0xWALLET",
-        condition_id="cond-9",
+        condition_id=ConditionId("cond-9"),
         size=123.5,
         price=0.6125,
         usd_value=75.64,
@@ -675,7 +680,7 @@ def test_distinct_wallets_for_condition_returns_unique_set(
     repo.insert(_make_trade(txn="0x3", wallet="0xb", condition_id="cond-1", timestamp=150))
     repo.insert(_make_trade(txn="0x4", wallet="0xc", condition_id="cond-2", timestamp=200))
 
-    wallets = repo.distinct_wallets_for_condition("cond-1", since=0)
+    wallets = repo.distinct_wallets_for_condition(ConditionId("cond-1"), since=0)
     assert wallets == {"0xa", "0xb"}
 
 
@@ -686,9 +691,9 @@ def test_distinct_wallets_for_condition_respects_since_filter(
     repo.insert(_make_trade(txn="0x1", wallet="0xold", condition_id="cond-1", timestamp=50))
     repo.insert(_make_trade(txn="0x2", wallet="0xnew", condition_id="cond-1", timestamp=200))
 
-    assert repo.distinct_wallets_for_condition("cond-1", since=100) == {"0xnew"}
-    assert repo.distinct_wallets_for_condition("cond-1", since=0) == {"0xold", "0xnew"}
-    assert repo.distinct_wallets_for_condition("cond-1", since=300) == set()
+    assert repo.distinct_wallets_for_condition(ConditionId("cond-1"), since=100) == {"0xnew"}
+    assert repo.distinct_wallets_for_condition(ConditionId("cond-1"), since=0) == {"0xold", "0xnew"}
+    assert repo.distinct_wallets_for_condition(ConditionId("cond-1"), since=300) == set()
 
 
 def test_distinct_wallets_for_unknown_condition_returns_empty_set(
@@ -696,7 +701,7 @@ def test_distinct_wallets_for_unknown_condition_returns_empty_set(
 ) -> None:
     repo = WalletTradesRepo(tmp_db)
     repo.insert(_make_trade(txn="0x1", wallet="0xa", condition_id="cond-1", timestamp=100))
-    assert repo.distinct_wallets_for_condition("cond-other", since=0) == set()
+    assert repo.distinct_wallets_for_condition(ConditionId("cond-other"), since=0) == set()
 
 
 def _make_history_row(
@@ -714,7 +719,7 @@ def _make_history_row(
 ) -> WalletPositionsHistoryRow:
     return WalletPositionsHistoryRow(
         wallet=wallet,
-        condition_id=condition_id,
+        condition_id=ConditionId(condition_id),
         outcome=outcome,
         size=size,
         avg_price=avg_price,
@@ -868,8 +873,8 @@ def _make_market_snapshot(
     snapshot_at: int = 1_700_000_000,
 ) -> MarketSnapshot:
     return MarketSnapshot(
-        market_id=market_id,
-        event_id=event_id,
+        market_id=MarketId(market_id),
+        event_id=EventId(event_id) if event_id is not None else None,
         outcome_prices_json=outcome_prices_json,
         liquidity_usd=liquidity_usd,
         volume_usd=volume_usd,
@@ -883,7 +888,7 @@ def test_market_snapshots_insert_round_trips_all_fields(tmp_db: sqlite3.Connecti
     snap = _make_market_snapshot()
     assert repo.insert(snap) is True
 
-    rows = repo.recent_for_market("m1")
+    rows = repo.recent_for_market(MarketId("m1"))
     assert len(rows) == 1
     assert rows[0] == snap
 
@@ -900,7 +905,7 @@ def test_market_snapshots_insert_round_trips_none_optionals(
     )
     assert repo.insert(snap) is True
 
-    got = repo.recent_for_market("m1")[0]
+    got = repo.recent_for_market(MarketId("m1"))[0]
     assert got.event_id is None
     assert got.liquidity_usd is None
     assert got.volume_usd is None
@@ -922,10 +927,10 @@ def test_market_snapshots_two_snapshots_kept_and_ordered_desc(
     repo.insert(_make_market_snapshot(snapshot_at=300))
     repo.insert(_make_market_snapshot(snapshot_at=200))
 
-    rows = repo.recent_for_market("m1")
+    rows = repo.recent_for_market(MarketId("m1"))
     assert [r.snapshot_at for r in rows] == [300, 200, 100]
 
-    limited = repo.recent_for_market("m1", limit=2)
+    limited = repo.recent_for_market(MarketId("m1"), limit=2)
     assert [r.snapshot_at for r in limited] == [300, 200]
 
 
@@ -954,9 +959,9 @@ def _make_event_snapshot(
     snapshot_at: int = 1_700_000_000,
 ) -> EventSnapshot:
     return EventSnapshot(
-        event_id=event_id,
+        event_id=EventId(event_id),
         title=title,
-        slug=slug,
+        slug=EventSlug(slug),
         liquidity_usd=liquidity_usd,
         volume_usd=volume_usd,
         active=active,
@@ -971,7 +976,7 @@ def test_event_snapshots_insert_round_trips_all_fields(tmp_db: sqlite3.Connectio
     snap = _make_event_snapshot()
     assert repo.insert(snap) is True
 
-    rows = repo.recent_for_event("evt-1")
+    rows = repo.recent_for_event(EventId("evt-1"))
     assert len(rows) == 1
     assert rows[0] == snap
 
@@ -988,7 +993,7 @@ def test_event_snapshots_insert_round_trips_none_optionals_and_closed(
     )
     assert repo.insert(snap) is True
 
-    got = repo.recent_for_event("evt-1")[0]
+    got = repo.recent_for_event(EventId("evt-1"))[0]
     assert got.liquidity_usd is None
     assert got.volume_usd is None
     assert got.active is False
@@ -1010,10 +1015,10 @@ def test_event_snapshots_recent_for_event_orders_desc_and_limits(
     repo.insert(_make_event_snapshot(snapshot_at=300))
     repo.insert(_make_event_snapshot(snapshot_at=200))
 
-    rows = repo.recent_for_event("evt-1")
+    rows = repo.recent_for_event(EventId("evt-1"))
     assert [r.snapshot_at for r in rows] == [300, 200, 100]
 
-    limited = repo.recent_for_event("evt-1", limit=2)
+    limited = repo.recent_for_event(EventId("evt-1"), limit=2)
     assert [r.snapshot_at for r in limited] == [300, 200]
 
 
@@ -1038,7 +1043,7 @@ def _make_outcome_sum_row(
     snapshot_at: int = 1_700_000_000,
 ) -> EventOutcomeSumRow:
     return EventOutcomeSumRow(
-        event_id=event_id,
+        event_id=EventId(event_id),
         market_count=market_count,
         price_sum=price_sum,
         deviation=deviation,
@@ -1082,11 +1087,11 @@ def test_event_outcome_sum_by_event_id_isolates(tmp_db: sqlite3.Connection) -> N
     repo.insert(_make_outcome_sum_row(event_id="evt-1", snapshot_at=200))
     repo.insert(_make_outcome_sum_row(event_id="evt-2", snapshot_at=150))
 
-    rows = repo.by_event_id("evt-1")
+    rows = repo.by_event_id(EventId("evt-1"))
     assert [r.snapshot_at for r in rows] == [200, 100]
     assert all(r.event_id == "evt-1" for r in rows)
 
-    assert repo.by_event_id("evt-missing") == []
+    assert repo.by_event_id(EventId("evt-missing")) == []
 
 
 def test_event_outcome_sum_with_high_deviation_filters_and_orders(
@@ -1119,9 +1124,9 @@ def test_event_outcome_sum_with_high_deviation_filters_and_orders(
 
 def test_event_tag_cache_upsert_round_trip(tmp_db: sqlite3.Connection) -> None:
     repo = EventTagCacheRepo(tmp_db)
-    repo.upsert("evt-1", ["Sports", "NFL"])
+    repo.upsert(EventSlug("evt-1"), ["Sports", "NFL"])
 
-    tags = repo.get("evt-1")
+    tags = repo.get(EventSlug("evt-1"))
     assert tags == ["Sports", "NFL"]
 
 
@@ -1129,20 +1134,20 @@ def test_event_tag_cache_upsert_overwrites_and_bumps_cached_at(
     tmp_db: sqlite3.Connection,
 ) -> None:
     repo = EventTagCacheRepo(tmp_db)
-    repo.upsert("evt-1", ["Sports"])
+    repo.upsert(EventSlug("evt-1"), ["Sports"])
     first_row = tmp_db.execute(
-        "SELECT cached_at FROM event_tag_cache WHERE event_id = ?",
+        "SELECT cached_at FROM event_tag_cache WHERE event_slug = ?",
         ("evt-1",),
     ).fetchone()
     assert first_row is not None
     first_cached_at = int(first_row["cached_at"])
 
     time.sleep(1.1)
-    repo.upsert("evt-1", ["Politics", "Elections"])
+    repo.upsert(EventSlug("evt-1"), ["Politics", "Elections"])
 
-    assert repo.get("evt-1") == ["Politics", "Elections"]
+    assert repo.get(EventSlug("evt-1")) == ["Politics", "Elections"]
     second_row = tmp_db.execute(
-        "SELECT cached_at FROM event_tag_cache WHERE event_id = ?",
+        "SELECT cached_at FROM event_tag_cache WHERE event_slug = ?",
         ("evt-1",),
     ).fetchone()
     assert second_row is not None
@@ -1151,13 +1156,13 @@ def test_event_tag_cache_upsert_overwrites_and_bumps_cached_at(
 
 def test_event_tag_cache_get_returns_none_when_unknown(tmp_db: sqlite3.Connection) -> None:
     repo = EventTagCacheRepo(tmp_db)
-    assert repo.get("does-not-exist") is None
+    assert repo.get(EventSlug("does-not-exist")) is None
 
 
 def test_event_tag_cache_get_supports_empty_tag_list(tmp_db: sqlite3.Connection) -> None:
     repo = EventTagCacheRepo(tmp_db)
-    repo.upsert("evt-1", [])
-    assert repo.get("evt-1") == []
+    repo.upsert(EventSlug("evt-1"), [])
+    assert repo.get(EventSlug("evt-1")) == []
 
 
 def _twc_upsert(
@@ -1355,8 +1360,8 @@ def _make_market_tick(
     last_trade_price: float | None = 0.495,
 ) -> MarketTick:
     return MarketTick(
-        asset_id=asset_id,
-        condition_id=condition_id,
+        asset_id=AssetId(asset_id),
+        condition_id=ConditionId(condition_id),
         snapshot_at=snapshot_at,
         mid_price=mid_price,
         best_bid=best_bid,
@@ -1373,7 +1378,7 @@ def test_market_ticks_insert_round_trips_all_fields(tmp_db: sqlite3.Connection) 
     tick = _make_market_tick()
     assert repo.insert(tick) is True
 
-    rows = repo.recent_for_asset("asset-1")
+    rows = repo.recent_for_asset(AssetId("asset-1"))
     assert len(rows) == 1
     assert rows[0] == tick
 
@@ -1393,7 +1398,7 @@ def test_market_ticks_insert_round_trips_none_optionals(
     )
     assert repo.insert(tick) is True
 
-    got = repo.recent_for_asset("asset-1")[0]
+    got = repo.recent_for_asset(AssetId("asset-1"))[0]
     assert got.mid_price is None
     assert got.best_bid is None
     assert got.best_ask is None
@@ -1420,10 +1425,10 @@ def test_market_ticks_recent_for_asset_orders_desc_and_limits(
     repo.insert(_make_market_tick(snapshot_at=300))
     repo.insert(_make_market_tick(snapshot_at=200))
 
-    rows = repo.recent_for_asset("asset-1")
+    rows = repo.recent_for_asset(AssetId("asset-1"))
     assert [r.snapshot_at for r in rows] == [300, 200, 100]
 
-    limited = repo.recent_for_asset("asset-1", limit=2)
+    limited = repo.recent_for_asset(AssetId("asset-1"), limit=2)
     assert [r.snapshot_at for r in limited] == [300, 200]
 
 
@@ -1434,9 +1439,9 @@ def test_market_ticks_recent_for_asset_isolates_assets(
     repo.insert(_make_market_tick(asset_id="asset-1", snapshot_at=100))
     repo.insert(_make_market_tick(asset_id="asset-2", snapshot_at=200))
 
-    assert [r.asset_id for r in repo.recent_for_asset("asset-1")] == ["asset-1"]
-    assert [r.asset_id for r in repo.recent_for_asset("asset-2")] == ["asset-2"]
-    assert repo.recent_for_asset("asset-missing") == []
+    assert [r.asset_id for r in repo.recent_for_asset(AssetId("asset-1"))] == ["asset-1"]
+    assert [r.asset_id for r in repo.recent_for_asset(AssetId("asset-2"))] == ["asset-2"]
+    assert repo.recent_for_asset(AssetId("asset-missing")) == []
 
 
 def test_market_ticks_recent_mids_in_window_filters_time_and_orders_asc(
@@ -1454,7 +1459,7 @@ def test_market_ticks_recent_mids_in_window_filters_time_and_orders_asc(
     repo.insert(_make_market_tick(snapshot_at=now + 5, mid_price=0.60))
 
     pairs = repo.recent_mids_in_window(
-        "asset-1",
+        AssetId("asset-1"),
         window_seconds=60,
         now_ts=now,
     )
@@ -1471,7 +1476,7 @@ def test_market_ticks_recent_mids_in_window_drops_null_mid_rows(
     repo.insert(_make_market_tick(snapshot_at=now - 10, mid_price=None))
 
     pairs = repo.recent_mids_in_window(
-        "asset-1",
+        AssetId("asset-1"),
         window_seconds=60,
         now_ts=now,
     )
@@ -1486,8 +1491,8 @@ def test_market_ticks_recent_mids_in_window_isolates_assets(
     repo.insert(_make_market_tick(asset_id="asset-1", snapshot_at=now - 10, mid_price=0.5))
     repo.insert(_make_market_tick(asset_id="asset-2", snapshot_at=now - 10, mid_price=0.7))
 
-    one = repo.recent_mids_in_window("asset-1", window_seconds=60, now_ts=now)
-    two = repo.recent_mids_in_window("asset-2", window_seconds=60, now_ts=now)
+    one = repo.recent_mids_in_window(AssetId("asset-1"), window_seconds=60, now_ts=now)
+    two = repo.recent_mids_in_window(AssetId("asset-2"), window_seconds=60, now_ts=now)
     assert one == [(now - 10, 0.5)]
     assert two == [(now - 10, 0.7)]
 
@@ -1499,8 +1504,8 @@ def test_market_ticks_recent_mids_in_window_empty_when_no_match(
     now = 1_700_000_000
     repo.insert(_make_market_tick(snapshot_at=now - 1000, mid_price=0.5))
 
-    assert repo.recent_mids_in_window("asset-1", window_seconds=60, now_ts=now) == []
-    assert repo.recent_mids_in_window("asset-missing", window_seconds=60, now_ts=now) == []
+    assert repo.recent_mids_in_window(AssetId("asset-1"), window_seconds=60, now_ts=now) == []
+    assert repo.recent_mids_in_window(AssetId("asset-missing"), window_seconds=60, now_ts=now) == []
 
 
 def test_market_ticks_distinct_count_and_count_by_asset(

@@ -30,6 +30,7 @@ from pscanner.alerts.sink import AlertSink
 from pscanner.config import SmartMoneyConfig
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
+from pscanner.poly.ids import EventSlug
 from pscanner.poly.models import ClosedPosition, LeaderboardEntry, Position
 from pscanner.store.repo import (
     EventTagCacheRepo,
@@ -230,7 +231,7 @@ class SmartMoneyDetector:
         """
         inserted = 0
         async for event in self._gamma_client.iter_events(active=True, closed=False):
-            key = event.slug or event.id
+            key = event.slug or (EventSlug(event.id) if event.id else None)
             if not key:
                 continue
             if self._event_tag_cache.get(key) is not None:
@@ -291,21 +292,21 @@ class SmartMoneyDetector:
             wallet: 0x-prefixed proxy wallet address.
             closed: The wallet's full list of closed positions.
         """
-        unique_event_ids = {
-            event_id
+        unique_event_slugs = {
+            event_slug
             for position in closed
-            if (event_id := _event_id_for_position(position)) is not None
+            if (event_slug := _event_slug_for_position(position)) is not None
         }
-        category_by_event: dict[str, str | None] = {}
-        for event_id in unique_event_ids:
-            category_by_event[event_id] = await self._lookup_category(event_id)
+        category_by_slug: dict[EventSlug, str | None] = {}
+        for event_slug in unique_event_slugs:
+            category_by_slug[event_slug] = await self._lookup_category(event_slug)
         buckets: dict[str, list[ClosedPosition]] = {}
         for position in closed:
-            event_id = _event_id_for_position(position)
-            if event_id is None:
+            event_slug = _event_slug_for_position(position)
+            if event_slug is None:
                 category: str | None = "thesis"
             else:
-                category = category_by_event.get(event_id)
+                category = category_by_slug.get(event_slug)
             if category is None:
                 continue
             buckets.setdefault(category, []).append(position)
@@ -324,12 +325,12 @@ class SmartMoneyDetector:
                 total_stake_usd=cat_metrics.total_stake_usd,
             )
 
-    async def _lookup_category(self, event_id: str) -> str | None:
+    async def _lookup_category(self, event_slug: EventSlug) -> str | None:
         """Categorise an event by tags, hitting the cache then gamma on miss.
 
         Args:
-            event_id: Event identifier (slug, since closed-position payloads
-                expose ``eventSlug`` rather than a numeric id).
+            event_slug: Event slug (closed-position payloads expose
+                ``eventSlug`` rather than a numeric id).
 
         Returns:
             ``"sports"`` if the event carries the ``Sports`` tag,
@@ -338,21 +339,21 @@ class SmartMoneyDetector:
             and the gamma fetch fails or returns no event (the position is
             then dropped from the per-category breakdown).
         """
-        tags = self._event_tag_cache.get(event_id)
+        tags = self._event_tag_cache.get(event_slug)
         if tags is None:
             try:
-                event = await self._gamma_client.get_event_by_slug(event_id)
+                event = await self._gamma_client.get_event_by_slug(event_slug)
             except Exception:
-                _LOG.warning("smart_money.event_tag_fetch_failed", event_id=event_id)
+                _LOG.warning("smart_money.event_tag_fetch_failed", event_slug=event_slug)
                 return None
             if event is None:
-                _LOG.warning("smart_money.event_tag_unknown_slug", event_id=event_id)
+                _LOG.warning("smart_money.event_tag_unknown_slug", event_slug=event_slug)
                 return None
             tags = list(event.tags)
-            self._event_tag_cache.upsert(event_id, tags)
+            self._event_tag_cache.upsert(event_slug, tags)
             _LOG.debug(
                 "smart_money.event_tag_cache_miss",
-                event_id=event_id,
+                event_slug=event_slug,
                 tag_count=len(tags),
             )
         return _categorize(tags)
@@ -406,8 +407,8 @@ class SmartMoneyDetector:
         )
 
 
-def _event_id_for_position(position: ClosedPosition) -> str | None:
-    """Return the position's event identifier or ``None`` if missing/blank.
+def _event_slug_for_position(position: ClosedPosition) -> EventSlug | None:
+    """Return the position's event slug or ``None`` if missing/blank.
 
     The data-api ``/closed-positions`` payload exposes ``eventSlug`` rather
     than a numeric event id; the cache and gamma both treat slugs as valid
@@ -420,7 +421,7 @@ def _event_id_for_position(position: ClosedPosition) -> str | None:
     text = str(raw).strip()
     if not text:
         return None
-    return text
+    return EventSlug(text)
 
 
 def _categorize(tags: list[str]) -> str:

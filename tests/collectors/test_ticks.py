@@ -17,6 +17,7 @@ import pytest
 
 from pscanner.collectors.ticks import MarketTickCollector, _Orderbook
 from pscanner.config import TicksConfig
+from pscanner.poly.ids import AssetId, ConditionId, MarketId
 from pscanner.poly.models import Market, Position, WsBookMessage
 from pscanner.store.repo import CachedMarket, MarketTicksRepo
 
@@ -133,7 +134,7 @@ def _make_cached_market(
 ) -> CachedMarket:
     """Build a ``CachedMarket`` with the fields the collector exposes."""
     return CachedMarket(
-        market_id=market_id,
+        market_id=MarketId(market_id),
         event_id=None,
         title=title,
         liquidity_usd=None,
@@ -141,7 +142,7 @@ def _make_cached_market(
         outcome_prices=[0.5, 0.5],
         active=True,
         cached_at=_BASE_TS,
-        condition_id=condition_id,
+        condition_id=ConditionId(condition_id),
         event_slug=None,
     )
 
@@ -193,7 +194,7 @@ async def test_book_message_updates_orderbook(tmp_db: sqlite3.Connection) -> Non
         last_trade_price="0.41",
     )
     await collector._handle_message(msg)
-    book = collector._books["A1"]
+    book = collector._books[AssetId("A1")]
     assert book.bids == {0.40: 100.0}
     assert book.asks == {0.42: 50.0}
     assert book.last_trade_price == 0.41
@@ -217,7 +218,7 @@ async def test_price_change_delta_updates_levels(tmp_db: sqlite3.Connection) -> 
         ],
     )
     await collector._handle_message(delta)
-    assert collector._books["A1"].bids == {0.40: 50.0}
+    assert collector._books[AssetId("A1")].bids == {0.40: 50.0}
 
 
 async def test_price_change_size_zero_deletes_level(tmp_db: sqlite3.Connection) -> None:
@@ -238,7 +239,7 @@ async def test_price_change_size_zero_deletes_level(tmp_db: sqlite3.Connection) 
         changes=[{"asset_id": "A1", "price": "0.40", "size": "0", "side": "BUY"}],
     )
     await collector._handle_message(delta)
-    assert collector._books["A1"].bids == {0.39: 75.0}
+    assert collector._books[AssetId("A1")].bids == {0.39: 75.0}
 
 
 async def test_snapshot_computes_mid_spread_depth(tmp_db: sqlite3.Connection) -> None:
@@ -265,7 +266,7 @@ async def test_snapshot_computes_mid_spread_depth(tmp_db: sqlite3.Connection) ->
     )
     inserted = await collector.snapshot_once()
     assert inserted == 1
-    rows = repo.recent_for_asset("A1")
+    rows = repo.recent_for_asset(AssetId("A1"))
     assert len(rows) == 1
     row = rows[0]
     assert row.best_bid == pytest.approx(0.50)
@@ -285,7 +286,7 @@ async def test_snapshot_skips_assets_with_no_condition_and_no_mid(
     """An empty orderbook with no condition lookup is skipped entirely."""
     collector, repo, _, _, _, _ = _make_collector(tmp_db=tmp_db)
     # Seed an empty orderbook for X1 directly (no message ingested).
-    collector._books["X1"] = _Orderbook()
+    collector._books[AssetId("X1")] = _Orderbook()
     inserted = await collector.snapshot_once()
     assert inserted == 0
     assert "X1" not in repo.count_by_asset()
@@ -316,8 +317,8 @@ async def test_subscription_refresh_wallet_positions(
     subscribed_arg = ws.subscribe.await_args.args[0]
     assert sorted(subscribed_arg) == ["A1", "A2"]
     assert collector.subscribed_asset_ids() == {"A1", "A2"}
-    assert collector._asset_to_condition["A1"] == "0xcond1"
-    assert collector._asset_to_condition["A2"] == "0xcond1"
+    assert collector._asset_to_condition[AssetId("A1")] == "0xcond1"
+    assert collector._asset_to_condition[AssetId("A2")] == "0xcond1"
 
 
 async def test_subscription_refresh_volume_floor(
@@ -432,7 +433,7 @@ async def test_get_recent_mids_filters_by_window(
         "pscanner.collectors.ticks.time.time",
         lambda: _BASE_TS + 65,
     )
-    pairs = collector.get_recent_mids("A1", window_seconds=30)
+    pairs = collector.get_recent_mids(AssetId("A1"), window_seconds=30)
     assert len(pairs) == 1
     ts, mid = pairs[0]
     assert ts == _BASE_TS + 60
@@ -497,7 +498,7 @@ async def test_get_recent_ticks_returns_window(
         "pscanner.collectors.ticks.time.time",
         lambda: _BASE_TS + 65,
     )
-    rows = collector.get_recent_ticks("A1", window_seconds=40)
+    rows = collector.get_recent_ticks(AssetId("A1"), window_seconds=40)
     assert [row.snapshot_at for row in rows] == [_BASE_TS + 30, _BASE_TS + 60]
     assert all(row.bid_depth_top5 == pytest.approx(100.0) for row in rows)
     assert all(row.ask_depth_top5 == pytest.approx(50.0) for row in rows)
@@ -509,7 +510,7 @@ async def test_get_recent_ticks_empty_for_unknown_asset(
 ) -> None:
     """An asset with no captured ticks returns the empty list."""
     collector, _, _, _, _, _ = _make_collector(tmp_db=tmp_db)
-    assert collector.get_recent_ticks("unknown", window_seconds=60) == []
+    assert collector.get_recent_ticks(AssetId("unknown"), window_seconds=60) == []
 
 
 async def test_get_market_for_asset_populated_on_refresh(
@@ -539,8 +540,8 @@ async def test_get_market_for_asset_populated_on_refresh(
         market_cache=market_cache,
     )
     await collector._refresh_subscriptions()
-    assert collector.get_market_for_asset("A1") is cached
-    assert collector.get_market_for_asset("A2") is cached
+    assert collector.get_market_for_asset(AssetId("A1")) is cached
+    assert collector.get_market_for_asset(AssetId("A2")) is cached
     market_cache.get.assert_called_with("m1")
 
 
@@ -549,7 +550,7 @@ async def test_get_market_for_asset_unknown_returns_none(
 ) -> None:
     """An asset with no mapping returns ``None`` (no crash, no fallback)."""
     collector, _, _, _, _, _ = _make_collector(tmp_db=tmp_db)
-    assert collector.get_market_for_asset("never-seen") is None
+    assert collector.get_market_for_asset(AssetId("never-seen")) is None
 
 
 async def test_get_market_for_asset_without_market_cache_returns_none(
@@ -571,7 +572,7 @@ async def test_get_market_for_asset_without_market_cache_returns_none(
         gamma_client=gamma,
     )
     await collector._refresh_subscriptions()
-    assert collector.get_market_for_asset("A1") is None
+    assert collector.get_market_for_asset(AssetId("A1")) is None
 
 
 async def test_run_exits_cleanly_when_stop_event_set(

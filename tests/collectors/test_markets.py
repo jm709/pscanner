@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from pscanner.collectors.markets import MarketCollector
+from pscanner.poly.ids import MarketId
 from pscanner.poly.models import Market
 from pscanner.store.repo import MarketSnapshotsRepo
 
@@ -110,7 +111,7 @@ async def test_happy_path_five_markets_persisted(tmp_db: sqlite3.Connection) -> 
 
     assert inserted == 5
     for i in range(5):
-        rows = repo.recent_for_market(f"m{i}")
+        rows = repo.recent_for_market(MarketId(f"m{i}"))
         assert len(rows) == 1
         row = rows[0]
         assert row.market_id == f"m{i}"
@@ -193,7 +194,7 @@ async def test_empty_outcome_prices_serialise_to_empty_list(
     inserted = await collector.snapshot_all_markets()
 
     assert inserted == 1
-    rows = repo.recent_for_market("m1")
+    rows = repo.recent_for_market(MarketId("m1"))
     assert len(rows) == 1
     assert rows[0].outcome_prices_json == "[]"
     assert json.loads(rows[0].outcome_prices_json) == []

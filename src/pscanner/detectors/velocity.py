@@ -24,6 +24,7 @@ from pscanner.alerts.models import Alert, DetectorName, Severity
 from pscanner.alerts.sink import AlertSink
 from pscanner.collectors.ticks import MarketTickCollector
 from pscanner.config import VelocityConfig
+from pscanner.poly.ids import AssetId, ConditionId
 from pscanner.store.repo import MarketCacheRepo, MarketTick
 from pscanner.util.clock import Clock, RealClock
 
@@ -91,7 +92,7 @@ class PriceVelocityDetector:
                 _LOG.exception("velocity.poll_failed")
             await self._clock.sleep(self._config.poll_interval_seconds)
 
-    async def evaluate_asset(self, asset_id: str, sink: AlertSink) -> None:
+    async def evaluate_asset(self, asset_id: AssetId, sink: AlertSink) -> None:
         """Evaluate one asset's velocity and emit an alert if the threshold trips.
 
         Public so it can be driven from tests and from ``run_once``.
@@ -165,7 +166,7 @@ class PriceVelocityDetector:
 
 def _build_alert(
     *,
-    asset_id: str,
+    asset_id: AssetId,
     start_ts: int,
     end_ts: int,
     start_price: float,
@@ -174,7 +175,7 @@ def _build_alert(
     severity: Severity,
     samples: int,
     market_title: str | None,
-    condition_id: str | None,
+    condition_id: ConditionId | None,
 ) -> Alert:
     """Construct the Alert payload for a velocity event.
 

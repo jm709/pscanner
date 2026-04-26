@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from pscanner.collectors.events import EventCollector
+from pscanner.poly.ids import EventId, EventSlug
 from pscanner.poly.models import Event
 from pscanner.store.repo import EventSnapshotsRepo, EventTagCacheRepo
 
@@ -119,7 +120,7 @@ async def test_happy_path_four_events_persisted(tmp_db: sqlite3.Connection) -> N
     assert inserted == 4
     counts = repo.count_by_event()
     assert counts == {"e1": 1, "e2": 1, "e3": 1, "e4": 1}
-    rows_e2 = repo.recent_for_event("e2")
+    rows_e2 = repo.recent_for_event(EventId("e2"))
     assert len(rows_e2) == 1
     assert rows_e2[0].title == "Event 2"
     assert rows_e2[0].slug == "event-2"
@@ -204,7 +205,7 @@ async def test_event_with_no_markets_serialises_market_count_zero(
     inserted = await collector.snapshot_all_events()
 
     assert inserted == 1
-    rows = repo.recent_for_event("e1")
+    rows = repo.recent_for_event(EventId("e1"))
     assert len(rows) == 1
     assert rows[0].market_count == 0
 
@@ -313,9 +314,9 @@ async def test_event_tag_cache_populated_per_event(tmp_db: sqlite3.Connection) -
 
     await collector.snapshot_all_events()
 
-    assert tag_cache.get("evt-1") == ["Sports", "NFL"]
-    assert tag_cache.get("evt-2") == ["Esports"]
-    assert tag_cache.get("evt-3") == []
+    assert tag_cache.get(EventSlug("evt-1")) == ["Sports", "NFL"]
+    assert tag_cache.get(EventSlug("evt-2")) == ["Esports"]
+    assert tag_cache.get(EventSlug("evt-3")) == []
 
 
 @pytest.mark.asyncio
