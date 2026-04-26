@@ -9,6 +9,7 @@ so the existing :class:`ClusterDetector` can verify them on its next sweep.
 
 from __future__ import annotations
 
+import asyncio
 import statistics
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -16,8 +17,11 @@ from typing import Any
 
 import structlog
 
+from pscanner.alerts.models import Alert
+from pscanner.alerts.sink import AlertSink
 from pscanner.config import MoveAttributionConfig
 from pscanner.poly.data import DataClient
+from pscanner.store.repo import WatchlistRepo
 
 _LOG = structlog.get_logger(__name__)
 
@@ -269,4 +273,166 @@ async def _backwalk(
     return since_ts, until_ts, burst_trades
 
 
-__all__ = ["BurstHit", "_backwalk", "_detect_burst"]
+class MoveAttributionDetector:
+    """Alert-driven detector that bootstraps cluster candidates."""
+
+    name = "move_attribution"
+
+    def __init__(
+        self,
+        *,
+        config: MoveAttributionConfig,
+        data_client: DataClient,
+        watchlist_repo: WatchlistRepo,
+    ) -> None:
+        """Bind helpers and the watchlist write target.
+
+        Args:
+            config: Section of the root config controlling thresholds.
+            data_client: Used for the single ``/trades?market=`` paginated
+                fetch on the hot path.
+            watchlist_repo: Used to upsert each contributor wallet.
+        """
+        self._config = config
+        self._data_client = data_client
+        self._watchlist_repo = watchlist_repo
+        self._sink: AlertSink | None = None
+        self._pending_tasks: set[asyncio.Task[None]] = set()
+
+    async def run(self, sink: AlertSink) -> None:
+        """Park forever — this detector is alert-driven, not periodic."""
+        self._sink = sink
+        await asyncio.Event().wait()
+
+    def handle_alert_sync(self, alert: Alert) -> None:
+        """Subscriber callback fanned out by ``AlertSink.emit``.
+
+        Spawns ``evaluate(alert)`` as a tracked task so it isn't garbage
+        collected mid-flight. No-ops if there is no running event loop.
+        """
+        if alert.detector not in self._config.trigger_detectors:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            _LOG.debug("move_attribution.no_event_loop", alert_key=alert.alert_key)
+            return
+        task = loop.create_task(self.evaluate(alert))
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
+
+    async def evaluate(self, alert: Alert) -> None:
+        """Run the full pipeline for one triggering alert."""
+        condition_id = alert.body.get("condition_id") if isinstance(alert.body, dict) else None
+        if not isinstance(condition_id, str):
+            _LOG.debug("move_attribution.no_market", alert_key=alert.alert_key)
+            return
+        burst_trades = await self._fetch_burst_trades(alert, condition_id)
+        if burst_trades is None:
+            return
+        hits = _detect_burst(burst_trades, cfg=self._config)
+        if not hits:
+            return
+        await self._emit_and_watchlist(alert, condition_id, hits)
+
+    async def _fetch_burst_trades(
+        self,
+        alert: Alert,
+        condition_id: str,
+    ) -> list[dict[str, Any]] | None:
+        """Run ``_backwalk`` and swallow API errors. Returns ``None`` on failure."""
+        try:
+            _, _, burst_trades = await _backwalk(
+                self._data_client,
+                condition_id=condition_id,
+                alert_ts=alert.created_at,
+                cfg=self._config,
+            )
+        except Exception:
+            _LOG.warning(
+                "move_attribution.fetch_failed",
+                alert_key=alert.alert_key,
+                condition_id=condition_id,
+                exc_info=True,
+            )
+            return None
+        return burst_trades
+
+    async def _emit_and_watchlist(
+        self,
+        triggering: Alert,
+        condition_id: str,
+        hits: list[BurstHit],
+    ) -> None:
+        """Emit one ``cluster.candidate`` per hit, watchlist contributors."""
+        sink = self._sink
+        if sink is None:
+            _LOG.warning("move_attribution.no_sink", alert_key=triggering.alert_key)
+            return
+        reason = f"cluster.candidate-{triggering.alert_key}"
+        for hit in hits:
+            await self._emit_alert_for_hit(sink, triggering, condition_id, hit)
+            self._watchlist_contributors(triggering, hit, reason)
+
+    async def _emit_alert_for_hit(
+        self,
+        sink: AlertSink,
+        triggering: Alert,
+        condition_id: str,
+        hit: BurstHit,
+    ) -> None:
+        """Emit a single ``cluster.candidate`` alert for one burst hit."""
+        alert_key = f"cluster.candidate:{condition_id}:{hit.outcome}:{hit.side}:{hit.bucket_ts}"
+        await sink.emit(
+            Alert(
+                detector="move_attribution",
+                alert_key=alert_key,
+                severity="med",
+                title=(
+                    f"cluster candidate: {len(hit.wallets)} wallets, {hit.outcome} {hit.side} burst"
+                ),
+                body={
+                    "condition_id": condition_id,
+                    "outcome": hit.outcome,
+                    "side": hit.side,
+                    "bucket_ts": hit.bucket_ts,
+                    "n_wallets": len(hit.wallets),
+                    "n_trades": hit.n_trades,
+                    "median_size": hit.median_size,
+                    "cv": hit.cv,
+                    "triggering_alert_key": triggering.alert_key,
+                },
+                created_at=triggering.created_at,
+            )
+        )
+
+    def _watchlist_contributors(
+        self,
+        triggering: Alert,
+        hit: BurstHit,
+        reason: str,
+    ) -> None:
+        """Upsert each contributor wallet, swallowing per-row failures."""
+        for wallet in hit.wallets:
+            try:
+                self._watchlist_repo.upsert(
+                    address=wallet,
+                    source="cluster.candidate",
+                    reason=reason,
+                )
+            except Exception:
+                _LOG.warning(
+                    "move_attribution.watchlist_upsert_failed",
+                    alert_key=triggering.alert_key,
+                    address=wallet,
+                    exc_info=True,
+                )
+
+    async def aclose(self) -> None:
+        """Wait for any in-flight evaluation tasks to finish (test helper)."""
+        if not self._pending_tasks:
+            return
+        await asyncio.gather(*self._pending_tasks, return_exceptions=True)
+
+
+__all__ = ["BurstHit", "MoveAttributionDetector", "_backwalk", "_detect_burst"]

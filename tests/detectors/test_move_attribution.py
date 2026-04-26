@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 import respx
 
+from pscanner.alerts.models import Alert
+from pscanner.alerts.sink import AlertSink
 from pscanner.config import MoveAttributionConfig
-from pscanner.detectors.move_attribution import BurstHit, _backwalk, _detect_burst
+from pscanner.detectors.move_attribution import (
+    BurstHit,
+    MoveAttributionDetector,
+    _backwalk,
+    _detect_burst,
+)
 from pscanner.poly.data import DataClient
 from pscanner.poly.http import PolyHttpClient
+from pscanner.store.repo import AlertsRepo, WatchlistRepo
 
 _DATA = "https://data-api.polymarket.com"
 
@@ -235,3 +245,148 @@ async def test_backwalk_empty_trades_returns_full_cap() -> None:
         await client.aclose()
     assert (since_ts, until_ts) == (alert_ts - 7200, alert_ts)
     assert burst == []
+
+
+def _build_velocity_alert(
+    *,
+    condition_id: str = "0xabc",
+    alert_key: str = "velocity:0xabc:1",
+    created_at: int = 1_700_086_400,
+) -> Alert:
+    return Alert(
+        detector="velocity",
+        alert_key=alert_key,
+        severity="med",
+        title="market moved",
+        body={"condition_id": condition_id, "delta_price": 0.07},
+        created_at=created_at,
+    )
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_detector_emits_candidate_and_watchlists_contributors(tmp_db) -> None:
+    alert_ts = 1_700_086_400
+    burst = [
+        {
+            "proxyWallet": f"0x{i:04d}",
+            "timestamp": alert_ts - 30,
+            "side": "BUY",
+            "outcome": "Yes",
+            "size": 500.0 + i,
+            "price": 0.95,
+        }
+        for i in range(6)
+    ]
+    baseline = _gen_trades(ts_start=alert_ts - 86400, ts_end=alert_ts - 1800, gap=60)
+    page = sorted(burst + baseline, key=lambda t: -t["timestamp"])[:500]
+    respx.get(f"{_DATA}/trades").mock(return_value=httpx.Response(200, json=page))
+
+    sink = AlertSink(AlertsRepo(tmp_db))
+    watchlist = WatchlistRepo(tmp_db)
+    client = _backwalk_client()
+    try:
+        detector = MoveAttributionDetector(
+            config=_cfg(),
+            data_client=client,
+            watchlist_repo=watchlist,
+        )
+        sink.subscribe(detector.handle_alert_sync)
+        # The detector needs sink set so its async path can call sink.emit.
+        detector._sink = sink
+        await sink.emit(_build_velocity_alert(created_at=alert_ts))
+        for _ in range(10):
+            await asyncio.sleep(0)
+        await detector.aclose()
+    finally:
+        await client.aclose()
+    rendered = AlertsRepo(tmp_db).recent(limit=10)
+    candidate_alerts = [a for a in rendered if a.detector == "move_attribution"]
+    assert len(candidate_alerts) == 1
+    assert candidate_alerts[0].alert_key.startswith("cluster.candidate:")
+    watchlisted = [w.address for w in watchlist.list_active()]
+    assert sum(1 for a in watchlisted if a.startswith("0x")) >= 6
+
+
+@pytest.mark.asyncio
+async def test_detector_ignores_non_trigger_detectors(tmp_db) -> None:
+    sink = AlertSink(AlertsRepo(tmp_db))
+    watchlist = WatchlistRepo(tmp_db)
+    client = _backwalk_client()
+    try:
+        detector = MoveAttributionDetector(
+            config=_cfg(),
+            data_client=client,
+            watchlist_repo=watchlist,
+        )
+        sink.subscribe(detector.handle_alert_sync)
+        detector._sink = sink
+        a = Alert(
+            detector="whales",
+            alert_key="whales:1",
+            severity="med",
+            title="whale",
+            body={"condition_id": "0xabc"},
+            created_at=1_700_000_000,
+        )
+        await sink.emit(a)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        await detector.aclose()
+    finally:
+        await client.aclose()
+    assert watchlist.list_active() == []
+
+
+@pytest.mark.asyncio
+async def test_detector_skips_alert_without_condition_id(tmp_db) -> None:
+    sink = AlertSink(AlertsRepo(tmp_db))
+    watchlist = WatchlistRepo(tmp_db)
+    client = _backwalk_client()
+    try:
+        detector = MoveAttributionDetector(
+            config=_cfg(),
+            data_client=client,
+            watchlist_repo=watchlist,
+        )
+        sink.subscribe(detector.handle_alert_sync)
+        detector._sink = sink
+        a = Alert(
+            detector="velocity",
+            alert_key="velocity:nocond",
+            severity="med",
+            title="event-level",
+            body={"event_id": "evt-1"},
+            created_at=1_700_000_000,
+        )
+        await sink.emit(a)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        await detector.aclose()
+    finally:
+        await client.aclose()
+    assert watchlist.list_active() == []
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_detector_swallows_trades_http_error(tmp_db) -> None:
+    respx.get(f"{_DATA}/trades").mock(return_value=httpx.Response(500))
+    sink = AlertSink(AlertsRepo(tmp_db))
+    watchlist = WatchlistRepo(tmp_db)
+    client = _backwalk_client()
+    try:
+        detector = MoveAttributionDetector(
+            config=_cfg(),
+            data_client=client,
+            watchlist_repo=watchlist,
+        )
+        sink.subscribe(detector.handle_alert_sync)
+        detector._sink = sink
+        await sink.emit(_build_velocity_alert())
+        for _ in range(10):
+            await asyncio.sleep(0)
+        await detector.aclose()
+    finally:
+        await client.aclose()
+    assert watchlist.list_active() == []
