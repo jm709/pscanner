@@ -245,29 +245,26 @@ class MarketTickCollector:
                 book.condition_id = msg.market
 
             if msg.event_type == "book":
-                self._apply_book_snapshot(book, msg.data)
+                self._apply_book_snapshot(book, msg)
             elif msg.event_type == "price_change":
                 self._apply_price_changes(msg)
             elif msg.event_type == "last_trade_price":
-                self._apply_last_trade_price(book, msg.data)
+                self._apply_last_trade_price(book, msg)
             # ``tick_size_change`` is intentionally ignored.
 
-    def _apply_book_snapshot(self, book: _Orderbook, data: dict[str, Any]) -> None:
+    def _apply_book_snapshot(self, book: _Orderbook, msg: WsBookMessage) -> None:
         """Replace ``book``'s state from a full ``book`` snapshot payload."""
-        book.bids = self._parse_levels(data.get("bids", []))
-        book.asks = self._parse_levels(data.get("asks", []))
-        last = data.get("last_trade_price")
-        if last is not None:
+        book.bids = self._parse_levels(msg.bids or [])
+        book.asks = self._parse_levels(msg.asks or [])
+        if msg.last_trade_price is not None:
             try:
-                book.last_trade_price = float(last)
+                book.last_trade_price = float(msg.last_trade_price)
             except (ValueError, TypeError):
-                _LOG.debug("ticks.book.bad_last_trade_price", value=last)
+                _LOG.debug("ticks.book.bad_last_trade_price", value=msg.last_trade_price)
 
     def _apply_price_changes(self, msg: WsBookMessage) -> None:
         """Apply each per-asset price change inside a ``price_change`` payload."""
-        changes = msg.data.get("price_changes", [])
-        if not isinstance(changes, list):
-            return
+        changes = msg.price_changes or []
         for change in changes:
             if not isinstance(change, dict):
                 continue
@@ -305,10 +302,12 @@ class MarketTickCollector:
         else:
             book_dict[price] = size
 
-    def _apply_last_trade_price(self, book: _Orderbook, data: dict[str, Any]) -> None:
+    def _apply_last_trade_price(self, book: _Orderbook, msg: WsBookMessage) -> None:
         """Apply a ``last_trade_price`` payload to ``book``."""
+        if msg.last_trade_price is None:
+            return
         try:
-            value = float(data.get("price", 0))
+            value = float(msg.last_trade_price)
         except (ValueError, TypeError):
             return
         if value:

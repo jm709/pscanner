@@ -131,18 +131,17 @@ def _book_msg(
     asks: list[dict[str, str]],
     last_trade_price: str | None = None,
 ) -> WsBookMessage:
-    """Build a ``book`` event with bids/asks/last_trade_price under ``data``."""
-    data: dict[str, Any] = {"bids": bids, "asks": asks}
+    """Build a ``book`` event with top-level bids/asks/last_trade_price."""
+    payload: dict[str, Any] = {
+        "event_type": "book",
+        "asset_id": asset_id,
+        "market": market,
+        "bids": bids,
+        "asks": asks,
+    }
     if last_trade_price is not None:
-        data["last_trade_price"] = last_trade_price
-    return WsBookMessage.model_validate(
-        {
-            "event_type": "book",
-            "asset_id": asset_id,
-            "market": market,
-            "data": data,
-        },
-    )
+        payload["last_trade_price"] = last_trade_price
+    return WsBookMessage.model_validate(payload)
 
 
 def _price_change_msg(
@@ -150,12 +149,12 @@ def _price_change_msg(
     market: str | None,
     changes: list[dict[str, Any]],
 ) -> WsBookMessage:
-    """Build a ``price_change`` event with a ``price_changes`` array under data."""
+    """Build a ``price_change`` event with a top-level ``price_changes`` array."""
     return WsBookMessage.model_validate(
         {
             "event_type": "price_change",
             "market": market,
-            "data": {"price_changes": changes},
+            "price_changes": changes,
         },
     )
 
