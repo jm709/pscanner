@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import get_args
 
 import pytest
 
@@ -74,3 +75,20 @@ async def test_pushing_while_run_active_does_not_crash() -> None:
 
     snapshot = renderer._snapshot()
     assert len(snapshot["mispricing"]) == 5
+
+
+def test_move_attribution_in_detector_literal() -> None:
+    assert "move_attribution" in get_args(DetectorName)
+
+
+def test_renderer_handles_move_attribution_alert() -> None:
+    renderer = TerminalRenderer(max_per_detector=5)
+    alert = Alert(
+        detector="move_attribution",  # type: ignore[arg-type]
+        alert_key="cluster.candidate:0xabc:Yes:BUY:1700000000",
+        severity="med",
+        title="cluster candidate burst",
+        body={},
+        created_at=1700000000,
+    )
+    renderer.push(alert)  # must not KeyError
