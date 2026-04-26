@@ -24,6 +24,7 @@ from pscanner.alerts.sink import AlertSink
 from pscanner.collectors.ticks import MarketTickCollector
 from pscanner.config import VelocityConfig
 from pscanner.store.repo import MarketCacheRepo
+from pscanner.util.clock import Clock, RealClock
 
 _LOG = structlog.get_logger(__name__)
 _DEDUP_BUCKET_SECONDS = 60
@@ -48,6 +49,7 @@ class PriceVelocityDetector:
         config: VelocityConfig,
         ticks_collector: MarketTickCollector,
         market_cache: MarketCacheRepo,
+        clock: Clock | None = None,
     ) -> None:
         """Build the detector.
 
@@ -58,10 +60,13 @@ class PriceVelocityDetector:
                 ``subscribed_asset_ids``.
             market_cache: Reserved for v2 enrichment of the alert body with
                 market title / condition_id. Currently stored but unused.
+            clock: Injectable :class:`Clock`. Defaults to :class:`RealClock`
+                so production wiring needs no changes.
         """
         self._config = config
         self._ticks = ticks_collector
         self._market_cache = market_cache
+        self._clock: Clock = clock if clock is not None else RealClock()
 
     async def run(self, sink: AlertSink) -> None:
         """Poll every subscribed asset on a fixed cadence until cancelled.
@@ -81,7 +86,7 @@ class PriceVelocityDetector:
                 raise
             except Exception:
                 _LOG.exception("velocity.poll_failed")
-            await asyncio.sleep(self._config.poll_interval_seconds)
+            await self._clock.sleep(self._config.poll_interval_seconds)
 
     async def evaluate_asset(self, asset_id: str, sink: AlertSink) -> None:
         """Evaluate one asset's velocity and emit an alert if the threshold trips.

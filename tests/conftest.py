@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from pscanner.store.db import init_db
+from pscanner.util.clock import FakeClock
 
 _FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
@@ -77,3 +78,9 @@ def sample_leaderboard_json() -> list[dict[str, Any]]:
 def sample_trade_ws_json() -> dict[str, Any]:
     """Synthetic ``CONFIRMED`` trade message for the CLOB websocket."""
     return _load_fixture("ws_trade.json")
+
+
+@pytest.fixture
+def fake_clock() -> FakeClock:
+    """Shared :class:`FakeClock` for tests that drive time-based loops."""
+    return FakeClock()

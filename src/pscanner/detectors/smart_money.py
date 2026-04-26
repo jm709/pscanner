@@ -38,6 +38,7 @@ from pscanner.store.repo import (
     TrackedWalletCategoriesRepo,
     TrackedWalletsRepo,
 )
+from pscanner.util.clock import Clock, RealClock
 
 _LOG = structlog.get_logger(__name__)
 
@@ -144,6 +145,7 @@ class SmartMoneyDetector:
         snapshots_repo: PositionSnapshotsRepo,
         categories_repo: TrackedWalletCategoriesRepo,
         event_tag_cache: EventTagCacheRepo,
+        clock: Clock | None = None,
     ) -> None:
         """Build a detector wired to its collaborators.
 
@@ -156,6 +158,8 @@ class SmartMoneyDetector:
             snapshots_repo: Repo holding the last-seen size per (wallet, market, side).
             categories_repo: Repo holding per-category edge metrics.
             event_tag_cache: Repo caching event tag lists keyed by event id.
+            clock: Injectable :class:`Clock`. Defaults to :class:`RealClock`
+                so production wiring needs no changes.
         """
         self._config = config
         self._data_client = data_client
@@ -164,6 +168,7 @@ class SmartMoneyDetector:
         self._snapshots_repo = snapshots_repo
         self._categories_repo = categories_repo
         self._event_tag_cache = event_tag_cache
+        self._clock: Clock = clock if clock is not None else RealClock()
 
     async def run(self, sink: AlertSink) -> None:
         """Run the refresh and poll loops concurrently until cancelled.
@@ -183,7 +188,7 @@ class SmartMoneyDetector:
                 await self._refresh_tracked_wallets()
             except Exception:
                 _LOG.exception("smart_money.refresh_failed")
-            await asyncio.sleep(interval)
+            await self._clock.sleep(interval)
 
     async def _poll_loop(self, sink: AlertSink) -> None:
         """Drive :meth:`poll_positions` on the configured cadence."""
@@ -193,7 +198,7 @@ class SmartMoneyDetector:
                 await self.poll_positions(sink)
             except Exception:
                 _LOG.exception("smart_money.poll_failed")
-            await asyncio.sleep(interval)
+            await self._clock.sleep(interval)
 
     async def _refresh_tracked_wallets(self) -> None:
         """Recompute and persist tracked wallets from the live leaderboard."""

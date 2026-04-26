@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from collections.abc import AsyncIterator, Iterable
 from typing import Any, cast
@@ -14,6 +15,7 @@ from pscanner.config import MispricingConfig
 from pscanner.detectors.mispricing import MispricingDetector
 from pscanner.poly.models import Event, Market
 from pscanner.store.repo import EventOutcomeSumRepo
+from pscanner.util.clock import Clock, FakeClock
 
 
 def _market(
@@ -84,6 +86,7 @@ def _make_detector(
     min_event_liquidity_usd: float = 10000.0,
     min_market_liquidity_usd: float = 0.0,
     sum_history_repo: EventOutcomeSumRepo | None = None,
+    clock: Clock | None = None,
 ) -> tuple[MispricingDetector, AsyncMock]:
     """Construct a detector wired to a mocked GammaClient and a repo.
 
@@ -104,6 +107,7 @@ def _make_detector(
         config=config,
         gamma_client=gamma,
         sum_history_repo=cast(EventOutcomeSumRepo, repo),
+        clock=clock,
     )
     return detector, gamma
 
@@ -464,39 +468,45 @@ async def test_alert_key_uses_rounded_sum_for_dedupe() -> None:
     assert captured[0].alert_key == "mispricing:abc:1.1"
 
 
-async def test_run_invokes_scan_and_sleeps(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_invokes_scan_and_sleeps(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_clock: FakeClock,
+) -> None:
     """``run`` calls ``_scan`` repeatedly and sleeps between iterations."""
-    detector, _ = _make_detector([])
+    detector, _ = _make_detector([], clock=fake_clock)
     sink, _captured = _capturing_sink()
 
-    sleeps: list[float] = []
     scans: list[int] = []
 
     async def fake_scan(_self: MispricingDetector, _sink: Any) -> None:
         scans.append(len(scans))
-        if len(scans) >= 2:
-            raise StopAsyncIteration  # pragma: no cover - sentinel below
-
-    async def fake_sleep(seconds: float) -> None:
-        sleeps.append(seconds)
-        if len(sleeps) >= 2:
-            raise _StopLoop
 
     monkeypatch.setattr(MispricingDetector, "_scan", fake_scan)
-    monkeypatch.setattr("pscanner.detectors.mispricing.asyncio.sleep", fake_sleep)
 
-    with pytest.raises(_StopLoop):
-        await detector.run(sink)
+    task = asyncio.create_task(detector.run(sink))
+    # First scan runs synchronously up to the clock.sleep, then parks.
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert len(scans) == 1
 
-    assert len(scans) >= 2
-    assert sleeps == [300, 300]
+    interval = detector._config.scan_interval_seconds
+    await fake_clock.advance(interval)
+    assert len(scans) == 2
+
+    await fake_clock.advance(interval)
+    assert len(scans) == 3
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 async def test_run_logs_and_continues_on_scan_exception(
     monkeypatch: pytest.MonkeyPatch,
+    fake_clock: FakeClock,
 ) -> None:
     """A single scan raising must not break the loop."""
-    detector, _ = _make_detector([])
+    detector, _ = _make_detector([], clock=fake_clock)
     sink, _ = _capturing_sink()
 
     calls: list[int] = []
@@ -506,17 +516,20 @@ async def test_run_logs_and_continues_on_scan_exception(
         if len(calls) == 1:
             raise RuntimeError("transient gamma error")
 
-    async def fake_sleep(_seconds: float) -> None:
-        if len(calls) >= 2:
-            raise _StopLoop
-
     monkeypatch.setattr(MispricingDetector, "_scan", fake_scan)
-    monkeypatch.setattr("pscanner.detectors.mispricing.asyncio.sleep", fake_sleep)
 
-    with pytest.raises(_StopLoop):
-        await detector.run(sink)
+    task = asyncio.create_task(detector.run(sink))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert len(calls) == 1
 
-    assert len(calls) >= 2
+    interval = detector._config.scan_interval_seconds
+    await fake_clock.advance(interval)
+    assert len(calls) == 2
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 async def test_event_tagged_sports_is_skipped() -> None:
@@ -819,7 +832,3 @@ async def test_history_uses_real_repo_persists_via_db(
     assert rows[0]["event_id"] == "evt-real"
     assert rows[0]["market_count"] == 2
     assert rows[0]["price_sum"] == pytest.approx(1.2)
-
-
-class _StopLoop(BaseException):
-    """Sentinel used to escape the otherwise-infinite ``run`` loop in tests."""

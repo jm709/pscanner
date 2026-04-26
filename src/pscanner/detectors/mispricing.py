@@ -27,6 +27,7 @@ from pscanner.config import MispricingConfig
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.models import Event, Market
 from pscanner.store.repo import EventOutcomeSumRepo, EventOutcomeSumRow
+from pscanner.util.clock import Clock, RealClock
 
 _LOGGER = structlog.get_logger(__name__)
 
@@ -103,6 +104,7 @@ class MispricingDetector:
         config: MispricingConfig,
         gamma_client: GammaClient,
         sum_history_repo: EventOutcomeSumRepo,
+        clock: Clock | None = None,
     ) -> None:
         """Build a detector bound to a config, gamma client, and history repo.
 
@@ -112,10 +114,13 @@ class MispricingDetector:
             sum_history_repo: Repo that persists every eligible event's Σ-of-
                 outcomes regardless of whether an alert fires, building the
                 research dataset that backs ``ABS(deviation) > 5`` queries.
+            clock: Injectable :class:`Clock`. Defaults to :class:`RealClock`
+                so production wiring needs no changes.
         """
         self._config = config
         self._gamma = gamma_client
         self._sum_repo = sum_history_repo
+        self._clock: Clock = clock if clock is not None else RealClock()
 
     async def run(self, sink: AlertSink) -> None:
         """Loop forever: scan, sleep, repeat. Logs and continues on error.
@@ -130,7 +135,7 @@ class MispricingDetector:
                 raise
             except Exception:
                 _LOGGER.exception("mispricing scan failed", detector=self.name)
-            await asyncio.sleep(self._config.scan_interval_seconds)
+            await self._clock.sleep(self._config.scan_interval_seconds)
 
     async def _scan(self, sink: AlertSink) -> None:
         """Run a single pass over the active-event catalogue.

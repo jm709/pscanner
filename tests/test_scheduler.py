@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -42,6 +42,7 @@ from pscanner.detectors.convergence import ConvergenceDetector
 from pscanner.detectors.velocity import PriceVelocityDetector
 from pscanner.poly.models import Event, LeaderboardEntry, Market, Position
 from pscanner.scheduler import Scanner, SchedulerClients
+from pscanner.util.clock import FakeClock
 
 
 def _make_market(*, market_id: str, yes_price: float) -> Market:
@@ -156,6 +157,14 @@ def _make_clients(
 
     ticks_ws = MagicMock()
     ticks_ws.close = AsyncMock()
+    ticks_ws.connect = AsyncMock()
+    ticks_ws.subscribe = AsyncMock()
+
+    async def _empty_messages() -> AsyncIterator[Any]:
+        if False:  # pragma: no cover
+            yield  # type: ignore[unreachable]
+
+    ticks_ws.messages = MagicMock(return_value=_empty_messages())
 
     return SchedulerClients(
         gamma_http=gamma_http,
@@ -240,22 +249,18 @@ async def test_run_once_caches_markets_via_whales(db_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_run_supervisor_restarts_returning_detector(
     db_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    fake_clock: FakeClock,
 ) -> None:
-    # Skip the real backoff so the test finishes quickly.
-    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
-    # Disable every other detector / collector — with ``asyncio.sleep`` mocked,
-    # any sibling running ``while True: await asyncio.sleep(...)`` becomes a
-    # tight loop that starves the event loop and prevents cancellation.
-    config = _make_config(
-        enable_smart=False, enable_misprice=True, enable_whales=False,
-        enable_convergence=False, enable_positions=False, enable_activity=False,
-        enable_markets=False, enable_events=False,
-        enable_ticks=False, enable_velocity=False,
-    )
+    """Supervisor retries a fast-returning detector up to the restart cap.
+
+    With every detector and collector enabled, the shared ``FakeClock``
+    keeps every other ``while True: await self._clock.sleep(...)`` loop
+    parked on its first sleep — proving the new clock injection
+    eliminates the test-deadlock class of bug #23 was filed for.
+    """
+    config = _make_config()
     clients = _make_clients()
-    # Mispricing detector that returns immediately every iteration.
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    scanner = Scanner(config=config, db_path=db_path, clients=clients, clock=fake_clock)
     detector = scanner._detectors["mispricing"]
     call_count = {"n": 0}
 
@@ -263,10 +268,20 @@ async def test_run_supervisor_restarts_returning_detector(
         call_count["n"] += 1
 
     detector.run = fast_run  # type: ignore[method-assign]
-    with pytest.raises(BaseExceptionGroup) as excinfo:
-        await scanner.run()
-    matched, _ = excinfo.value.split(RuntimeError)
-    assert matched is not None
+
+    async def _drive_clock() -> None:
+        # Each restart waits up to ~30s of backoff. Advance generously
+        # several times so the supervisor blasts through the restart cap.
+        for _ in range(10):
+            await fake_clock.advance(60.0)
+
+    async def _run_scanner() -> None:
+        with pytest.raises(BaseExceptionGroup) as excinfo:
+            await scanner.run()
+        matched, _ = excinfo.value.split(RuntimeError)
+        assert matched is not None
+
+    await asyncio.gather(_run_scanner(), _drive_clock())
     # Restart cap is 3, plus the initial attempt → at least 4 calls.
     assert call_count["n"] >= 4
 
@@ -274,27 +289,33 @@ async def test_run_supervisor_restarts_returning_detector(
 @pytest.mark.asyncio
 async def test_run_invokes_shutdown_on_taskgroup_failure(
     db_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    fake_clock: FakeClock,
 ) -> None:
-    """SIGINT-equivalent: any unrecoverable exit from ``run`` must call ``aclose``."""
-    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
-    # See ``test_run_supervisor_restarts_returning_detector`` for why every
-    # other detector / collector must be disabled here.
-    config = _make_config(
-        enable_smart=False, enable_misprice=True, enable_whales=False,
-        enable_convergence=False, enable_positions=False, enable_activity=False,
-        enable_markets=False, enable_events=False,
-        enable_ticks=False, enable_velocity=False,
-    )
+    """Any unrecoverable exit from ``run`` must call ``aclose``.
+
+    Every detector and collector stays enabled — the shared ``FakeClock``
+    keeps siblings parked while the crashing detector exhausts its
+    restart cap, eliminating the deadlock that previously forced this
+    test to disable everything else.
+    """
+    config = _make_config()
     clients = _make_clients()
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    scanner = Scanner(config=config, db_path=db_path, clients=clients, clock=fake_clock)
 
     async def crash_run(_sink: AlertSink) -> None:
         raise RuntimeError("boom")
 
     scanner._detectors["mispricing"].run = crash_run  # type: ignore[method-assign]
-    with pytest.raises(BaseExceptionGroup):
-        await scanner.run()
+
+    async def _drive_clock() -> None:
+        for _ in range(10):
+            await fake_clock.advance(60.0)
+
+    async def _run_scanner() -> None:
+        with pytest.raises(BaseExceptionGroup):
+            await scanner.run()
+
+    await asyncio.gather(_run_scanner(), _drive_clock())
     assert scanner._closed is True
 
 

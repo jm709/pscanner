@@ -67,6 +67,7 @@ from pscanner.store.repo import (
     WalletTradesRepo,
     WatchlistRepo,
 )
+from pscanner.util.clock import Clock, RealClock
 
 _LOG = structlog.get_logger(__name__)
 
@@ -105,6 +106,7 @@ class Scanner:
         config: Config,
         db_path: Path | None = None,
         clients: SchedulerClients | None = None,
+        clock: Clock | None = None,
     ) -> None:
         """Construct the daemon, opening the DB and wiring detectors.
 
@@ -113,8 +115,11 @@ class Scanner:
             db_path: Override for ``config.scanner.db_path`` (testing).
             clients: Optional injected client bundle. When ``None`` the
                 scanner constructs its own ``PolyHttpClient`` / WS instances.
+            clock: Injectable :class:`Clock` shared with every detector and
+                the supervisor backoff. Defaults to :class:`RealClock`.
         """
         self._config = config
+        self._clock: Clock = clock if clock is not None else RealClock()
         resolved_db = db_path if db_path is not None else config.scanner.db_path
         self._db = init_db(resolved_db)
         self._tracked_repo = TrackedWalletsRepo(self._db)
@@ -256,12 +261,14 @@ class Scanner:
                 snapshots_repo=self._snapshots_repo,
                 categories_repo=self._categories_repo,
                 event_tag_cache=self._event_tag_cache_repo,
+                clock=self._clock,
             )
         if self._config.mispricing.enabled:
             detectors["mispricing"] = MispricingDetector(
                 config=self._config.mispricing,
                 gamma_client=self._clients.gamma_client,
                 sum_history_repo=self._sum_history_repo,
+                clock=self._clock,
             )
         if self._config.whales.enabled:
             detectors["whales"] = WhalesDetector(
@@ -270,6 +277,7 @@ class Scanner:
                 data_client=self._clients.data_client,
                 market_cache=self._market_cache_repo,
                 wallet_first_seen=self._first_seen_repo,
+                clock=self._clock,
             )
         if self._config.convergence.enabled:
             detectors["convergence"] = ConvergenceDetector(
@@ -298,6 +306,7 @@ class Scanner:
             config=self._config.velocity,
             ticks_collector=tick_collector,
             market_cache=self._market_cache_repo,
+            clock=self._clock,
         )
 
     @property
@@ -362,7 +371,7 @@ class Scanner:
                 raise RuntimeError(msg)
             backoff = min(2.0 ** (len(restarts) - 1), 30.0)
             _LOG.info("scanner.detector.restart", detector=name, backoff=backoff)
-            await asyncio.sleep(backoff)
+            await self._clock.sleep(backoff)
 
     async def _supervise_collector(self, name: str, collector: Collector) -> None:
         """Restart a collector on unexpected return/exception, up to a cap.
@@ -392,7 +401,7 @@ class Scanner:
                 raise RuntimeError(msg)
             backoff = min(2.0 ** (len(restarts) - 1), 30.0)
             _LOG.info("scanner.collector.restart", collector=name, backoff=backoff)
-            await asyncio.sleep(backoff)
+            await self._clock.sleep(backoff)
 
     async def run_once(self) -> dict[str, Any]:
         """Single-pass snapshot: refresh catalog state without opening the WS.

@@ -37,6 +37,7 @@ from pscanner.store.repo import (
     WalletFirstSeenRepo,
     WalletTrade,
 )
+from pscanner.util.clock import Clock, RealClock
 
 _LOG = structlog.get_logger(__name__)
 _WALLET_CACHE_TTL_SECONDS = 86400
@@ -58,6 +59,7 @@ class WhalesDetector:
         data_client: DataClient,
         market_cache: MarketCacheRepo,
         wallet_first_seen: WalletFirstSeenRepo,
+        clock: Clock | None = None,
     ) -> None:
         """Build the detector with its config and external dependencies.
 
@@ -68,6 +70,8 @@ class WhalesDetector:
             data_client: Source of wallet activity for age lookups.
             market_cache: Persistent cache of market metadata.
             wallet_first_seen: Persistent cache of wallet first-activity rows.
+            clock: Injectable :class:`Clock`. Defaults to :class:`RealClock`
+                so production wiring needs no changes.
         """
         self._config = config
         self._gamma_client = gamma_client
@@ -77,6 +81,7 @@ class WhalesDetector:
         self._sink: AlertSink | None = None
         self._condition_to_market: dict[str, CachedMarket] = {}
         self._pending_tasks: set[asyncio.Task[None]] = set()
+        self._clock: Clock = clock if clock is not None else RealClock()
 
     async def run(self, sink: AlertSink) -> None:
         """Long-running task: periodically refresh the market cache.
@@ -98,7 +103,7 @@ class WhalesDetector:
                 raise
             except Exception:
                 _LOG.exception("whales.refresh_failed")
-            await asyncio.sleep(self._config.ws_resubscribe_interval_seconds)
+            await self._clock.sleep(self._config.ws_resubscribe_interval_seconds)
 
     async def _refresh_market_cache(self) -> None:
         """Page the active markets, upsert into market_cache, rebuild condition map."""
