@@ -198,6 +198,9 @@ class MispricingDetector:
           outcomes;
         * whose markets all carry date-like or numeric-threshold
           ``groupItemTitle`` values — bucket layouts where outcomes overlap;
+        * with more than ``max_market_count`` markets — high-count layouts are
+          typically multi-checkbox (state lists, topic lists, threshold rungs)
+          where the sum-to-1 invariant doesn't apply;
         * with insufficient event-level liquidity;
         * containing any market with per-market liquidity below
           ``min_market_liquidity_usd`` (when > 0). Drops noise-floor markets
@@ -206,7 +209,8 @@ class MispricingDetector:
         Candidate-style mutex events (Trump/Harris/Other) leave
         ``groupItemTitle`` arbitrary and remain eligible.
         """
-        if len(event.markets) < _MIN_VALID_MARKETS:
+        market_count = len(event.markets)
+        if market_count < _MIN_VALID_MARKETS or market_count > self._config.max_market_count:
             return False
         if any(not market.enable_order_book for market in event.markets):
             return False

@@ -27,6 +27,7 @@ sum_deviation_threshold = 0.03
 alert_max_deviation = 0.5
 min_event_liquidity_usd = 10000
 min_market_liquidity_usd = 100
+max_market_count = 8
 # Category-based exclusion (sports/esports) is sourced from
 # `pscanner.categories.DEFAULT_TAXONOMY` via the `mispricing_skip` flag and
 # is not configurable here.

@@ -69,6 +69,11 @@ class MispricingConfig(_Section):
     containing a market with ``liquidity`` below this threshold (or NULL) is
     skipped entirely. Defaults to 0.0 (no filter) for backward compatibility.
 
+    ``max_market_count`` skips events with more than this many markets — most
+    genuine candidate-mutex elections have <=5 outcomes; events with 10+
+    outcomes are typically multi-checkbox layouts where the sum-to-1 invariant
+    doesn't apply.
+
     Category-based exclusion (sports/esports tournament aggregations) is
     sourced from :data:`pscanner.categories.DEFAULT_TAXONOMY` via the
     ``mispricing_skip`` flag on each :class:`CategorySettings`.
@@ -80,6 +85,7 @@ class MispricingConfig(_Section):
     alert_max_deviation: float = 0.5
     min_event_liquidity_usd: float = 10000.0
     min_market_liquidity_usd: float = 0.0
+    max_market_count: int = 8
 
 
 class ConvergenceConfig(_Section):
