@@ -85,6 +85,7 @@ def _make_detector(
     alert_max_deviation: float = 0.5,
     min_event_liquidity_usd: float = 10000.0,
     min_market_liquidity_usd: float = 0.0,
+    max_market_count: int = 8,
     sum_history_repo: EventOutcomeSumRepo | None = None,
     clock: Clock | None = None,
 ) -> tuple[MispricingDetector, AsyncMock]:
@@ -101,6 +102,7 @@ def _make_detector(
         alert_max_deviation=alert_max_deviation,
         min_event_liquidity_usd=min_event_liquidity_usd,
         min_market_liquidity_usd=min_market_liquidity_usd,
+        max_market_count=max_market_count,
     )
     repo = sum_history_repo if sum_history_repo is not None else _StubSumRepo()
     detector = MispricingDetector(
@@ -832,3 +834,74 @@ async def test_history_uses_real_repo_persists_via_db(
     assert rows[0]["event_id"] == "evt-real"
     assert rows[0]["market_count"] == 2
     assert rows[0]["price_sum"] == pytest.approx(1.2)
+
+
+def _markets_summing_to(total: float, count: int) -> list[Market]:
+    """Build ``count`` markets whose YES prices sum to ``total``.
+
+    The first market carries the residual so the sum is exact regardless of
+    floating-point accumulation across the remaining ``count - 1`` markets.
+    """
+    if count < 1:
+        msg = f"count must be >= 1, got {count}"
+        raise ValueError(msg)
+    tail_price = 0.1
+    head_price = total - tail_price * (count - 1)
+    return [
+        _market(market_id=f"m{i}", yes_price=head_price if i == 0 else tail_price)
+        for i in range(count)
+    ]
+
+
+async def test_six_market_event_below_cap_alerts() -> None:
+    """A 6-market mutex event below the default 8-market cap still alerts."""
+    markets = _markets_summing_to(1.1, count=6)
+    event = _event(markets=markets)
+    detector, _ = _make_detector([event])
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert len(captured) == 1
+    assert captured[0].body["market_count"] == 6
+    assert captured[0].body["price_sum"] == pytest.approx(1.1)
+
+
+async def test_nine_market_event_above_cap_is_skipped() -> None:
+    """A 9-market event exceeds the default 8-market cap and is skipped."""
+    markets = _markets_summing_to(1.1, count=9)
+    event = _event(markets=markets)
+    detector, _ = _make_detector([event])
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert captured == []
+
+
+async def test_exact_boundary_eight_market_event_alerts() -> None:
+    """At the exact ``max_market_count`` boundary the event remains eligible."""
+    markets = _markets_summing_to(1.1, count=8)
+    event = _event(markets=markets)
+    detector, _ = _make_detector([event])
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert len(captured) == 1
+    assert captured[0].body["market_count"] == 8
+    assert captured[0].body["price_sum"] == pytest.approx(1.1)
+
+
+async def test_max_market_count_override_allows_large_event_to_alert() -> None:
+    """Overriding ``max_market_count`` lets a 12-market event alert."""
+    markets = _markets_summing_to(1.1, count=12)
+    event = _event(markets=markets)
+    detector, _ = _make_detector([event], max_market_count=20)
+    sink, captured = _capturing_sink()
+
+    await detector._scan(sink)
+
+    assert len(captured) == 1
+    assert captured[0].body["market_count"] == 12
+    assert captured[0].body["price_sum"] == pytest.approx(1.1)
