@@ -29,7 +29,7 @@ class BurstHit:
     side: str
     bucket_ts: int
     wallets: tuple[str, ...]
-    n_trades: int
+    n_trades: int  # raw bucket trade count, pre-wallet-dedup (n_trades >= len(wallets))
     median_size: float
     cv: float
 
@@ -86,14 +86,16 @@ def _evaluate_bucket(
     if len(positive_sizes) < cfg.min_burst_wallets:
         return None
     mean = statistics.fmean(positive_sizes)
-    if mean <= 0:
-        return None
+    assert mean > 0, "follows from the positive_sizes filter above"  # noqa: S101
     cv = statistics.pstdev(positive_sizes) / mean
     if cv > cfg.max_burst_size_cv:
         return None
     median_size = statistics.median(positive_sizes)
+    positive_wallet_to_trade: dict[str, dict[str, Any]] = {
+        w: t for w, t in wallet_to_trade.items() if float(t.get("size") or 0.0) > 0
+    }
     kept = _select_contributors(
-        wallet_to_trade,
+        positive_wallet_to_trade,
         median_size=median_size,
         limit=cfg.max_contributors_per_burst,
         bucket_ts=bucket_ts,

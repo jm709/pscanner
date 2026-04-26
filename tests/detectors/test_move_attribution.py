@@ -96,3 +96,26 @@ def test_detect_burst_truncates_contributors_to_top_50() -> None:
     )
     assert len(hits) == 1
     assert len(hits[0].wallets) == 50
+    kept_indices = {int(w.removeprefix("0x")) for w in hits[0].wallets}
+    assert kept_indices == set(range(15, 65))
+
+
+def test_detect_burst_drops_zero_size_wallets_from_contributors() -> None:
+    # 4 valid wallets at size=500 + 50 wallets with missing size; median is 500.
+    # Without the fix, the 50 noise wallets would rank above the cap and crowd
+    # out the genuine signal in the kept set.
+    valid = [_trade(wallet=f"0xv{i}", ts=1000, size=500.0) for i in range(4)]
+    noise = [
+        {
+            "proxyWallet": f"0xn{i}",
+            "timestamp": 1000,
+            "side": "BUY",
+            "outcome": "Yes",
+            "size": 0.0,
+            "price": 0.5,
+        }
+        for i in range(50)
+    ]
+    hits = _detect_burst(valid + noise, cfg=_cfg(max_contributors_per_burst=50))
+    assert len(hits) == 1
+    assert set(hits[0].wallets) == {f"0xv{i}" for i in range(4)}
