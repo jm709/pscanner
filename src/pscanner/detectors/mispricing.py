@@ -16,13 +16,13 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from collections.abc import Iterable
 from typing import Any
 
 import structlog
 
 from pscanner.alerts.models import Alert, Severity
 from pscanner.alerts.sink import AlertSink
+from pscanner.categories import categorize_event, settings_for
 from pscanner.config import MispricingConfig
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.models import Event, Market
@@ -66,12 +66,15 @@ def _looks_like_bucket_label(label: str | None) -> bool:
     )
 
 
-def _has_excluded_tag(event: Event, excluded: Iterable[str]) -> bool:
-    """Return True if any of ``event.tags`` matches an excluded tag (case-insensitive)."""
-    if not event.tags:
-        return False
-    excluded_lower = {t.lower() for t in excluded}
-    return any(tag.lower() in excluded_lower for tag in event.tags)
+def _should_skip_by_category(event: Event) -> bool:
+    """Return True if the event's category is configured for mispricing skip.
+
+    Sports/esports events are tournament aggregations rather than mutex
+    outcomes, so the sum-to-1 invariant doesn't apply. The taxonomy in
+    :data:`pscanner.categories.DEFAULT_TAXONOMY` controls which categories
+    skip via the ``mispricing_skip`` flag on each ``CategorySettings``.
+    """
+    return settings_for(categorize_event(event)).mispricing_skip
 
 
 def _is_range_bucket_event(event: Event) -> bool:
@@ -189,7 +192,8 @@ class MispricingDetector:
 
         * with fewer than two markets, or any market with the order book
           disabled;
-        * whose tags include a configured excluded tag (e.g. ``Sports`` or
+        * whose category is configured for mispricing skip in
+          :data:`pscanner.categories.DEFAULT_TAXONOMY` (e.g. ``Sports`` or
           ``Esports``) — those are tournament aggregations, not mutex
           outcomes;
         * whose markets all carry date-like or numeric-threshold
@@ -206,7 +210,7 @@ class MispricingDetector:
             return False
         if any(not market.enable_order_book for market in event.markets):
             return False
-        if _has_excluded_tag(event, self._config.excluded_tags):
+        if _should_skip_by_category(event):
             return False
         if _is_range_bucket_event(event):
             return False

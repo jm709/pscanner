@@ -29,6 +29,7 @@ import time
 import structlog
 
 from pscanner.alerts.models import Alert, Severity
+from pscanner.categories import Category, categorize_tags, settings_for
 from pscanner.config import ConvergenceConfig, SmartMoneyConfig
 from pscanner.detectors.trade_driven import TradeDrivenDetector
 from pscanner.poly.ids import ConditionId
@@ -43,8 +44,6 @@ from pscanner.store.repo import (
 
 _LOG = structlog.get_logger(__name__)
 _HIGH_SEVERITY_WALLET_COUNT = 3
-_DEFAULT_CATEGORY = "thesis"
-_KNOWN_CATEGORIES: tuple[str, ...] = ("thesis", "sports", "esports")
 _MIN_EXCESS_PNL_FOR_ROSTER = 0.0
 
 
@@ -106,8 +105,8 @@ class ConvergenceDetector(TradeDrivenDetector):
         tags = self._event_tag_cache.get(cached.event_slug)
         if tags is None:
             return
-        category = _categorize(tags)
-        window = self._config.window_seconds_for(category)
+        category = categorize_tags(tags)
+        window = self._window_seconds_for(category)
         smart_wallets = self._smart_wallets_in_category(category)
         if not smart_wallets:
             return
@@ -122,15 +121,30 @@ class ConvergenceDetector(TradeDrivenDetector):
         alert = self._build_alert(trade, cached, category, convergent)
         await self._sink.emit(alert)
 
-    def _smart_wallets_in_category(self, category: str) -> set[str]:
+    def _window_seconds_for(self, category: Category) -> int:
+        """Return the convergence window (seconds) for ``category``.
+
+        Uses :class:`ConvergenceConfig.window_seconds_overrides` when set,
+        otherwise falls back to the taxonomy default in
+        :data:`pscanner.categories.DEFAULT_TAXONOMY`.
+        """
+        overrides = self._config.window_seconds_overrides
+        if overrides is not None and category in overrides:
+            return overrides[category]
+        return settings_for(category).convergence_window_seconds
+
+    def _min_edge_for(self, category: Category) -> float:
+        """Return the smart-money min-edge threshold for ``category``."""
+        overrides = self._smart_config.category_min_edge
+        if overrides is not None and category.value in overrides:
+            return overrides[category.value]
+        return settings_for(category).min_edge
+
+    def _smart_wallets_in_category(self, category: Category) -> set[str]:
         """Return the wallet addresses qualifying as smart in ``category``."""
-        min_edge = self._smart_config.category_min_edge.get(
-            category,
-            self._smart_config.min_edge,
-        )
         rows = self._category_repo.list_by_category(
-            category,
-            min_edge=min_edge,
+            category.value,
+            min_edge=self._min_edge_for(category),
             min_excess_pnl_usd=_MIN_EXCESS_PNL_FOR_ROSTER,
             min_resolved=self._smart_config.min_resolved_positions,
         )
@@ -140,7 +154,7 @@ class ConvergenceDetector(TradeDrivenDetector):
         self,
         trade: WalletTrade,
         cached: CachedMarket,
-        category: str,
+        category: Category,
         convergent: set[str],
     ) -> Alert:
         """Construct the convergence :class:`Alert` payload."""
@@ -148,24 +162,25 @@ class ConvergenceDetector(TradeDrivenDetector):
         day = time.strftime("%Y%m%d", time.gmtime(now))
         alert_key = f"convergence:{trade.condition_id}:{day}"
         wallets_sorted = sorted(convergent)
+        window = self._window_seconds_for(category)
         total_usd = self._sum_recent_usd(
             trade.condition_id,
             wallets_sorted,
-            since=trade.timestamp - self._config.window_seconds_for(category),
+            since=trade.timestamp - window,
         )
         severity: Severity = "high" if len(convergent) >= _HIGH_SEVERITY_WALLET_COUNT else "med"
         title = (
             f"convergence on {cached.title or trade.condition_id}: "
-            f"{len(convergent)} {category} wallets"
+            f"{len(convergent)} {category.value} wallets"
         )
         body = {
             "condition_id": trade.condition_id,
             "market_title": cached.title,
             "event_slug": cached.event_slug,
-            "category": category,
+            "category": category.value,
             "convergent_wallets": wallets_sorted,
             "convergent_count": len(wallets_sorted),
-            "window_seconds": self._config.window_seconds_for(category),
+            "window_seconds": window,
             "total_usd_value": total_usd,
         }
         return Alert(
@@ -202,19 +217,4 @@ class ConvergenceDetector(TradeDrivenDetector):
         return total
 
 
-def _categorize(tags: list[str]) -> str:
-    """Classify an event into ``sports`` / ``esports`` / ``thesis`` from its tags.
-
-    Mirrors :func:`pscanner.detectors.smart_money._categorize` so both
-    detectors agree on category boundaries. Sports wins over esports when both
-    are present.
-    """
-    lowered = {tag.lower() for tag in tags if isinstance(tag, str)}
-    if "sports" in lowered:
-        return "sports"
-    if "esports" in lowered:
-        return "esports"
-    return _DEFAULT_CATEGORY
-
-
-__all__ = ["_KNOWN_CATEGORIES", "ConvergenceDetector", "_categorize"]
+__all__ = ["ConvergenceDetector"]

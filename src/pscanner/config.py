@@ -14,6 +14,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from pscanner.categories import Category
+
 _DEFAULT_CONFIG_PATH = Path("./config.toml")
 _CONFIG_ENV_VAR = "PSCANNER_CONFIG"
 
@@ -34,10 +36,12 @@ class ScannerConfig(_Section):
 class SmartMoneyConfig(_Section):
     """Thresholds for the smart-money detector.
 
-    ``category_min_edge`` keys (``thesis``, ``sports``, ``esports``) are the
-    minimum ``mean_edge`` values per category applied at READ time when the
-    convergence detector queries roster slices. Sports gets a higher bar
-    because Vegas-tight markets are harder to beat.
+    Per-category min-edge values come from
+    :data:`pscanner.categories.DEFAULT_TAXONOMY` by default. Set
+    ``category_min_edge`` to override one or more categories at config time;
+    keys are :class:`pscanner.categories.Category` string values
+    (``"thesis"``, ``"sports"``, ``"esports"``). When ``None``, callers
+    fall back to ``settings_for(category).min_edge``.
     """
 
     enabled: bool = True
@@ -49,9 +53,7 @@ class SmartMoneyConfig(_Section):
     position_poll_interval_seconds: int = 300
     new_position_min_usd: float = 1000.0
     prewarm_event_tag_cache: bool = True
-    category_min_edge: dict[str, float] = Field(
-        default_factory=lambda: {"thesis": 0.05, "sports": 0.10, "esports": 0.05},
-    )
+    category_min_edge: dict[str, float] | None = None
 
 
 class MispricingConfig(_Section):
@@ -66,6 +68,10 @@ class MispricingConfig(_Section):
     ``min_market_liquidity_usd`` filters per-market noise: when > 0, any event
     containing a market with ``liquidity`` below this threshold (or NULL) is
     skipped entirely. Defaults to 0.0 (no filter) for backward compatibility.
+
+    Category-based exclusion (sports/esports tournament aggregations) is
+    sourced from :data:`pscanner.categories.DEFAULT_TAXONOMY` via the
+    ``mispricing_skip`` flag on each :class:`CategorySettings`.
     """
 
     enabled: bool = True
@@ -74,7 +80,6 @@ class MispricingConfig(_Section):
     alert_max_deviation: float = 0.5
     min_event_liquidity_usd: float = 10000.0
     min_market_liquidity_usd: float = 0.0
-    excluded_tags: tuple[str, ...] = ("Sports", "Esports")
 
 
 class ConvergenceConfig(_Section):
@@ -82,29 +87,15 @@ class ConvergenceConfig(_Section):
 
     Convergence fires when at least ``convergence_min_wallets`` smart wallets
     in the same category enter the same condition_id within the configured
-    window. Window length varies by category: thesis events stay active for
-    weeks so we use a 48h window, sports markets resolve in hours so we use
-    6h, esports lands in between at 24h.
+    window. Window length per category comes from
+    :data:`pscanner.categories.DEFAULT_TAXONOMY`; set
+    ``window_seconds_overrides`` to override one or more categories. Keys are
+    :class:`pscanner.categories.Category` members.
     """
 
     enabled: bool = True
     convergence_min_wallets: int = 2
-    window_seconds_thesis: int = 48 * 3600
-    window_seconds_sports: int = 6 * 3600
-    window_seconds_esports: int = 24 * 3600
-
-    def window_seconds_for(self, category: str) -> int:
-        """Return the configured window (seconds) for ``category``.
-
-        Falls back to the thesis window for unknown categories. Categories
-        not in the {thesis, sports, esports} set should not occur in practice
-        but are tolerated to keep the detector resilient to schema drift.
-        """
-        return {
-            "thesis": self.window_seconds_thesis,
-            "sports": self.window_seconds_sports,
-            "esports": self.window_seconds_esports,
-        }.get(category, self.window_seconds_thesis)
+    window_seconds_overrides: dict[Category, int] | None = None
 
 
 class WhalesConfig(_Section):

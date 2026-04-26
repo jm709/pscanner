@@ -27,6 +27,7 @@ import structlog
 
 from pscanner.alerts.models import Alert, Severity
 from pscanner.alerts.sink import AlertSink
+from pscanner.categories import Category, categorize_tags
 from pscanner.config import SmartMoneyConfig
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
@@ -297,14 +298,14 @@ class SmartMoneyDetector:
             for position in closed
             if (event_slug := _event_slug_for_position(position)) is not None
         }
-        category_by_slug: dict[EventSlug, str | None] = {}
+        category_by_slug: dict[EventSlug, Category | None] = {}
         for event_slug in unique_event_slugs:
             category_by_slug[event_slug] = await self._lookup_category(event_slug)
-        buckets: dict[str, list[ClosedPosition]] = {}
+        buckets: dict[Category, list[ClosedPosition]] = {}
         for position in closed:
             event_slug = _event_slug_for_position(position)
             if event_slug is None:
-                category: str | None = "thesis"
+                category: Category | None = Category.THESIS
             else:
                 category = category_by_slug.get(event_slug)
             if category is None:
@@ -316,7 +317,7 @@ class SmartMoneyDetector:
                 continue
             self._categories_repo.upsert(
                 wallet=wallet,
-                category=category,
+                category=category.value,
                 position_count=cat_metrics.count,
                 win_count=cat_metrics.wins,
                 mean_edge=cat_metrics.mean_edge,
@@ -325,7 +326,7 @@ class SmartMoneyDetector:
                 total_stake_usd=cat_metrics.total_stake_usd,
             )
 
-    async def _lookup_category(self, event_slug: EventSlug) -> str | None:
+    async def _lookup_category(self, event_slug: EventSlug) -> Category | None:
         """Categorise an event by tags, hitting the cache then gamma on miss.
 
         Args:
@@ -333,11 +334,10 @@ class SmartMoneyDetector:
                 ``eventSlug`` rather than a numeric id).
 
         Returns:
-            ``"sports"`` if the event carries the ``Sports`` tag,
-            ``"esports"`` if it carries the ``Esports`` tag, otherwise
-            ``"thesis"``. Returns ``None`` only when both the cache misses
-            and the gamma fetch fails or returns no event (the position is
-            then dropped from the per-category breakdown).
+            The matched :class:`Category` based on the event's tag list.
+            Returns ``None`` only when both the cache misses and the gamma
+            fetch fails or returns no event (the position is then dropped
+            from the per-category breakdown).
         """
         tags = self._event_tag_cache.get(event_slug)
         if tags is None:
@@ -356,7 +356,7 @@ class SmartMoneyDetector:
                 event_slug=event_slug,
                 tag_count=len(tags),
             )
-        return _categorize(tags)
+        return categorize_tags(tags)
 
     async def poll_positions(self, sink: AlertSink) -> None:
         """Diff every tracked wallet's open positions and emit alerts.
@@ -422,20 +422,6 @@ def _event_slug_for_position(position: ClosedPosition) -> EventSlug | None:
     if not text:
         return None
     return EventSlug(text)
-
-
-def _categorize(tags: list[str]) -> str:
-    """Classify an event into ``sports`` / ``esports`` / ``thesis`` from its tags.
-
-    The check is case-insensitive. ``Sports`` wins over ``Esports`` when both
-    are present (most multi-tagged events lean sports first per gamma data).
-    """
-    lowered = {tag.lower() for tag in tags if isinstance(tag, str)}
-    if "sports" in lowered:
-        return "sports"
-    if "esports" in lowered:
-        return "esports"
-    return "thesis"
 
 
 def _build_alert(
