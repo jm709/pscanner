@@ -181,12 +181,21 @@ class VelocityConfig(_Section):
     Polls the tick collector for recent mid-price history and alerts when
     ``(end - start) / start`` over ``velocity_window_seconds`` exceeds
     ``velocity_threshold_pct`` in either direction.
+
+    ``depth_asymmetry_floor`` and ``min_mid_liquidity_usd`` suppress alerts on
+    illiquid books where one side is a wall and the other a whisper: such
+    moves are sweep artifacts, not real signal. The first compares
+    ``min(bid_depth, ask_depth) / max(bid_depth, ask_depth)`` against the
+    floor; the second requires ``min(bid_depth, ask_depth) * mid`` to clear
+    the USD floor on both sides.
     """
 
     enabled: bool = True
     velocity_threshold_pct: float = 0.05
     velocity_window_seconds: int = 60
     poll_interval_seconds: float = 5.0
+    depth_asymmetry_floor: float = 0.05
+    min_mid_liquidity_usd: float = 100.0
 
 
 class Config(BaseModel):

@@ -5,10 +5,11 @@ emits an :class:`~pscanner.alerts.models.Alert` whenever the percent move over
 ``velocity_window_seconds`` exceeds ``velocity_threshold_pct`` in either
 direction.
 
-The market-cache repo is wired in for future enrichment (looking up the
-condition_id / market title from a CLOB token id), but v1 keeps the alert body
-keyed on ``asset_id`` only — the collector's frozen API does not expose the
-condition_id and a full ``list_active`` scan per evaluation would be too slow.
+Alerts are suppressed when the latest tick has lopsided book depth (one side
+a wall, the other a whisper) or insufficient USD depth — those moves are
+sweep artifacts on illiquid micro-cap markets, not real signal. The alert
+body is enriched with ``market_title`` and ``condition_id`` (when known) so
+terminal panel alerts are actionable without a manual lookup.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from pscanner.alerts.models import Alert, DetectorName, Severity
 from pscanner.alerts.sink import AlertSink
 from pscanner.collectors.ticks import MarketTickCollector
 from pscanner.config import VelocityConfig
-from pscanner.store.repo import MarketCacheRepo
+from pscanner.store.repo import MarketCacheRepo, MarketTick
 from pscanner.util.clock import Clock, RealClock
 
 _LOG = structlog.get_logger(__name__)
@@ -58,8 +59,10 @@ class PriceVelocityDetector:
             ticks_collector: Source of recent mid-price snapshots. Accessed
                 via the frozen public API ``get_recent_mids`` and
                 ``subscribed_asset_ids``.
-            market_cache: Reserved for v2 enrichment of the alert body with
-                market title / condition_id. Currently stored but unused.
+            market_cache: Held for symmetry with other detectors; alert-body
+                enrichment now reads from the tick collector's
+                ``get_market_for_asset`` map, which is itself populated from
+                this same repo at subscription-refresh time.
             clock: Injectable :class:`Clock`. Defaults to :class:`RealClock`
                 so production wiring needs no changes.
         """
@@ -97,10 +100,8 @@ class PriceVelocityDetector:
             asset_id: CLOB token id to evaluate.
             sink: Sink to emit alerts to when the threshold is exceeded.
         """
-        mids = self._ticks.get_recent_mids(
-            asset_id,
-            window_seconds=self._config.velocity_window_seconds,
-        )
+        window = self._config.velocity_window_seconds
+        mids = self._ticks.get_recent_mids(asset_id, window_seconds=window)
         if len(mids) < _MIN_MIDS_FOR_DELTA:
             return
         start_ts, start_price = mids[0]
@@ -111,9 +112,15 @@ class PriceVelocityDetector:
         threshold = self._config.velocity_threshold_pct
         if abs(change_pct) < threshold:
             return
+        recent_ticks = self._ticks.get_recent_ticks(asset_id, window_seconds=window)
+        if not recent_ticks:
+            return
+        if not self._passes_liquidity_filters(recent_ticks[-1]):
+            return
         severity: Severity = (
             "high" if abs(change_pct) > _HIGH_SEVERITY_MULTIPLE * threshold else "med"
         )
+        market = self._ticks.get_market_for_asset(asset_id)
         alert = _build_alert(
             asset_id=asset_id,
             start_ts=start_ts,
@@ -123,8 +130,37 @@ class PriceVelocityDetector:
             change_pct=change_pct,
             severity=severity,
             samples=len(mids),
+            market_title=market.title if market else None,
+            condition_id=market.condition_id if market else None,
         )
         await sink.emit(alert)
+
+    def _passes_liquidity_filters(self, tick: MarketTick) -> bool:
+        """Return ``True`` when the latest tick has balanced, liquid book depth.
+
+        Suppresses two failure modes seen on illiquid micro-cap markets:
+
+        1. Lopsided depth — one side a wall, the other a whisper. A sweep of
+           the whisper side moves the mid by tens of percent without any
+           real-money flow. ``min/max`` ratio below ``depth_asymmetry_floor``
+           is rejected.
+        2. Insufficient USD on both sides. ``min(bid_depth, ask_depth) * mid``
+           must clear ``min_mid_liquidity_usd``.
+        """
+        bid = tick.bid_depth_top5
+        ask = tick.ask_depth_top5
+        if bid is None or ask is None:
+            return False
+        denom = max(bid, ask)
+        if denom <= 0:
+            return False
+        ratio = min(bid, ask) / denom
+        if ratio < self._config.depth_asymmetry_floor:
+            return False
+        mid = tick.mid_price
+        if mid is None or mid <= 0:
+            return False
+        return min(bid, ask) * mid >= self._config.min_mid_liquidity_usd
 
 
 def _build_alert(
@@ -137,13 +173,14 @@ def _build_alert(
     change_pct: float,
     severity: Severity,
     samples: int,
+    market_title: str | None,
+    condition_id: str | None,
 ) -> Alert:
     """Construct the Alert payload for a velocity event.
 
-    The alert body deliberately uses ``asset_id`` rather than a market title /
-    condition_id; the tick collector's frozen API does not expose the
-    condition_id, and reverse-lookup via ``MarketCacheRepo.list_active`` is too
-    slow per evaluation. v2 enhancement: enrich body with market metadata.
+    Body includes ``market_title`` and ``condition_id`` (or ``None`` if the
+    asset's market is not in the cached map) so the terminal panel renders an
+    actionable alert without a manual ``asset_id`` → market lookup.
     """
     bucket = end_ts // _DEDUP_BUCKET_SECONDS
     alert_key = f"velocity:{asset_id}:{bucket}"
@@ -157,6 +194,8 @@ def _build_alert(
         "change_pct": change_pct,
         "window_seconds": end_ts - start_ts,
         "samples_in_window": samples,
+        "market_title": market_title,
+        "condition_id": condition_id,
     }
     return Alert(
         detector=cast(DetectorName, "velocity"),
