@@ -226,6 +226,7 @@ class Scanner:
                 markets_repo=self._market_snapshots_repo,
                 snapshot_interval_seconds=self._config.markets.snapshot_interval_seconds,
                 snapshot_max=self._config.markets.snapshot_max,
+                market_cache=self._market_cache_repo,
             )
         if self._config.events.enabled:
             collectors["event_collector"] = EventCollector(
