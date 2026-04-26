@@ -93,3 +93,19 @@ poll_interval_seconds = 5
 depth_asymmetry_floor = 0.05
 min_mid_liquidity_usd = 100
 spread_compression_floor = 5
+
+[cluster]
+enabled = true
+scan_interval_seconds = 3600
+discovery_lookback_days = 30
+creation_window_seconds = 86400
+min_cluster_size = 3
+min_shared_markets = 3
+max_shared_market_liquidity_usd = 50000
+max_shared_market_volume_usd = 1000000
+max_trade_size_cv = 0.3
+direction_window_seconds = 600
+min_direction_correlation_count = 3
+discovery_score_threshold = 5
+active_window_seconds = 300
+active_min_members = 2

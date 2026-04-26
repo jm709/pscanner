@@ -25,6 +25,7 @@ from pscanner.collectors.trades import TradeCollector
 from pscanner.collectors.watchlist import WatchlistSyncer
 from pscanner.config import (
     ActivityConfig,
+    ClusterConfig,
     Config,
     ConvergenceConfig,
     EventsConfig,
@@ -96,6 +97,7 @@ def _make_config(
     enable_events: bool = True,
     enable_ticks: bool = True,
     enable_velocity: bool = True,
+    enable_cluster: bool = True,
 ) -> Config:
     return Config(
         scanner=ScannerConfig(),
@@ -110,6 +112,7 @@ def _make_config(
         events=EventsConfig(enabled=enable_events),
         ticks=TicksConfig(enabled=enable_ticks),
         velocity=VelocityConfig(enabled=enable_velocity),
+        cluster=ClusterConfig(enabled=enable_cluster),
     )
 
 
@@ -495,12 +498,13 @@ async def test_scanner_wires_whales_to_trade_collector_callback(db_path: Path) -
 
 @pytest.mark.asyncio
 async def test_scanner_skips_whales_callback_when_disabled(db_path: Path) -> None:
-    """When whales+convergence are disabled, the trade collector has no callbacks."""
+    """When whales+convergence+cluster are disabled, no trade-collector callbacks."""
     config = _make_config(
         enable_smart=False,
         enable_misprice=False,
         enable_whales=False,
         enable_convergence=False,
+        enable_cluster=False,
     )
     clients = _make_clients()
     scanner = Scanner(config=config, db_path=db_path, clients=clients)

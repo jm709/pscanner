@@ -198,6 +198,48 @@ class VelocityConfig(_Section):
     spread_compression_floor: float = 5.0
 
 
+class ClusterConfig(_Section):
+    """Thresholds + cadence for the coordinated-wallet cluster detector.
+
+    Combines five signals — wallet-creation clustering, niche market overlap,
+    trade-size correlation, direction correlation, and a behavior signature —
+    into a discovery score. Clusters scoring at or above
+    ``discovery_score_threshold`` produce a ``cluster.discovered`` alert.
+    Once a cluster is known, trade-callback-driven active monitoring fires
+    ``cluster.active`` whenever ``active_min_members`` of its members trade
+    the same condition within ``active_window_seconds``.
+    """
+
+    enabled: bool = True
+
+    # Discovery scan cadence
+    scan_interval_seconds: float = 3600.0
+    discovery_lookback_days: int = 30
+
+    # Signal A — wallet creation clustering
+    creation_window_seconds: int = 86400
+    min_cluster_size: int = 3
+
+    # Signal B — niche market overlap
+    min_shared_markets: int = 3
+    max_shared_market_liquidity_usd: float = 50000.0
+    max_shared_market_volume_usd: float = 1000000.0
+
+    # Signal C — trade-size correlation
+    max_trade_size_cv: float = 0.3
+
+    # Signal D — direction correlation
+    direction_window_seconds: int = 600
+    min_direction_correlation_count: int = 3
+
+    # Combined scoring
+    discovery_score_threshold: int = 5
+
+    # Active monitoring
+    active_window_seconds: int = 300
+    active_min_members: int = 2
+
+
 class Config(BaseModel):
     """Root pscanner config aggregating every section."""
 
@@ -215,6 +257,7 @@ class Config(BaseModel):
     events: EventsConfig = Field(default_factory=EventsConfig)
     ticks: TicksConfig = Field(default_factory=TicksConfig)
     velocity: VelocityConfig = Field(default_factory=VelocityConfig)
+    cluster: ClusterConfig = Field(default_factory=ClusterConfig)
 
     @classmethod
     def load(cls, path: Path | None = None) -> Config:

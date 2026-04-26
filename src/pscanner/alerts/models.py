@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 Severity = Literal["low", "med", "high"]
-DetectorName = Literal["smart_money", "mispricing", "whales", "convergence", "velocity"]
+DetectorName = Literal["smart_money", "mispricing", "whales", "convergence", "velocity", "cluster"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,7 +15,8 @@ class Alert:
 
     Attributes:
         detector: Which detector produced the alert (``smart_money``,
-            ``mispricing``, ``whales``, ``convergence``, ``velocity``).
+            ``mispricing``, ``whales``, ``convergence``, ``velocity``,
+            ``cluster``).
         alert_key: Idempotency key — the primary key in the ``alerts`` table.
             Detectors are responsible for choosing a key that collapses
             duplicates within their natural cadence (e.g. a daily snapshot).
