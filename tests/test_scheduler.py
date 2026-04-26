@@ -244,7 +244,15 @@ async def test_run_supervisor_restarts_returning_detector(
 ) -> None:
     # Skip the real backoff so the test finishes quickly.
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())
-    config = _make_config(enable_smart=False, enable_misprice=True, enable_whales=False)
+    # Disable every other detector / collector — with ``asyncio.sleep`` mocked,
+    # any sibling running ``while True: await asyncio.sleep(...)`` becomes a
+    # tight loop that starves the event loop and prevents cancellation.
+    config = _make_config(
+        enable_smart=False, enable_misprice=True, enable_whales=False,
+        enable_convergence=False, enable_positions=False, enable_activity=False,
+        enable_markets=False, enable_events=False,
+        enable_ticks=False, enable_velocity=False,
+    )
     clients = _make_clients()
     # Mispricing detector that returns immediately every iteration.
     scanner = Scanner(config=config, db_path=db_path, clients=clients)
@@ -270,7 +278,14 @@ async def test_run_invokes_shutdown_on_taskgroup_failure(
 ) -> None:
     """SIGINT-equivalent: any unrecoverable exit from ``run`` must call ``aclose``."""
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())
-    config = _make_config(enable_smart=False, enable_misprice=True, enable_whales=False)
+    # See ``test_run_supervisor_restarts_returning_detector`` for why every
+    # other detector / collector must be disabled here.
+    config = _make_config(
+        enable_smart=False, enable_misprice=True, enable_whales=False,
+        enable_convergence=False, enable_positions=False, enable_activity=False,
+        enable_markets=False, enable_events=False,
+        enable_ticks=False, enable_velocity=False,
+    )
     clients = _make_clients()
     scanner = Scanner(config=config, db_path=db_path, clients=clients)
 
