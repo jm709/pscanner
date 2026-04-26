@@ -11,6 +11,7 @@ min_excess_pnl_usd = 1000.0
 refresh_interval_seconds = 3600
 position_poll_interval_seconds = 300
 new_position_min_usd = 1000
+prewarm_event_tag_cache = true
 
 [smart_money.category_min_edge]
 thesis = 0.05

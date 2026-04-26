@@ -8,6 +8,8 @@ exercises only the orchestration logic in
 
 from __future__ import annotations
 
+import sqlite3
+from collections.abc import AsyncIterator, Iterable
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -21,12 +23,17 @@ from pscanner.detectors.smart_money import (
     _compute_metrics,
     _severity,
 )
-from pscanner.poly.models import ClosedPosition, LeaderboardEntry, Position
-from pscanner.store.repo import TrackedWallet
+from pscanner.poly.models import ClosedPosition, Event, LeaderboardEntry, Position
+from pscanner.store.repo import EventTagCacheRepo, TrackedWallet
 
 
 def _config(**overrides: Any) -> SmartMoneyConfig:
-    """Build a config with sane defaults plus overrides."""
+    """Build a config with sane defaults plus overrides.
+
+    ``prewarm_event_tag_cache`` defaults to ``False`` here so per-wallet path
+    tests can leave the gamma ``iter_events`` mock unset. New tests targeting
+    the pre-warm behaviour pass ``prewarm_event_tag_cache=True`` explicitly.
+    """
     base: dict[str, Any] = {
         "leaderboard_top_n": 10,
         "min_resolved_positions": 5,
@@ -35,6 +42,7 @@ def _config(**overrides: Any) -> SmartMoneyConfig:
         "refresh_interval_seconds": 60,
         "position_poll_interval_seconds": 30,
         "new_position_min_usd": 1000.0,
+        "prewarm_event_tag_cache": False,
     }
     base.update(overrides)
     return SmartMoneyConfig(**base)
@@ -136,9 +144,14 @@ def _build_detector(
     tracked_repo: MagicMock | None = None,
     snapshots_repo: MagicMock | None = None,
     categories_repo: MagicMock | None = None,
-    event_tag_cache: MagicMock | None = None,
+    event_tag_cache: MagicMock | EventTagCacheRepo | None = None,
 ) -> tuple[SmartMoneyDetector, AsyncMock, MagicMock, MagicMock]:
-    """Wire a detector with mocked collaborators and return all four handles."""
+    """Wire a detector with mocked collaborators and return all four handles.
+
+    ``event_tag_cache`` accepts either a ``MagicMock`` (for fast pure-mock
+    tests) or a real :class:`EventTagCacheRepo` backed by the ``tmp_db``
+    fixture (for tests that exercise persistence — see the pre-warm tests).
+    """
     cfg = config or _config()
     data = data_client or AsyncMock()
     tracked = tracked_repo or MagicMock()
@@ -904,3 +917,171 @@ async def test_refresh_overall_upsert_unchanged_with_categories() -> None:
     overall_kwargs = tracked_repo.upsert.call_args.kwargs
     assert overall_kwargs["address"] == "0xabc"
     assert overall_kwargs["closed_position_count"] == 7
+
+
+def _async_iter(events: Iterable[Event]) -> AsyncIterator[Event]:
+    """Wrap a sync iterable as an async iterator for ``iter_events`` mocks."""
+
+    async def _gen() -> AsyncIterator[Event]:
+        for event in events:
+            yield event
+
+    return _gen()
+
+
+def _event(
+    *,
+    event_id: str,
+    slug: str | None = None,
+    tags: list[str] | None = None,
+) -> Event:
+    """Build a synthetic gamma Event for pre-warm tests."""
+    payload: dict[str, Any] = {
+        "id": event_id,
+        "title": f"Event {event_id}",
+        "slug": slug if slug is not None else f"slug-{event_id}",
+        "tags": tags if tags is not None else [],
+    }
+    return Event.model_validate(payload)
+
+
+@pytest.mark.asyncio
+async def test_prewarm_populates_event_tag_cache_from_iter_events(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """``_prewarm_event_tag_cache`` writes every yielded event into the cache."""
+    events = [
+        _event(event_id="1", slug="evt-a", tags=["Politics"]),
+        _event(event_id="2", slug="evt-b", tags=["Sports", "NFL"]),
+        _event(event_id="3", slug="evt-c", tags=["Esports"]),
+    ]
+    gamma_client = AsyncMock()
+    gamma_client.iter_events = lambda **_kwargs: _async_iter(events)
+    cache = EventTagCacheRepo(tmp_db)
+
+    detector, _, _, _ = _build_detector(
+        gamma_client=gamma_client,
+        event_tag_cache=cache,
+    )
+
+    inserted = await detector._prewarm_event_tag_cache()
+
+    assert inserted == 3
+    assert cache.get("evt-a") == ["Politics"]
+    assert cache.get("evt-b") == ["Sports", "NFL"]
+    assert cache.get("evt-c") == ["Esports"]
+
+
+@pytest.mark.asyncio
+async def test_prewarm_skips_already_cached_events(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """Existing cache entries are NOT overwritten by the pre-warm sweep."""
+    cache = EventTagCacheRepo(tmp_db)
+    cache.upsert("evt-a", ["StalePolitics"])
+    events = [
+        _event(event_id="1", slug="evt-a", tags=["FreshPolitics"]),
+        _event(event_id="2", slug="evt-b", tags=["Sports"]),
+        _event(event_id="3", slug="evt-c", tags=["Esports"]),
+    ]
+    gamma_client = AsyncMock()
+    gamma_client.iter_events = lambda **_kwargs: _async_iter(events)
+
+    detector, _, _, _ = _build_detector(
+        gamma_client=gamma_client,
+        event_tag_cache=cache,
+    )
+
+    inserted = await detector._prewarm_event_tag_cache()
+
+    assert inserted == 2
+    assert cache.get("evt-a") == ["StalePolitics"]
+    assert cache.get("evt-b") == ["Sports"]
+    assert cache.get("evt-c") == ["Esports"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_calls_prewarm_before_leaderboard_when_enabled() -> None:
+    """With pre-warm enabled, ``iter_events`` is awaited before the leaderboard."""
+    call_order: list[str] = []
+    events = [_event(event_id="1", slug="evt-a", tags=["Politics"])]
+
+    def _iter_events_tracked(**_kwargs: Any) -> AsyncIterator[Event]:
+        call_order.append("iter_events")
+        return _async_iter(events)
+
+    gamma_client = AsyncMock()
+    gamma_client.iter_events = _iter_events_tracked
+    data_client = AsyncMock()
+
+    async def _get_leaderboard(**_kwargs: Any) -> list[LeaderboardEntry]:
+        call_order.append("get_leaderboard")
+        return []
+
+    data_client.get_leaderboard.side_effect = _get_leaderboard
+    event_tag_cache = MagicMock()
+    event_tag_cache.get.return_value = None
+
+    detector, _, _, _ = _build_detector(
+        config=_config(prewarm_event_tag_cache=True),
+        data_client=data_client,
+        gamma_client=gamma_client,
+        event_tag_cache=event_tag_cache,
+    )
+
+    await detector._refresh_tracked_wallets()
+
+    assert call_order == ["iter_events", "get_leaderboard"]
+    event_tag_cache.upsert.assert_called_once_with("evt-a", ["Politics"])
+
+
+@pytest.mark.asyncio
+async def test_refresh_skips_prewarm_when_disabled() -> None:
+    """With ``prewarm_event_tag_cache=False`` the helper is not invoked."""
+    gamma_client = AsyncMock()
+    iter_events_mock = MagicMock()
+    gamma_client.iter_events = iter_events_mock
+    data_client = AsyncMock()
+    data_client.get_leaderboard.return_value = []
+
+    detector, _, _, _ = _build_detector(
+        config=_config(prewarm_event_tag_cache=False),
+        data_client=data_client,
+        gamma_client=gamma_client,
+    )
+
+    await detector._refresh_tracked_wallets()
+
+    iter_events_mock.assert_not_called()
+    data_client.get_leaderboard.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_prewarm_tolerates_empty_tags_and_missing_slug(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """Events with empty tags are cached; events with no slug AND no id are skipped."""
+    events = [
+        _event(event_id="1", slug="evt-a", tags=["Politics"]),
+        _event(event_id="2", slug="evt-empty", tags=[]),
+        _event(event_id="3", slug="", tags=["Sports"]),
+        _event(event_id="", slug="", tags=["Esports"]),
+    ]
+    gamma_client = AsyncMock()
+    gamma_client.iter_events = lambda **_kwargs: _async_iter(events)
+    cache = EventTagCacheRepo(tmp_db)
+
+    detector, _, _, _ = _build_detector(
+        gamma_client=gamma_client,
+        event_tag_cache=cache,
+    )
+
+    inserted = await detector._prewarm_event_tag_cache()
+
+    assert inserted == 3
+    assert cache.get("evt-a") == ["Politics"]
+    assert cache.get("evt-empty") == []
+    # slug="" falls back to the event id "3".
+    assert cache.get("3") == ["Sports"]
+    # Both slug and id blank → skipped.
+    assert cache.get("") is None

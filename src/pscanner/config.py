@@ -48,6 +48,7 @@ class SmartMoneyConfig(_Section):
     refresh_interval_seconds: int = 3600
     position_poll_interval_seconds: int = 300
     new_position_min_usd: float = 1000.0
+    prewarm_event_tag_cache: bool = True
     category_min_edge: dict[str, float] = Field(
         default_factory=lambda: {"thesis": 0.05, "sports": 0.10, "esports": 0.05},
     )

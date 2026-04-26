@@ -202,12 +202,43 @@ class SmartMoneyDetector:
 
     async def _refresh_tracked_wallets(self) -> None:
         """Recompute and persist tracked wallets from the live leaderboard."""
+        if self._config.prewarm_event_tag_cache:
+            await self._prewarm_event_tag_cache()
         entries = await self._data_client.get_leaderboard(
             period="all",
             limit=self._config.leaderboard_top_n,
         )
         for entry in entries:
             await self.refresh_one_wallet(entry)
+
+    async def _prewarm_event_tag_cache(self) -> int:
+        """Bulk-populate ``event_tag_cache`` from gamma ``/events``.
+
+        Cold-start optimisation: smart-money's per-position fallback
+        (``get_event_by_slug`` per missing event) is rate-limited at the
+        configured ``gamma_rpm`` (~50 by default). One ``iter_events`` page
+        returns ~100 events including their tag arrays, so a full sweep
+        populates the cache in roughly one tenth of the gamma-rpm budget the
+        per-position path would consume.
+
+        Already-cached events are skipped so a steady-state daemon (where
+        ``EventCollector`` continuously refreshes the cache) does not redo
+        work on every refresh tick.
+
+        Returns:
+            The number of events newly inserted into the cache.
+        """
+        inserted = 0
+        async for event in self._gamma_client.iter_events(active=True, closed=False):
+            key = event.slug or event.id
+            if not key:
+                continue
+            if self._event_tag_cache.get(key) is not None:
+                continue
+            self._event_tag_cache.upsert(key, list(event.tags))
+            inserted += 1
+        _LOG.info("smart_money.prewarm_complete", inserted=inserted)
+        return inserted
 
     async def refresh_one_wallet(self, entry: LeaderboardEntry) -> None:
         """Evaluate a single leaderboard entry and upsert if it qualifies.
