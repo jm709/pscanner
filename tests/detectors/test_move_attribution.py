@@ -293,7 +293,7 @@ async def test_detector_emits_candidate_and_watchlists_contributors(tmp_db) -> N
         )
         sink.subscribe(detector.handle_alert_sync)
         # The detector needs sink set so its async path can call sink.emit.
-        detector._sink = sink  # type: ignore[assignment]  # ty:ignore[invalid-assignment]
+        detector._sink = sink  # type: ignore[assignment]
         await sink.emit(_build_velocity_alert(created_at=alert_ts))
         for _ in range(10):
             await asyncio.sleep(0)
@@ -320,7 +320,7 @@ async def test_detector_ignores_non_trigger_detectors(tmp_db) -> None:
             watchlist_repo=watchlist,
         )
         sink.subscribe(detector.handle_alert_sync)
-        detector._sink = sink  # type: ignore[assignment]  # ty:ignore[invalid-assignment]
+        detector._sink = sink  # type: ignore[assignment]
         a = Alert(
             detector="whales",
             alert_key="whales:1",
@@ -350,7 +350,7 @@ async def test_detector_skips_alert_without_condition_id(tmp_db) -> None:
             watchlist_repo=watchlist,
         )
         sink.subscribe(detector.handle_alert_sync)
-        detector._sink = sink  # type: ignore[assignment]  # ty:ignore[invalid-assignment]
+        detector._sink = sink  # type: ignore[assignment]
         a = Alert(
             detector="velocity",
             alert_key="velocity:nocond",
@@ -382,7 +382,7 @@ async def test_detector_swallows_trades_http_error(tmp_db) -> None:
             watchlist_repo=watchlist,
         )
         sink.subscribe(detector.handle_alert_sync)
-        detector._sink = sink  # type: ignore[assignment]  # ty:ignore[invalid-assignment]
+        detector._sink = sink  # type: ignore[assignment]
         await sink.emit(_build_velocity_alert())
         for _ in range(10):
             await asyncio.sleep(0)
