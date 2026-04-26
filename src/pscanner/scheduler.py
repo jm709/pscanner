@@ -211,6 +211,7 @@ class Scanner:
             registry=self._watchlist_registry,
             data_client=self._clients.data_client,
             trades_repo=self._wallet_trades_repo,
+            wallet_first_seen=self._first_seen_repo,
         )
         collectors: dict[str, Collector] = {syncer.name: syncer, trades.name: trades}
         if self._config.positions.enabled:

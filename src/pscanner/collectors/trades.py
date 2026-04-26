@@ -38,9 +38,11 @@ import structlog
 from pscanner.collectors.watchlist import WatchlistRegistry
 from pscanner.poly.data import DataClient
 from pscanner.poly.ids import AssetId, ConditionId
-from pscanner.store.repo import WalletTrade, WalletTradesRepo
+from pscanner.store.repo import WalletFirstSeenRepo, WalletTrade, WalletTradesRepo
 
 _LOG = structlog.get_logger(__name__)
+
+_WALLET_FIRST_SEEN_TTL_SECONDS = 86400  # 24h
 
 
 class TradeCollector:
@@ -60,21 +62,26 @@ class TradeCollector:
         registry: WatchlistRegistry,
         data_client: DataClient,
         trades_repo: WalletTradesRepo,
+        wallet_first_seen: WalletFirstSeenRepo,
         poll_interval_seconds: float = 60.0,
         activity_page_limit: int = 200,
     ) -> None:
-        """Wire the collector to the registry, data client, and repo.
+        """Wire the collector to the registry, data client, and repos.
 
         Args:
             registry: In-memory watchlist of wallet addresses to record.
             data_client: REST client used to fetch each wallet's activity feed.
             trades_repo: Append-only repo for ``wallet_trades`` rows.
+            wallet_first_seen: Cache repo populated unconditionally per cycle
+                so the cluster detector and whales age filter have data even
+                when the whales filter chain never fires.
             poll_interval_seconds: Cadence for full-watchlist polling cycles.
             activity_page_limit: Per-wallet ``/activity`` page size.
         """
         self._registry = registry
         self._data_client = data_client
         self._trades_repo = trades_repo
+        self._wallet_first_seen = wallet_first_seen
         self._poll_interval_seconds = poll_interval_seconds
         self._activity_page_limit = activity_page_limit
         self._pending_add_tasks: set[asyncio.Task[int]] = set()
@@ -138,6 +145,11 @@ class TradeCollector:
     async def _poll_wallet(self, address: str) -> int:
         """Poll one wallet's ``/activity`` feed and persist new TRADE rows.
 
+        After the trade-recording pass completes, also refresh the
+        ``wallet_first_seen`` cache for ``address`` so downstream detectors
+        (cluster discovery, whales age filter) have populated rows regardless
+        of whether any whale-filter chain ever fired.
+
         Args:
             address: 0x-prefixed proxy wallet to poll.
 
@@ -170,7 +182,40 @@ class TradeCollector:
             if inserted_now:
                 inserted += 1
                 self._fire_new_trade_callbacks(trade)
+        await self._ensure_first_seen(address)
         return inserted
+
+    async def _ensure_first_seen(self, address: str) -> None:
+        """Populate ``wallet_first_seen`` for ``address`` if missing or stale.
+
+        Idempotent: skips when the cached row's ``cached_at`` is younger than
+        :data:`_WALLET_FIRST_SEEN_TTL_SECONDS`. Logs and swallows API errors so
+        a single failed lookup never breaks the polling cycle.
+
+        Args:
+            address: 0x-prefixed proxy wallet whose age data we want cached.
+        """
+        existing = self._wallet_first_seen.get(address)
+        now = int(time.time())
+        if existing is not None and now - existing.cached_at < _WALLET_FIRST_SEEN_TTL_SECONDS:
+            return
+        try:
+            first_at = await self._data_client.get_first_activity_timestamp(address)
+            page = await self._data_client.get_activity(
+                address,
+                limit=self._activity_page_limit,
+            )
+            total_trades = len(page)
+        except Exception:
+            _LOG.exception("trades.first_seen_fetch_failed", wallet=address)
+            return
+        self._wallet_first_seen.upsert(address, first_at, total_trades)
+        _LOG.debug(
+            "trades.first_seen_populated",
+            wallet=address,
+            first_activity_at=first_at,
+            total_trades=total_trades,
+        )
 
     def _fire_new_trade_callbacks(self, trade: WalletTrade) -> None:
         """Invoke every registered new-trade callback, swallowing exceptions.
