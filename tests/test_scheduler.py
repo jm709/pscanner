@@ -810,7 +810,7 @@ async def test_scanner_skips_move_attribution_when_disabled(db_path: Path) -> No
         assert "move_attribution" not in scanner._detectors
         # And no MoveAttributionDetector callback is wired to the sink.
         assert all(
-            getattr(cb, "__self__", None).__class__.__name__ != "MoveAttributionDetector"
+            not isinstance(getattr(cb, "__self__", None), MoveAttributionDetector)
             for cb in scanner.sink._subscribers
         )
     finally:
