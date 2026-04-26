@@ -42,6 +42,35 @@ Polymarket data-collection daemon. Python 3.13 + uv + ruff + ty + pytest.
 - DB: `./data/pscanner.sqlite3`. Drop the file for a clean smoke run.
 - Smoke verification idiom: `rm -f data/pscanner.sqlite3 && timeout NNNN uv run pscanner run > /tmp/smoke.log 2>&1; echo exit=$?`
 
+## Known wallet clusters
+
+### Cavill cluster (manually discovered 2026-04-25; auto-confirmed by detector with `discovery_lookback_days=365`, score=7, tag=`mixed`)
+
+9-wallet coordinated operation, all created **Feb 20-21 2026** (7 of 9 within a 38-minute window on Feb 20). Bimodal trade sizing ($500-999 chunks just below $1K + sub-$100 dust), 35-40% SELL rate, 57% of trades at price ≥0.95 (BUY-NO spread harvest), $0 net exposure across all 9 wallets. Behavior: market-making / Polymarket maker-rebate farming on niche long-tail markets (Henry Cavill James Bond, Cabello as Venezuelan leader, Ferran Torres top La Liga scorer, Houston Dynamo MLS Cup, Mohammad Khatami, Manchester United 2nd place EPL). Useful as a "fastest-reactor-to-mispricings" signal, NOT as an "informed insider" signal.
+
+```
+0x5cbd326a7f9dfac9855b9a23caee48fc097eabb0
+0x53daff4663382b86808feb77e4fcaffd94e57cc8
+0x13b775f8a46762d031cbf9a6a478fe90a81e0aaf
+0x7bfbc1e83ffb9203b29f653e5367acd3a580f6f8
+0xd5983aab43ef59620fda70599e30e693fd93c659
+0x43d621fc31491eec23d9f696dcfb7e8923cd8ac9
+0xcbd11366479deef70576a4c7c0f6eda1bc6aed42
+0xf04e089482c1349d3556a36951b033094731b79b
+0x5266edffc8f4737c2b9d0fa959ecae2c7b55c8cb
+```
+
+Re-add to watchlist after a DB reset:
+```bash
+for a in 0x5cbd326a7f9dfac9855b9a23caee48fc097eabb0 0x53daff4663382b86808feb77e4fcaffd94e57cc8 \
+         0x13b775f8a46762d031cbf9a6a478fe90a81e0aaf 0x7bfbc1e83ffb9203b29f653e5367acd3a580f6f8 \
+         0xd5983aab43ef59620fda70599e30e693fd93c659 0x43d621fc31491eec23d9f696dcfb7e8923cd8ac9 \
+         0xcbd11366479deef70576a4c7c0f6eda1bc6aed42 0xf04e089482c1349d3556a36951b033094731b79b \
+         0x5266edffc8f4737c2b9d0fa959ecae2c7b55c8cb; do
+  uv run pscanner watch "$a" --reason cavill-cluster-feb2026
+done
+```
+
 ## Open follow-ups (no issues filed)
 - Cluster detector default `discovery_lookback_days = 30` is too short to catch older clusters — bump to 90+ if testing against historical data.
 - Cluster detector silently returns when its candidate set is empty — no INFO-level "scan ran, found 0 candidates" log. Causes confusing "no alerts, no errors, no anything" symptom.
