@@ -243,6 +243,7 @@ class Scanner:
                 data_client=self._clients.data_client,
                 registry=self._watchlist_registry,
                 ticks_repo=self._ticks_repo,
+                market_cache=self._market_cache_repo,
             )
         return collectors
 
