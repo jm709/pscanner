@@ -18,9 +18,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from pscanner.collectors.markets import MarketCollector
-from pscanner.poly.ids import MarketId
+from pscanner.poly.ids import EventId, MarketId
 from pscanner.poly.models import Market
-from pscanner.store.repo import MarketSnapshotsRepo
+from pscanner.store.repo import CachedMarket, MarketSnapshotsRepo
 
 _BASE_TS = 1_700_000_000
 
@@ -78,6 +78,7 @@ def _make_collector(
     gamma: AsyncMock,
     snapshot_max: int = 5000,
     snapshot_interval_seconds: float = 300.0,
+    market_cache: Any = None,
 ) -> tuple[MarketCollector, MarketSnapshotsRepo]:
     """Wire up a collector with a real repo plus the supplied gamma mock."""
     repo = MarketSnapshotsRepo(tmp_db)
@@ -86,8 +87,27 @@ def _make_collector(
         markets_repo=repo,
         snapshot_interval_seconds=snapshot_interval_seconds,
         snapshot_max=snapshot_max,
+        market_cache=market_cache,
     )
     return collector, repo
+
+
+def _make_cached_market(
+    market_id: str,
+    *,
+    event_id: str | None,
+) -> CachedMarket:
+    """Build a synthetic ``CachedMarket`` with only the fields under test."""
+    return CachedMarket(
+        market_id=MarketId(market_id),
+        event_id=EventId(event_id) if event_id is not None else None,
+        title=None,
+        liquidity_usd=None,
+        volume_usd=None,
+        outcome_prices=[],
+        active=True,
+        cached_at=_BASE_TS,
+    )
 
 
 @pytest.mark.asyncio
@@ -287,3 +307,99 @@ async def test_run_survives_per_iteration_exception(
 
     assert len(calls) >= 2
     assert repo.distinct_snapshot_count() >= 1
+
+
+@pytest.mark.asyncio
+async def test_event_id_from_gamma_takes_precedence_over_cache(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """When gamma supplies ``event_id``, the cache value is not consulted."""
+    markets = [_make_market("m1", event_id="123")]
+    gamma = _make_gamma(markets)
+    cache = MagicMock()
+    cache.get.return_value = _make_cached_market("m1", event_id="999")
+    collector, repo = _make_collector(tmp_db=tmp_db, gamma=gamma, market_cache=cache)
+
+    inserted = await collector.snapshot_all_markets()
+
+    assert inserted == 1
+    rows = repo.recent_for_market(MarketId("m1"))
+    assert len(rows) == 1
+    assert rows[0].event_id == "123"
+    cache.get.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_event_id_backfilled_from_cache_when_gamma_missing(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """Gamma ``event_id=None`` is backfilled from the cache lookup."""
+    markets = [_make_market("m1", event_id=None)]
+    gamma = _make_gamma(markets)
+    cache = MagicMock()
+    cache.get.return_value = _make_cached_market("m1", event_id="456")
+    collector, repo = _make_collector(tmp_db=tmp_db, gamma=gamma, market_cache=cache)
+
+    inserted = await collector.snapshot_all_markets()
+
+    assert inserted == 1
+    rows = repo.recent_for_market(MarketId("m1"))
+    assert len(rows) == 1
+    assert rows[0].event_id == "456"
+    cache.get.assert_called_once_with(MarketId("m1"))
+
+
+@pytest.mark.asyncio
+async def test_no_backfill_when_cache_also_missing_event_id(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """Gamma + cache both ``None`` leaves the snapshot ``event_id`` ``None``."""
+    markets = [_make_market("m1", event_id=None)]
+    gamma = _make_gamma(markets)
+    cache = MagicMock()
+    cache.get.return_value = _make_cached_market("m1", event_id=None)
+    collector, repo = _make_collector(tmp_db=tmp_db, gamma=gamma, market_cache=cache)
+
+    inserted = await collector.snapshot_all_markets()
+
+    assert inserted == 1
+    rows = repo.recent_for_market(MarketId("m1"))
+    assert len(rows) == 1
+    assert rows[0].event_id is None
+
+
+@pytest.mark.asyncio
+async def test_no_market_cache_passed_event_id_remains_none(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """When no ``market_cache`` is wired, the snapshot mirrors gamma verbatim."""
+    markets = [_make_market("m1", event_id=None)]
+    gamma = _make_gamma(markets)
+    collector, repo = _make_collector(tmp_db=tmp_db, gamma=gamma)
+
+    inserted = await collector.snapshot_all_markets()
+
+    assert inserted == 1
+    rows = repo.recent_for_market(MarketId("m1"))
+    assert len(rows) == 1
+    assert rows[0].event_id is None
+
+
+@pytest.mark.asyncio
+async def test_cache_miss_leaves_event_id_none(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """When ``cache.get`` returns ``None``, the snapshot ``event_id`` is ``None``."""
+    markets = [_make_market("m1", event_id=None)]
+    gamma = _make_gamma(markets)
+    cache = MagicMock()
+    cache.get.return_value = None
+    collector, repo = _make_collector(tmp_db=tmp_db, gamma=gamma, market_cache=cache)
+
+    inserted = await collector.snapshot_all_markets()
+
+    assert inserted == 1
+    rows = repo.recent_for_market(MarketId("m1"))
+    assert len(rows) == 1
+    assert rows[0].event_id is None
+    cache.get.assert_called_once_with(MarketId("m1"))

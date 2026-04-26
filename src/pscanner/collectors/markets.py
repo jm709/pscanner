@@ -15,8 +15,9 @@ import time
 import structlog
 
 from pscanner.poly.gamma import GammaClient
+from pscanner.poly.ids import EventId
 from pscanner.poly.models import Market
-from pscanner.store.repo import MarketSnapshot, MarketSnapshotsRepo
+from pscanner.store.repo import MarketCacheRepo, MarketSnapshot, MarketSnapshotsRepo
 
 _LOG = structlog.get_logger(__name__)
 
@@ -39,6 +40,7 @@ class MarketCollector:
         markets_repo: MarketSnapshotsRepo,
         snapshot_interval_seconds: float = 300.0,
         snapshot_max: int = 5000,
+        market_cache: MarketCacheRepo | None = None,
     ) -> None:
         """Build the collector.
 
@@ -47,11 +49,16 @@ class MarketCollector:
             markets_repo: Append-only, dedupe-on-PK repo for snapshots.
             snapshot_interval_seconds: Cadence between full sweeps.
             snapshot_max: Hard cap on markets fetched per sweep.
+            market_cache: Optional ``MarketCacheRepo`` consulted at write time
+                to backfill ``event_id`` on snapshots when gamma ``/markets``
+                omits it (the dedicated endpoint never returns ``eventId``;
+                see issue #19).
         """
         self._gamma = gamma_client
         self._repo = markets_repo
         self._interval = snapshot_interval_seconds
         self._max = snapshot_max
+        self._market_cache = market_cache
 
     async def run(self, stop_event: asyncio.Event) -> None:
         """Loop: snapshot all active markets every interval until stopped.
@@ -110,7 +117,7 @@ class MarketCollector:
         """
         snapshot = MarketSnapshot(
             market_id=market.id,
-            event_id=market.event_id,
+            event_id=self._resolve_event_id(market),
             outcome_prices_json=json.dumps(list(market.outcome_prices or [])),
             liquidity_usd=market.liquidity,
             volume_usd=market.volume,
@@ -122,3 +129,33 @@ class MarketCollector:
         except Exception:
             _LOG.exception("markets.insert_failed", market_id=market.id)
             return False
+
+    def _resolve_event_id(self, market: Market) -> EventId | None:
+        """Return the snapshot's ``event_id``, backfilling from the cache.
+
+        Gamma ``/markets`` does not include ``eventId``, so the model's
+        ``event_id`` is ``None`` for every row written by this collector. When
+        a ``MarketCacheRepo`` is wired, consult it for the same market — the
+        cache is populated by ``EventCollector`` via the parent-event path,
+        which does carry ``event_id``. Cache-lookup failures are logged and
+        swallowed so a transient DB hiccup cannot break the sweep.
+
+        Args:
+            market: Source-of-truth market model from gamma.
+
+        Returns:
+            The market's ``event_id`` if gamma supplied one; otherwise the
+            cache's ``event_id`` if known; otherwise ``None``.
+        """
+        if market.event_id is not None:
+            return market.event_id
+        if self._market_cache is None:
+            return None
+        try:
+            cached = self._market_cache.get(market.id)
+        except Exception:
+            _LOG.exception("markets.cache_lookup_failed", market_id=market.id)
+            return None
+        if cached is None:
+            return None
+        return cached.event_id
