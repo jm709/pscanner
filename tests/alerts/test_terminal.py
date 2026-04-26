@@ -84,7 +84,7 @@ def test_move_attribution_in_detector_literal() -> None:
 def test_renderer_handles_move_attribution_alert() -> None:
     renderer = TerminalRenderer(max_per_detector=5)
     alert = Alert(
-        detector="move_attribution",  # type: ignore[arg-type]
+        detector="move_attribution",
         alert_key="cluster.candidate:0xabc:Yes:BUY:1700000000",
         severity="med",
         title="cluster candidate burst",
