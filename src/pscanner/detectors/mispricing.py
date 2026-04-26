@@ -13,23 +13,19 @@ sum-to-1 invariant doesn't apply.
 
 from __future__ import annotations
 
-import asyncio
 import re
 import time
 from typing import Any
-
-import structlog
 
 from pscanner.alerts.models import Alert, Severity
 from pscanner.alerts.sink import AlertSink
 from pscanner.categories import categorize_event, settings_for
 from pscanner.config import MispricingConfig
+from pscanner.detectors.polling import PollingDetector
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.models import Event, Market
 from pscanner.store.repo import EventOutcomeSumRepo, EventOutcomeSumRow
-from pscanner.util.clock import Clock, RealClock
-
-_LOGGER = structlog.get_logger(__name__)
+from pscanner.util.clock import Clock
 
 _HIGH_SEVERITY_DEVIATION = 0.10
 _MED_SEVERITY_DEVIATION = 0.05
@@ -90,13 +86,17 @@ def _is_range_bucket_event(event: Event) -> bool:
     return all(_looks_like_bucket_label(m.group_item_title) for m in event.markets)
 
 
-class MispricingDetector:
+class MispricingDetector(PollingDetector):
     """Detector that scans events for outcome-price sums that drift from 1.0.
 
     The detector iterates the gamma ``/events`` catalogue (active, open) and
     flags any event whose YES-leg prices sum more than
     ``config.sum_deviation_threshold`` away from ``1.0``. Severity is bucketed
     by deviation magnitude so the renderer can prioritise the worst offenders.
+
+    Inherits the periodic-scan loop from :class:`PollingDetector`; this class
+    only implements ``_scan`` (one pass over the catalogue) and
+    ``_interval_seconds`` (reads from the injected ``MispricingConfig``).
     """
 
     name: str = "mispricing"
@@ -120,25 +120,14 @@ class MispricingDetector:
             clock: Injectable :class:`Clock`. Defaults to :class:`RealClock`
                 so production wiring needs no changes.
         """
+        super().__init__(clock=clock)
         self._config = config
         self._gamma = gamma_client
         self._sum_repo = sum_history_repo
-        self._clock: Clock = clock if clock is not None else RealClock()
 
-    async def run(self, sink: AlertSink) -> None:
-        """Loop forever: scan, sleep, repeat. Logs and continues on error.
-
-        Args:
-            sink: Shared alert sink every detector publishes to.
-        """
-        while True:
-            try:
-                await self._scan(sink)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                _LOGGER.exception("mispricing scan failed", detector=self.name)
-            await self._clock.sleep(self._config.scan_interval_seconds)
+    def _interval_seconds(self) -> float:
+        """Return the configured scan cadence."""
+        return self._config.scan_interval_seconds
 
     async def _scan(self, sink: AlertSink) -> None:
         """Run a single pass over the active-event catalogue.
