@@ -23,6 +23,9 @@ _PERIOD_TO_WINDOW: Final[dict[str, str]] = {"day": "1d", "week": "7d", "all": "a
 
 _ACTIVITY_PAGE_SIZE: Final[int] = 500
 
+_TRADES_PAGE_SIZE: Final[int] = 500
+_TRADES_PAGE_CAP: Final[int] = 30  # 15k trades per condition_id maximum
+
 _log = structlog.get_logger(__name__)
 
 
@@ -180,6 +183,56 @@ class DataClient:
         payload = await self._data_http.get("/activity", params=params)
         items = _ensure_list(payload, endpoint="/activity")
         return [item for item in items if isinstance(item, dict)]
+
+    async def get_market_trades(
+        self,
+        condition_id: str,
+        *,
+        since_ts: int,
+        until_ts: int,
+    ) -> list[dict[str, Any]]:
+        """Return all CONFIRMED trades on a market within ``[since_ts, until_ts]``.
+
+        Paginates ``/trades?market=`` newest-first. Stops as soon as the newest
+        timestamp on a page is older than ``since_ts`` or a short page is
+        returned. Hard-capped at ``_TRADES_PAGE_CAP`` pages (15k trades) so a
+        runaway market cannot exhaust the rate budget on a single call.
+
+        Args:
+            condition_id: 0x-prefixed market condition_id.
+            since_ts: Inclusive lower bound on trade ``timestamp`` (unix seconds).
+            until_ts: Inclusive upper bound on trade ``timestamp`` (unix seconds).
+
+        Returns:
+            A list of raw JSON trade dicts whose timestamps fall inside the window.
+            Heterogeneous shape — callers re-parse downstream.
+        """
+        out: list[dict[str, Any]] = []
+        offset = 0
+        for _ in range(_TRADES_PAGE_CAP):
+            params: dict[str, Any] = {
+                "market": condition_id,
+                "limit": _TRADES_PAGE_SIZE,
+                "offset": offset,
+            }
+            payload = await self._data_http.get("/trades", params=params)
+            page = _ensure_list(payload, endpoint="/trades")
+            if not page:
+                break
+            page_max_ts = max(
+                (t.get("timestamp", 0) for t in page if isinstance(t, dict)),
+                default=0,
+            )
+            for item in page:
+                if not isinstance(item, dict):
+                    continue
+                ts = item.get("timestamp")
+                if isinstance(ts, int) and since_ts <= ts <= until_ts:
+                    out.append(item)
+            if page_max_ts < since_ts or len(page) < _TRADES_PAGE_SIZE:
+                break
+            offset += _TRADES_PAGE_SIZE
+        return out
 
     async def get_first_activity_timestamp(self, address: str) -> int | None:
         """Return the unix-seconds timestamp of a wallet's earliest activity.

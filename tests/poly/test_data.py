@@ -432,3 +432,117 @@ async def test_aclose_is_idempotent(
 
     assert data_http.aclose.await_count == 1
     assert lb_http.aclose.await_count == 1
+
+
+async def test_get_market_trades_filters_by_window(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    data_http.get.return_value = [
+        {
+            "proxyWallet": "0xa",
+            "timestamp": 1500,
+            "size": 10.0,
+            "price": 0.5,
+            "side": "BUY",
+            "outcome": "Yes",
+        },
+        {
+            "proxyWallet": "0xb",
+            "timestamp": 1200,
+            "size": 20.0,
+            "price": 0.5,
+            "side": "BUY",
+            "outcome": "Yes",
+        },
+        {
+            "proxyWallet": "0xc",
+            "timestamp": 900,
+            "size": 30.0,
+            "price": 0.5,
+            "side": "BUY",
+            "outcome": "Yes",
+        },
+    ]
+
+    out = await client.get_market_trades(
+        condition_id="0xabc",
+        since_ts=1000,
+        until_ts=1600,
+    )
+
+    assert {t["proxyWallet"] for t in out} == {"0xa", "0xb"}
+    data_http.get.assert_awaited_once_with(
+        "/trades",
+        params={"market": "0xabc", "limit": 500, "offset": 0},
+    )
+
+
+async def test_get_market_trades_paginates_until_below_window(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    """Stops paginating as soon as the newest timestamp on a page is below the window."""
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    page1 = [
+        {
+            "proxyWallet": f"0x{i}",
+            "timestamp": 2000 - i,
+            "size": 1.0,
+            "price": 0.5,
+            "side": "BUY",
+            "outcome": "Yes",
+        }
+        for i in range(500)
+    ]
+    page2 = [
+        {
+            "proxyWallet": "0x_old",
+            "timestamp": 100,
+            "size": 1.0,
+            "price": 0.5,
+            "side": "BUY",
+            "outcome": "Yes",
+        },
+    ]
+    data_http.get.side_effect = [page1, page2]
+
+    out = await client.get_market_trades(
+        condition_id="0xabc",
+        since_ts=1000,
+        until_ts=3000,
+    )
+
+    assert data_http.get.await_count == 2
+    assert len(out) == 500
+    assert "0x_old" not in {t["proxyWallet"] for t in out}
+
+
+async def test_get_market_trades_stops_at_page_cap(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    """A market that always returns full in-window pages is hard-capped at 30 pages."""
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    full_page = [
+        {
+            "proxyWallet": f"0x{i}",
+            "timestamp": 2_000_000_000,
+            "size": 1.0,
+            "price": 0.5,
+            "side": "BUY",
+            "outcome": "Yes",
+        }
+        for i in range(500)
+    ]
+    data_http.get.return_value = full_page
+
+    out = await client.get_market_trades(
+        condition_id="0xabc",
+        since_ts=0,
+        until_ts=3_000_000_000,
+    )
+
+    assert data_http.get.await_count == 30
+    assert len(out) == 30 * 500
