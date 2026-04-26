@@ -246,6 +246,30 @@ class ClusterConfig(_Section):
     active_min_members: int = 2
 
 
+class MoveAttributionConfig(_Section):
+    """Thresholds + cadence for the alert-driven move-attribution detector.
+
+    Hooks off existing alerts (``trigger_detectors``) and, when one fires,
+    fetches recent trades on the alerted market, walks back to find the
+    burst window, tests for a coordinated burst (>=``min_burst_wallets``
+    distinct wallets in one ``(outcome, side, burst_bucket_seconds)`` bucket
+    with size CV <= ``max_burst_size_cv``), and emits ``cluster.candidate``
+    plus auto-watchlists the contributors.
+    """
+
+    enabled: bool = True
+    trigger_detectors: tuple[str, ...] = ("velocity", "mispricing", "convergence")
+    lookback_seconds_baseline: int = 86400
+    backwalk_multiplier: float = 3.0
+    backwalk_check_window_seconds: int = 300
+    max_backwalk_seconds: int = 7200
+    burst_bucket_seconds: int = 60
+    min_burst_wallets: int = 4
+    max_burst_size_cv: float = 0.4
+    max_burst_hits_per_alert: int = 5
+    max_contributors_per_burst: int = 50
+
+
 class Config(BaseModel):
     """Root pscanner config aggregating every section."""
 
@@ -264,6 +288,7 @@ class Config(BaseModel):
     ticks: TicksConfig = Field(default_factory=TicksConfig)
     velocity: VelocityConfig = Field(default_factory=VelocityConfig)
     cluster: ClusterConfig = Field(default_factory=ClusterConfig)
+    move_attribution: MoveAttributionConfig = Field(default_factory=MoveAttributionConfig)
 
     @classmethod
     def load(cls, path: Path | None = None) -> Config:
