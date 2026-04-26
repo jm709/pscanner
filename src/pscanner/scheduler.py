@@ -43,6 +43,7 @@ from pscanner.config import Config
 from pscanner.detectors.convergence import ConvergenceDetector
 from pscanner.detectors.mispricing import MispricingDetector
 from pscanner.detectors.smart_money import SmartMoneyDetector
+from pscanner.detectors.trade_driven import TradeDrivenDetector
 from pscanner.detectors.velocity import PriceVelocityDetector
 from pscanner.detectors.whales import WhalesDetector
 from pscanner.poly.clob_ws import MarketWebSocket
@@ -149,24 +150,20 @@ class Scanner:
         self._closed = False
 
     def _wire_trade_callbacks(self) -> None:
-        """Wire trade-collector callbacks for the whales + convergence detectors.
+        """Wire trade-collector callbacks for every ``TradeDrivenDetector``.
 
-        Both detectors evaluate per-trade and need their ``_sink`` populated
-        before the run-loop starts so callbacks fire correctly during the
-        first poll cycle.
+        Each trade-driven detector evaluates per-trade and needs its
+        ``_sink`` populated before the run-loop starts so callbacks fire
+        correctly during the first poll cycle.
         """
         trade_collector = self._collectors.get("trade_collector")
         if not isinstance(trade_collector, TradeCollector):
             return
-        whales_detector = self._detectors.get("whales")
-        if isinstance(whales_detector, WhalesDetector):
-            whales_detector._sink = self._sink
-            trade_collector.subscribe_new_trade(whales_detector.handle_trade_sync)
-        convergence_detector = self._detectors.get("convergence")
-        if isinstance(convergence_detector, ConvergenceDetector):
-            convergence_detector._sink = self._sink
-            trade_collector.subscribe_new_trade(convergence_detector.handle_trade_sync)
-            _LOG.info("scanner.convergence_detector_wired")
+        for detector in self._detectors.values():
+            if isinstance(detector, TradeDrivenDetector):
+                detector._sink = self._sink
+                trade_collector.subscribe_new_trade(detector.handle_trade_sync)
+                _LOG.info("scanner.trade_driven_detector_wired", detector=detector.name)
 
     def _build_default_clients(self) -> SchedulerClients:
         """Construct the production HTTP/WS clients from config."""
