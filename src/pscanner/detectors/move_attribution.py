@@ -17,8 +17,13 @@ from typing import Any
 import structlog
 
 from pscanner.config import MoveAttributionConfig
+from pscanner.poly.data import DataClient
 
 _LOG = structlog.get_logger(__name__)
+
+# Two consecutive sub-threshold windows must agree before we declare the burst
+# over — one isolated lull is not enough.
+_REQUIRED_QUIESCENT_WINDOWS = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,4 +176,99 @@ def _detect_burst(
     return hits
 
 
-__all__ = ["BurstHit", "_detect_burst"]
+def _quiescence_threshold(*, n_trades: int, cfg: MoveAttributionConfig) -> float:
+    """Per-check-window trade-count threshold below which a window is quiescent."""
+    baseline_minutes = max(cfg.lookback_seconds_baseline / 60.0, 1.0)
+    baseline_rate = n_trades / baseline_minutes
+    return (baseline_rate * cfg.backwalk_multiplier) * (cfg.backwalk_check_window_seconds / 60.0)
+
+
+def _walk_back_to_burst_start(
+    timestamps: list[int],
+    *,
+    alert_ts: int,
+    floor_ts: int,
+    threshold: float,
+    cfg: MoveAttributionConfig,
+) -> int:
+    """Step back in ``check_window_seconds`` chunks; return the burst-start ts.
+
+    A window is "quiescent" when its trade count is below ``threshold`` AND its
+    lower bound is within the fetched data range. Two consecutive quiescent
+    windows stop the walk; otherwise the walk hits ``floor_ts``.
+    """
+    min_data_ts = min(timestamps) if timestamps else floor_ts
+    consecutive_quiescent = 0
+    cursor = alert_ts
+    while cursor > floor_ts:
+        window_lo = max(cursor - cfg.backwalk_check_window_seconds, floor_ts)
+        in_window = sum(1 for t in timestamps if window_lo <= t < cursor)
+        within_data_range = window_lo >= min_data_ts
+        if within_data_range and in_window < threshold:
+            consecutive_quiescent += 1
+            if consecutive_quiescent >= _REQUIRED_QUIESCENT_WINDOWS:
+                return cursor
+        else:
+            consecutive_quiescent = 0
+        cursor = window_lo
+    return floor_ts
+
+
+async def _backwalk(
+    client: DataClient,
+    *,
+    condition_id: str,
+    alert_ts: int,
+    cfg: MoveAttributionConfig,
+) -> tuple[int, int, list[dict[str, Any]]]:
+    """Walk back from ``alert_ts`` to the start of the coordinated burst.
+
+    Fetches ``cfg.lookback_seconds_baseline`` (default 24h) of trades, computes
+    a baseline trade-rate, then walks back in
+    ``cfg.backwalk_check_window_seconds`` (default 300s) steps. The walk stops
+    when the trailing-window rate drops below
+    ``baseline_rate * cfg.backwalk_multiplier`` for two consecutive windows.
+    Hard-capped at ``cfg.max_backwalk_seconds``.
+
+    The 24h fetch is the only API call this function makes — ``burst_trades``
+    is sliced from the same list used to compute the baseline.
+
+    Args:
+        client: ``DataClient`` to query ``/trades`` against.
+        condition_id: Market condition_id whose trades drive the backwalk.
+        alert_ts: Anchor timestamp (``until_ts`` of the returned window).
+        cfg: Detector config carrying baseline / multiplier / cap knobs.
+
+    Returns:
+        ``(since_ts, until_ts, burst_trades)`` where ``burst_trades`` is the
+        slice of the fetched trades with ``since_ts <= ts <= until_ts``.
+    """
+    until_ts = alert_ts
+    floor_ts = alert_ts - cfg.max_backwalk_seconds
+    baseline_start = alert_ts - cfg.lookback_seconds_baseline
+    all_trades = await client.get_market_trades(
+        condition_id, since_ts=baseline_start, until_ts=alert_ts
+    )
+    if not all_trades:
+        return floor_ts, until_ts, []
+    timestamps = sorted(
+        (int(t["timestamp"]) for t in all_trades if isinstance(t.get("timestamp"), int)),
+        reverse=True,
+    )
+    threshold = _quiescence_threshold(n_trades=len(all_trades), cfg=cfg)
+    since_ts = _walk_back_to_burst_start(
+        timestamps,
+        alert_ts=alert_ts,
+        floor_ts=floor_ts,
+        threshold=threshold,
+        cfg=cfg,
+    )
+    burst_trades = [
+        t
+        for t in all_trades
+        if isinstance(t.get("timestamp"), int) and since_ts <= t["timestamp"] <= until_ts
+    ]
+    return since_ts, until_ts, burst_trades
+
+
+__all__ = ["BurstHit", "_backwalk", "_detect_burst"]

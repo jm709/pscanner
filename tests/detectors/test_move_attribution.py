@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
+import httpx
+import pytest
+import respx
+
 from pscanner.config import MoveAttributionConfig
-from pscanner.detectors.move_attribution import BurstHit, _detect_burst
+from pscanner.detectors.move_attribution import BurstHit, _backwalk, _detect_burst
+from pscanner.poly.data import DataClient
+from pscanner.poly.http import PolyHttpClient
+
+_DATA = "https://data-api.polymarket.com"
 
 
 def _trade(
@@ -119,3 +127,109 @@ def test_detect_burst_drops_zero_size_wallets_from_contributors() -> None:
     hits = _detect_burst(valid + noise, cfg=_cfg(max_contributors_per_burst=50))
     assert len(hits) == 1
     assert set(hits[0].wallets) == {f"0xv{i}" for i in range(4)}
+
+
+def _backwalk_client() -> DataClient:
+    return DataClient(http=PolyHttpClient(base_url=_DATA, rpm=600, timeout_seconds=5.0))
+
+
+def _gen_trades(*, ts_start: int, ts_end: int, gap: int) -> list[dict]:
+    """Generate trades with uniform gap, newest-first."""
+    out: list[dict] = []
+    ts = ts_end
+    i = 0
+    while ts >= ts_start:
+        out.append(
+            {
+                "proxyWallet": f"0x{i:04d}",
+                "timestamp": ts,
+                "side": "BUY",
+                "outcome": "Yes",
+                "size": 50.0,
+                "price": 0.5,
+            }
+        )
+        ts -= gap
+        i += 1
+    return out
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_backwalk_stops_on_quiescence() -> None:
+    # Baseline: 1 trade per 60s for 24h prior
+    # Burst: 1 trade per 5s for 30 min ending at alert_ts
+    alert_ts = 1_700_086_400
+    baseline_start = alert_ts - 86_400
+    baseline = _gen_trades(ts_start=baseline_start, ts_end=alert_ts - 1800, gap=60)
+    burst = _gen_trades(ts_start=alert_ts - 1800, ts_end=alert_ts, gap=5)
+    page = sorted(burst + baseline, key=lambda t: -t["timestamp"])[:500]
+    respx.get(f"{_DATA}/trades").mock(return_value=httpx.Response(200, json=page))
+    client = _backwalk_client()
+    try:
+        since_ts, until_ts, burst_trades = await _backwalk(
+            client, condition_id="0xabc", alert_ts=alert_ts, cfg=_cfg()
+        )
+    finally:
+        await client.aclose()
+    assert until_ts == alert_ts
+    # Backwalk should stop within ~30 min of the alert (the burst window)
+    assert alert_ts - 7200 < since_ts < alert_ts - 1500
+    assert all(since_ts <= t["timestamp"] <= until_ts for t in burst_trades)
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_backwalk_caps_at_max_backwalk_seconds() -> None:
+    # Constant-rate market: burst rate never drops, must hit the 7200s cap
+    alert_ts = 1_700_000_000
+    page = _gen_trades(ts_start=alert_ts - 7300, ts_end=alert_ts, gap=5)[:500]
+    respx.get(f"{_DATA}/trades").mock(return_value=httpx.Response(200, json=page))
+    client = _backwalk_client()
+    try:
+        since_ts, until_ts, _ = await _backwalk(
+            client, condition_id="0xabc", alert_ts=alert_ts, cfg=_cfg()
+        )
+    finally:
+        await client.aclose()
+    assert until_ts - since_ts == 7200
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_backwalk_requires_two_consecutive_quiescent_windows() -> None:
+    # Pattern: burst, single 5-min lull, burst again, then quiescence.
+    # Single dip must NOT stop the backwalk.
+    alert_ts = 1_700_086_400
+    parts: list[dict] = []
+    parts += _gen_trades(ts_start=alert_ts - 600, ts_end=alert_ts, gap=5)
+    parts += _gen_trades(ts_start=alert_ts - 900, ts_end=alert_ts - 600, gap=180)
+    parts += _gen_trades(ts_start=alert_ts - 1800, ts_end=alert_ts - 900, gap=5)
+    parts += _gen_trades(ts_start=alert_ts - 86400, ts_end=alert_ts - 1800, gap=60)
+    page = sorted(parts, key=lambda t: -t["timestamp"])[:500]
+    respx.get(f"{_DATA}/trades").mock(return_value=httpx.Response(200, json=page))
+    client = _backwalk_client()
+    try:
+        since_ts, _, _ = await _backwalk(
+            client, condition_id="0xabc", alert_ts=alert_ts, cfg=_cfg()
+        )
+    finally:
+        await client.aclose()
+    # Window must extend back past the single dip (>= 1800s)
+    assert alert_ts - since_ts >= 1800
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_backwalk_empty_trades_returns_full_cap() -> None:
+    alert_ts = 1_700_000_000
+    respx.get(f"{_DATA}/trades").mock(return_value=httpx.Response(200, json=[]))
+    client = _backwalk_client()
+    try:
+        since_ts, until_ts, burst = await _backwalk(
+            client, condition_id="0xabc", alert_ts=alert_ts, cfg=_cfg()
+        )
+    finally:
+        await client.aclose()
+    assert (since_ts, until_ts) == (alert_ts - 7200, alert_ts)
+    assert burst == []
