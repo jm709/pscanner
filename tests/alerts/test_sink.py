@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import sqlite3
 from unittest.mock import MagicMock
 
 import pytest
 
 from pscanner.alerts.models import Alert
 from pscanner.alerts.sink import AlertSink
+from pscanner.store.repo import AlertsRepo
 
 
 def _make_alert(key: str = "k1") -> Alert:
@@ -83,3 +85,23 @@ async def test_emit_works_without_renderer() -> None:
 
     assert result is True
     cb.assert_called_once_with(alert)
+
+
+@pytest.mark.asyncio
+async def test_subscriber_exception_does_not_break_emit(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    sink = AlertSink(AlertsRepo(tmp_db))
+    received: list[Alert] = []
+
+    def boom(_a: Alert) -> None:
+        raise RuntimeError("subscriber failed")
+
+    def good(a: Alert) -> None:
+        received.append(a)
+
+    sink.subscribe(boom)
+    sink.subscribe(good)
+    inserted = await sink.emit(_make_alert())
+    assert inserted is True
+    assert len(received) == 1, "the second subscriber must still fire after the first raises"

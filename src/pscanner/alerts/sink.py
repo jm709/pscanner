@@ -53,7 +53,15 @@ class AlertSink:
         if self._renderer is not None:
             self._renderer.push(alert)
         for callback in self._subscribers:
-            callback(alert)
+            try:
+                callback(alert)
+            except Exception:
+                _log.warning(
+                    "alert.subscriber_failed",
+                    alert_key=alert.alert_key,
+                    subscriber=getattr(callback, "__qualname__", repr(callback)),
+                    exc_info=True,
+                )
         _log.info(
             "alert.emitted",
             detector=alert.detector,
