@@ -51,6 +51,7 @@ from pscanner.poly.clob_ws import MarketWebSocket
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.http import PolyHttpClient
+from pscanner.poly.tick_stream import BroadcastTickStream
 from pscanner.store.db import init_db
 from pscanner.store.repo import (
     AlertsRepo,
@@ -148,6 +149,7 @@ class Scanner:
         self._renderer = TerminalRenderer()
         self._sink = AlertSink(self._alerts_repo, renderer=self._renderer)
         self._watchlist_registry = WatchlistRegistry(self._watchlist_repo)
+        self._tick_stream = BroadcastTickStream()
         self._collectors = self._build_collectors()
         self._detectors = self._build_detectors()
         self._wire_trade_callbacks()
@@ -253,6 +255,7 @@ class Scanner:
                 registry=self._watchlist_registry,
                 ticks_repo=self._ticks_repo,
                 market_cache=self._market_cache_repo,
+                tick_stream=self._tick_stream,
             )
         return collectors
 
@@ -311,8 +314,9 @@ class Scanner:
     def _maybe_attach_velocity_detector(self, detectors: dict[str, Any]) -> None:
         """Attach the velocity detector if both ticks and velocity are enabled.
 
-        Velocity depends on the ``tick_collector`` being built (its frozen API
-        is the data source); skip silently when ticks are disabled.
+        Velocity subscribes to the shared :class:`BroadcastTickStream`; if the
+        tick collector isn't enabled the stream stays silent and the detector
+        would idle forever, so we still gate construction on ticks being on.
         """
         if not self._config.velocity.enabled:
             return
@@ -321,7 +325,7 @@ class Scanner:
             return
         detectors["velocity"] = PriceVelocityDetector(
             config=self._config.velocity,
-            ticks_collector=tick_collector,
+            tick_stream=self._tick_stream,
             market_cache=self._market_cache_repo,
             clock=self._clock,
         )

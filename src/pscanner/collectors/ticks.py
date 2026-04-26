@@ -28,6 +28,7 @@ from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.ids import AssetId, ConditionId, MarketId
 from pscanner.poly.models import Position, WsBookMessage
+from pscanner.poly.tick_stream import BroadcastTickStream, TickEvent
 from pscanner.store.repo import CachedMarket, MarketCacheRepo, MarketTick, MarketTicksRepo
 
 _LOG = structlog.get_logger(__name__)
@@ -67,6 +68,7 @@ class MarketTickCollector:
         registry: WatchlistRegistry,
         ticks_repo: MarketTicksRepo,
         market_cache: MarketCacheRepo | None = None,
+        tick_stream: BroadcastTickStream | None = None,
     ) -> None:
         """Build the collector. See module docstring for behaviour.
 
@@ -80,6 +82,9 @@ class MarketTickCollector:
             market_cache: Optional repo used to resolve ``asset_id`` →
                 :class:`CachedMarket` for downstream detector enrichment. When
                 ``None``, ``get_market_for_asset`` always returns ``None``.
+            tick_stream: Optional :class:`BroadcastTickStream` to publish a
+                :class:`TickEvent` on every successful tick insert. When
+                ``None`` the collector runs without fan-out (legacy mode).
         """
         self._config = config
         self._ws = ws
@@ -88,6 +93,7 @@ class MarketTickCollector:
         self._registry = registry
         self._repo = ticks_repo
         self._market_cache = market_cache
+        self._tick_stream = tick_stream
         self._books: dict[AssetId, _Orderbook] = {}
         self._asset_to_condition: dict[AssetId, ConditionId] = {}
         self._mid_history: dict[AssetId, list[tuple[int, float]]] = {}
@@ -384,6 +390,10 @@ class MarketTickCollector:
     async def snapshot_once(self) -> int:
         """Walk in-memory orderbook state, write one row per asset.
 
+        Each newly-inserted row is also published as a :class:`TickEvent` to
+        the configured :class:`BroadcastTickStream` (when one is wired) so
+        tick-consuming detectors can react in real time.
+
         Returns:
             Number of rows newly inserted.
         """
@@ -395,13 +405,16 @@ class MarketTickCollector:
         for asset_id, book in books_copy:
             if not asset_id:
                 continue
-            if self._persist_tick(
+            tick = self._persist_tick(
                 asset_id=asset_id,
                 book=book,
                 condition_lookup=condition_lookup,
                 snapshot_at=snapshot_at,
-            ):
-                inserted += 1
+            )
+            if tick is None:
+                continue
+            inserted += 1
+            await self._maybe_publish(asset_id=asset_id, tick=tick)
         _LOG.info("ticks.snapshot_complete", assets=len(books_copy), inserted=inserted)
         return inserted
 
@@ -412,8 +425,8 @@ class MarketTickCollector:
         book: _Orderbook,
         condition_lookup: dict[AssetId, ConditionId],
         snapshot_at: int,
-    ) -> bool:
-        """Build and insert one tick row; return True on insert."""
+    ) -> MarketTick | None:
+        """Build and insert one tick row; return the row when inserted, else ``None``."""
         best_bid = max(book.bids) if book.bids else None
         best_ask = min(book.asks) if book.asks else None
         if best_bid is not None and best_ask is not None:
@@ -424,7 +437,7 @@ class MarketTickCollector:
             spread = None
         condition_id = book.condition_id or condition_lookup.get(asset_id, ConditionId(""))
         if not condition_id and mid is None:
-            return False
+            return None
         bid_depth = _depth_top_n(book.bids, top=_DEPTH_TOP_N, descending=True)
         ask_depth = _depth_top_n(book.asks, top=_DEPTH_TOP_N, descending=False)
         tick = MarketTick(
@@ -443,12 +456,35 @@ class MarketTickCollector:
             inserted = self._repo.insert(tick)
         except Exception:
             _LOG.exception("ticks.insert_failed", asset_id=asset_id)
-            return False
-        if inserted:
-            self._record_tick_history(asset_id, tick=tick)
-            if mid is not None:
-                self._record_mid_history(asset_id, snapshot_at=snapshot_at, mid=mid)
-        return inserted
+            return None
+        if not inserted:
+            return None
+        self._record_tick_history(asset_id, tick=tick)
+        if mid is not None:
+            self._record_mid_history(asset_id, snapshot_at=snapshot_at, mid=mid)
+        return tick
+
+    async def _maybe_publish(self, *, asset_id: AssetId, tick: MarketTick) -> None:
+        """Publish a :class:`TickEvent` for ``tick`` when a stream is wired."""
+        if self._tick_stream is None:
+            return
+        cached = self.get_market_for_asset(asset_id)
+        event = TickEvent(
+            asset_id=tick.asset_id,
+            snapshot_at=tick.snapshot_at,
+            mid_price=tick.mid_price,
+            best_bid=tick.best_bid,
+            best_ask=tick.best_ask,
+            spread=tick.spread,
+            bid_depth_top5=tick.bid_depth_top5,
+            ask_depth_top5=tick.ask_depth_top5,
+            last_trade_price=tick.last_trade_price,
+            market_id=cached.market_id if cached else None,
+            condition_id=cached.condition_id if cached else tick.condition_id or None,
+            market_title=cached.title if cached else None,
+            event_slug=cached.event_slug if cached else None,
+        )
+        await self._tick_stream.publish(event)
 
     def _record_mid_history(self, asset_id: AssetId, *, snapshot_at: int, mid: float) -> None:
         """Append ``(snapshot_at, mid)`` to the asset's history ring buffer."""
@@ -473,8 +509,10 @@ class MarketTickCollector:
     ) -> list[tuple[int, float]]:
         """Return ``(snapshot_at, mid_price)`` pairs within the trailing window.
 
-        FROZEN API: the velocity detector calls this. Reads from in-memory
-        state appended on each successful ``snapshot_once`` write.
+        Legacy helper kept for depth filters and ad-hoc queries; live
+        tick-driven detectors should subscribe to the
+        :class:`~pscanner.poly.tick_stream.TickStream` instead. Reads from
+        in-memory state appended on each successful ``snapshot_once`` write.
 
         Args:
             asset_id: CLOB token id.
@@ -496,8 +534,8 @@ class MarketTickCollector:
     ) -> list[MarketTick]:
         """Return ``MarketTick`` rows for ``asset_id`` within the trailing window.
 
-        FROZEN API: detectors call this to apply liquidity-aware filters that
-        need full tick fields (depth, spread) rather than just the mid pair.
+        Legacy helper kept for liquidity-aware filters that need full tick
+        fields (depth, spread) outside the live tick-stream path.
 
         Args:
             asset_id: CLOB token id.
@@ -516,9 +554,11 @@ class MarketTickCollector:
     def get_market_for_asset(self, asset_id: AssetId) -> CachedMarket | None:
         """Return the cached market for ``asset_id`` or ``None`` if unknown.
 
-        FROZEN API: detectors call this to enrich alerts with market metadata
-        without paying a fresh lookup. Populated during ``_refresh_subscriptions``
-        from the volume-floor market iteration.
+        Used internally to enrich each :class:`TickEvent` with market
+        metadata before publishing. Also exposed for ad-hoc lookups; live
+        tick-consuming detectors read the metadata directly off the
+        :class:`TickEvent` rather than calling this. Populated during
+        ``_refresh_subscriptions`` from the volume-floor market iteration.
 
         Args:
             asset_id: CLOB token id.

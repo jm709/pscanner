@@ -19,6 +19,7 @@ from pscanner.collectors.ticks import MarketTickCollector, _Orderbook
 from pscanner.config import TicksConfig
 from pscanner.poly.ids import AssetId, ConditionId, MarketId
 from pscanner.poly.models import Market, Position, WsBookMessage
+from pscanner.poly.tick_stream import BroadcastTickStream
 from pscanner.store.repo import CachedMarket, MarketTicksRepo
 
 _BASE_TS = 1_700_000_000
@@ -96,6 +97,7 @@ def _make_collector(
     ws: MagicMock | None = None,
     config: TicksConfig | None = None,
     market_cache: MagicMock | None = None,
+    tick_stream: BroadcastTickStream | None = None,
 ) -> tuple[MarketTickCollector, MarketTicksRepo, MagicMock, MagicMock, MagicMock, MagicMock]:
     """Wire up a collector with mocks plus a real ``MarketTicksRepo``."""
     repo = MarketTicksRepo(tmp_db)
@@ -122,6 +124,7 @@ def _make_collector(
         registry=reg,  # type: ignore[arg-type]
         ticks_repo=repo,
         market_cache=market_cache,  # type: ignore[arg-type]
+        tick_stream=tick_stream,
     )
     return collector, repo, reg, dc, gc, fake_ws
 
@@ -611,3 +614,64 @@ async def test_run_exits_cleanly_when_stop_event_set(
         timeout=2.0,
     )
     ws.close.assert_awaited()
+
+
+async def test_snapshot_publishes_event_to_stream(tmp_db: sqlite3.Connection) -> None:
+    """Each successful insert in ``snapshot_once`` fans out one ``TickEvent``."""
+    cached = _make_cached_market(market_id="m1", title="Foo", condition_id="0xCOND1")
+    market_cache = MagicMock()
+    market_cache.get = MagicMock(return_value=cached)
+    markets = [
+        _make_market(
+            market_id="m1",
+            condition_id="0xCOND1",
+            clob_token_ids=["A1"],
+            volume=100_000.0,
+        ),
+    ]
+    gamma = MagicMock()
+    gamma.iter_markets = lambda **_: _async_iter_markets(markets)
+    stream = BroadcastTickStream()
+    iterator = stream.subscribe()  # registers synchronously
+
+    collector, _, _, _, _, _ = _make_collector(
+        tmp_db=tmp_db,
+        gamma_client=gamma,
+        market_cache=market_cache,
+        tick_stream=stream,
+    )
+    await collector._refresh_subscriptions()
+    await collector._handle_message(
+        _book_msg(
+            asset_id="A1",
+            market="0xCOND1",
+            bids=[{"price": "0.40", "size": "100"}],
+            asks=[{"price": "0.42", "size": "50"}],
+        ),
+    )
+    inserted = await collector.snapshot_once()
+    event = await asyncio.wait_for(iterator.__anext__(), timeout=1.0)
+    await iterator.aclose()
+
+    assert inserted == 1
+    assert event.asset_id == "A1"
+    assert event.mid_price == pytest.approx(0.41)
+    assert event.market_title == "Foo"
+    assert event.condition_id == "0xCOND1"
+    assert event.market_id == "m1"
+
+
+async def test_snapshot_without_stream_does_not_publish(tmp_db: sqlite3.Connection) -> None:
+    """When no stream is wired, ``snapshot_once`` writes the row and returns cleanly."""
+    collector, repo, _, _, _, _ = _make_collector(tmp_db=tmp_db)
+    await collector._handle_message(
+        _book_msg(
+            asset_id="A1",
+            market="0xcond",
+            bids=[{"price": "0.40", "size": "100"}],
+            asks=[{"price": "0.42", "size": "50"}],
+        ),
+    )
+    inserted = await collector.snapshot_once()
+    assert inserted == 1
+    assert len(repo.recent_for_asset(AssetId("A1"))) == 1
