@@ -296,6 +296,20 @@ class PaperTradingConfig(_Section):
     resolver_scan_interval_seconds: float = 300.0
 
 
+class WorkerSinkConfig(_Section):
+    """Tunables for the per-detector :class:`WorkerSink`.
+
+    Offloads alert-emit work off tick-driven detectors' hot paths.
+
+    Set ``velocity_maxsize`` higher if ``worker_sink.stats`` reports
+    sustained nonzero ``blocking_emit_count`` — a sign the queue is
+    chronically full and the inner sink is the bottleneck.
+    """
+
+    velocity_maxsize: int = 4096
+    stats_interval_seconds: int = 60
+
+
 class Config(BaseModel):
     """Root pscanner config aggregating every section."""
 
@@ -316,6 +330,7 @@ class Config(BaseModel):
     cluster: ClusterConfig = Field(default_factory=ClusterConfig)
     move_attribution: MoveAttributionConfig = Field(default_factory=MoveAttributionConfig)
     paper_trading: PaperTradingConfig = Field(default_factory=PaperTradingConfig)
+    worker_sink: WorkerSinkConfig = Field(default_factory=WorkerSinkConfig)
 
     @classmethod
     def load(cls, path: Path | None = None) -> Config:

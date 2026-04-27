@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from pscanner.config import ClusterConfig, Config, MoveAttributionConfig, PaperTradingConfig
+from pscanner.config import (
+    ClusterConfig,
+    Config,
+    MoveAttributionConfig,
+    PaperTradingConfig,
+    WorkerSinkConfig,
+)
 
 
 def test_move_attribution_defaults() -> None:
@@ -45,3 +51,12 @@ def test_paper_trading_attached_to_root_config() -> None:
 def test_cluster_max_co_trade_group_size_default() -> None:
     cfg = ClusterConfig()
     assert cfg.max_co_trade_group_size == 100
+
+
+def test_worker_sink_config_defaults() -> None:
+    cfg = WorkerSinkConfig()
+    assert cfg.velocity_maxsize == 4096
+    assert cfg.stats_interval_seconds == 60
+
+    root = Config()
+    assert root.worker_sink == cfg
