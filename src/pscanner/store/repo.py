@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pscanner.alerts.models import Alert, DetectorName, Severity
 from pscanner.poly.ids import AssetId, ConditionId, EventId, EventSlug, MarketId
@@ -65,7 +65,9 @@ class CachedMarket:
 
     The on-disk row stores ``outcome_prices_json`` as a JSON-encoded list of
     floats; this dataclass surfaces it pre-parsed so detectors do not need to
-    re-decode the column on every read.
+    re-decode the column on every read. ``outcomes`` and ``asset_ids`` are
+    parallel lists: index ``i`` of ``outcomes`` is the human-readable outcome
+    name (e.g. ``"Yes"``) whose CLOB asset id sits at ``asset_ids[i]``.
     """
 
     market_id: MarketId
@@ -78,6 +80,8 @@ class CachedMarket:
     cached_at: int
     condition_id: ConditionId | None = None
     event_slug: EventSlug | None = None
+    outcomes: list[str] = field(default_factory=list)
+    asset_ids: list[AssetId] = field(default_factory=list)
 
 
 def _now_seconds() -> int:
@@ -381,21 +385,24 @@ class MarketCacheRepo:
         """Bind the repo to an already-initialised connection."""
         self._conn = conn
 
-    def upsert(self, market: Market) -> None:
-        """Insert or update a cache row from a freshly-fetched ``Market``.
+    def upsert(self, market: Market | CachedMarket) -> None:
+        """Insert or update a cache row from a ``Market`` or ``CachedMarket``.
+
+        Accepts either the gamma-API ``Market`` model (most production callers)
+        or a pre-built ``CachedMarket`` dataclass (tests + callers that have
+        already mapped to the cached shape). Both end up as the same row.
 
         Args:
-            market: Source-of-truth market model (gamma response).
+            market: Source-of-truth market model or its cached projection.
         """
-        now = _now_seconds()
-        prices_json = json.dumps(list(market.outcome_prices))
+        row = _market_to_cache_row(market)
         self._conn.execute(
             """
             INSERT INTO market_cache (
               market_id, event_id, title, liquidity_usd, volume_usd,
               outcome_prices_json, active, cached_at,
-              condition_id, event_slug
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              condition_id, event_slug, outcomes_json, asset_ids_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(market_id) DO UPDATE SET
               event_id = excluded.event_id,
               title = excluded.title,
@@ -405,20 +412,11 @@ class MarketCacheRepo:
               active = excluded.active,
               cached_at = excluded.cached_at,
               condition_id = excluded.condition_id,
-              event_slug = excluded.event_slug
+              event_slug = excluded.event_slug,
+              outcomes_json = excluded.outcomes_json,
+              asset_ids_json = excluded.asset_ids_json
             """,
-            (
-                market.id,
-                market.event_id,
-                market.question,
-                market.liquidity,
-                market.volume,
-                prices_json,
-                1 if market.active else 0,
-                now,
-                market.condition_id,
-                market.event_slug,
-            ),
+            row,
         )
         self._conn.commit()
 
@@ -428,7 +426,7 @@ class MarketCacheRepo:
             """
             SELECT market_id, event_id, title, liquidity_usd, volume_usd,
                    outcome_prices_json, active, cached_at,
-                   condition_id, event_slug
+                   condition_id, event_slug, outcomes_json, asset_ids_json
               FROM market_cache
              WHERE market_id = ?
             """,
@@ -454,7 +452,7 @@ class MarketCacheRepo:
             """
             SELECT market_id, event_id, title, liquidity_usd, volume_usd,
                    outcome_prices_json, active, cached_at,
-                   condition_id, event_slug
+                   condition_id, event_slug, outcomes_json, asset_ids_json
               FROM market_cache
              WHERE condition_id = ?
              LIMIT 1
@@ -471,13 +469,59 @@ class MarketCacheRepo:
             """
             SELECT market_id, event_id, title, liquidity_usd, volume_usd,
                    outcome_prices_json, active, cached_at,
-                   condition_id, event_slug
+                   condition_id, event_slug, outcomes_json, asset_ids_json
               FROM market_cache
              WHERE active = 1
              ORDER BY market_id ASC
             """,
         ).fetchall()
         return [_row_to_cached_market(row) for row in rows]
+
+    def outcome_to_asset(
+        self,
+        condition_id: ConditionId,
+        outcome_name: str,
+    ) -> AssetId | None:
+        """Resolve an outcome name to its CLOB ``AssetId``.
+
+        Matching is case-insensitive and tolerant of leading/trailing
+        whitespace. When the cached market has mismatched ``outcomes`` and
+        ``asset_ids`` lengths (an upstream data bug) the lookup gives up and
+        returns ``None`` rather than guessing.
+
+        Args:
+            condition_id: The market's on-chain condition identifier.
+            outcome_name: Human-readable outcome label (e.g. ``"Yes"``).
+
+        Returns:
+            The matching ``AssetId``, or ``None`` if the market is unknown,
+            the outcome is unknown, or the parallel lists disagree on length.
+        """
+        cached = self.get_by_condition_id(condition_id)
+        if cached is None:
+            return None
+        if len(cached.outcomes) != len(cached.asset_ids):
+            return None
+        target = outcome_name.strip().casefold()
+        for name, asset_id in zip(cached.outcomes, cached.asset_ids, strict=True):
+            if name.strip().casefold() == target:
+                return asset_id
+        return None
+
+
+def _decode_json_string_list(raw: str | None, column: str) -> list[str]:
+    """Decode a ``TEXT`` column expected to hold a JSON list of strings.
+
+    A null/missing/empty column value yields ``[]``. A non-list payload is a
+    schema violation and raises rather than silently dropping data.
+    """
+    if not raw:
+        return []
+    decoded = json.loads(raw)
+    if not isinstance(decoded, list):
+        msg = f"market_cache.{column} must decode to list, got {type(decoded).__name__}"
+        raise ValueError(msg)
+    return [str(item) for item in decoded]
 
 
 def _row_to_cached_market(row: sqlite3.Row) -> CachedMarket:
@@ -496,6 +540,10 @@ def _row_to_cached_market(row: sqlite3.Row) -> CachedMarket:
     raw_event_id = row["event_id"]
     raw_condition_id = row["condition_id"]
     raw_event_slug = row["event_slug"]
+    outcomes = _decode_json_string_list(row["outcomes_json"], "outcomes_json")
+    asset_ids = [
+        AssetId(item) for item in _decode_json_string_list(row["asset_ids_json"], "asset_ids_json")
+    ]
     return CachedMarket(
         market_id=MarketId(row["market_id"]),
         event_id=EventId(raw_event_id) if raw_event_id is not None else None,
@@ -507,6 +555,56 @@ def _row_to_cached_market(row: sqlite3.Row) -> CachedMarket:
         cached_at=row["cached_at"],
         condition_id=ConditionId(raw_condition_id) if raw_condition_id is not None else None,
         event_slug=EventSlug(raw_event_slug) if raw_event_slug is not None else None,
+        outcomes=outcomes,
+        asset_ids=asset_ids,
+    )
+
+
+def _market_to_cache_row(
+    market: Market | CachedMarket,
+) -> tuple[
+    str,
+    str | None,
+    str | None,
+    float | None,
+    float | None,
+    str,
+    int,
+    int,
+    str | None,
+    str | None,
+    str,
+    str,
+]:
+    """Project a ``Market`` or ``CachedMarket`` into a ``market_cache`` row tuple."""
+    if isinstance(market, CachedMarket):
+        return (
+            market.market_id,
+            market.event_id,
+            market.title,
+            market.liquidity_usd,
+            market.volume_usd,
+            json.dumps(list(market.outcome_prices)),
+            1 if market.active else 0,
+            market.cached_at,
+            market.condition_id,
+            market.event_slug,
+            json.dumps(list(market.outcomes)),
+            json.dumps(list(market.asset_ids)),
+        )
+    return (
+        market.id,
+        market.event_id,
+        market.question,
+        market.liquidity,
+        market.volume,
+        json.dumps(list(market.outcome_prices)),
+        1 if market.active else 0,
+        _now_seconds(),
+        market.condition_id,
+        market.event_slug,
+        json.dumps(list(market.outcomes)),
+        json.dumps(list(market.clob_token_ids)),
     )
 
 

@@ -244,6 +244,8 @@ _MIGRATIONS: tuple[str, ...] = (
     # event slugs, never numeric ids. Rename it so the column type matches its
     # contents (and the typed ``EventTagCacheRepo`` API).
     "ALTER TABLE event_tag_cache RENAME COLUMN event_id TO event_slug",
+    "ALTER TABLE market_cache ADD COLUMN outcomes_json TEXT",
+    "ALTER TABLE market_cache ADD COLUMN asset_ids_json TEXT",
 )
 
 _PRAGMAS: tuple[str, ...] = (

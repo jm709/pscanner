@@ -342,6 +342,10 @@ def test_market_cache_upsert_round_trip(
     assert all(isinstance(p, float) for p in cached.outcome_prices)
     assert cached.active is True
     assert cached.cached_at >= int(time.time()) - 5
+    assert cached.outcomes == market.outcomes
+    assert cached.outcomes  # non-empty for the sample fixture
+    assert cached.asset_ids == list(market.clob_token_ids)
+    assert len(cached.asset_ids) == len(cached.outcomes)
 
 
 def test_market_cache_upsert_updates_in_place(
