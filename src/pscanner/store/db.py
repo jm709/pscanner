@@ -251,6 +251,9 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
       FOREIGN KEY (parent_trade_id) REFERENCES paper_trades(trade_id)
     )
     """,
+    # COALESCE: SQLite treats NULL as distinct in UNIQUE indexes, so without
+    # it duplicate (key, NULL) rows would not collide. Twin-trade rule_variant
+    # values like 'follow'/'fade' stay distinct under the same key.
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_trades_alert_key "
     "ON paper_trades(triggering_alert_key, COALESCE(rule_variant, '')) "
     "WHERE trade_kind = 'entry' AND triggering_alert_key IS NOT NULL",
@@ -275,6 +278,9 @@ _MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE paper_trades ADD COLUMN triggering_alert_detector TEXT",
     "ALTER TABLE paper_trades ADD COLUMN rule_variant TEXT",
     "DROP INDEX IF EXISTS idx_paper_trades_alert_key",
+    # COALESCE: SQLite treats NULL as distinct in UNIQUE indexes, so without
+    # it duplicate (key, NULL) rows would not collide. Twin-trade rule_variant
+    # values like 'follow'/'fade' stay distinct under the same key.
     (
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_trades_alert_key "
         "ON paper_trades(triggering_alert_key, COALESCE(rule_variant, '')) "

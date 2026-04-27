@@ -2387,9 +2387,8 @@ class PaperTradesRepo:
             closed_positions=int(closed_n["n"]),
         )
 
-    def summary_by_source(self, *, starting_bankroll: float) -> list[SourceSummary]:
+    def summary_by_source(self) -> list[SourceSummary]:
         """Per-source aggregate of open count, resolved count, realized PnL, win rate."""
-        del starting_bankroll  # reserved for future allocation analysis
         rows = self._conn.execute(
             """
             SELECT

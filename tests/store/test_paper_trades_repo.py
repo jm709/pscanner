@@ -372,7 +372,7 @@ def test_summary_by_source_groups_correctly(tmp_db: sqlite3.Connection) -> None:
         ts=1700000200,
     )
 
-    rows = repo.summary_by_source(starting_bankroll=1000.0)
+    rows = repo.summary_by_source()
     by_key = {(r.detector, r.rule_variant): r for r in rows}
 
     assert by_key[("smart_money", None)].resolved_count == 1
