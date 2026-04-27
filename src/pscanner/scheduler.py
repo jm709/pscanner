@@ -348,6 +348,8 @@ class Scanner:
             )
         if self._config.paper_trading.enabled:
             paper_trades_repo = PaperTradesRepo(self._db)
+            # T8: fan out to all four evaluators (move_attribution, mispricing,
+            # velocity).
             detectors["paper_trader"] = PaperTrader(
                 config=self._config.paper_trading,
                 evaluators=[

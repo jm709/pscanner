@@ -119,10 +119,9 @@ class PaperTrader:
     async def evaluate(self, alert: Alert) -> None:
         """Run the evaluator pipeline for one alert.
 
-        Walks ``self._evaluators`` in order, returning after the first
-        evaluator whose ``accepts`` is ``True``. A raise inside that
-        evaluator's pipeline is logged and contained — it does not
-        propagate to the alert sink.
+        Walks ``self._evaluators`` in order and runs the first one whose
+        ``accepts(alert)`` returns True. Assumes evaluator accept-sets are
+        disjoint; if they overlap, list ordering is load-bearing.
         """
         for evaluator in self._evaluators:
             if not evaluator.accepts(alert):
@@ -140,6 +139,11 @@ class PaperTrader:
                     exc_info=True,
                 )
             return
+        _LOG.debug(
+            "paper_trader.no_evaluator",
+            detector=alert.detector,
+            alert_key=alert.alert_key,
+        )
 
     async def _run_pipeline(
         self,
@@ -150,6 +154,8 @@ class PaperTrader:
         parsed_list = evaluator.parse(alert)
         if not parsed_list:
             return
+        # bankroll feeds evaluator sizing (constant per run); nav is for the
+        # ledger row only and may be negative if losses outpace wins.
         bankroll = self._config.starting_bankroll_usd
         nav = self._paper_trades.compute_cost_basis_nav(
             starting_bankroll=bankroll,
