@@ -2179,6 +2179,8 @@ class OpenPaperPosition:
     cost_usd: float
     nav_after_usd: float
     ts: int
+    triggering_alert_detector: str | None = None
+    rule_variant: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2191,6 +2193,18 @@ class PaperSummary:
     realized_pnl: float
     open_positions: int
     closed_positions: int
+
+
+@dataclass(frozen=True, slots=True)
+class SourceSummary:
+    """Per-(detector, rule_variant) PnL aggregate for the paper status CLI."""
+
+    detector: str | None
+    rule_variant: str | None
+    open_count: int
+    resolved_count: int
+    realized_pnl: float
+    win_rate: float
 
 
 class PaperTradesRepo:
@@ -2209,6 +2223,8 @@ class PaperTradesRepo:
         self,
         *,
         triggering_alert_key: str | None,
+        triggering_alert_detector: str | None,
+        rule_variant: str | None,
         source_wallet: str | None,
         condition_id: ConditionId,
         asset_id: AssetId,
@@ -2221,17 +2237,20 @@ class PaperTradesRepo:
     ) -> int:
         """Insert an entry row and return its ``trade_id``.
 
-        A non-null ``triggering_alert_key`` is unique among entries — re-inserting
-        the same key raises ``sqlite3.IntegrityError`` so callers can dedupe by
-        alert without an extra SELECT.
+        A non-null ``triggering_alert_key`` is unique among entries on the
+        ``(triggering_alert_key, COALESCE(rule_variant, ''))`` index, so the
+        same alert key with two distinct ``rule_variant`` values (e.g. velocity
+        twin trades) coexists, but re-inserting the same ``(key, variant)``
+        pair raises ``sqlite3.IntegrityError`` so callers can dedupe without an
+        extra SELECT.
         """
         cur = self._conn.execute(
             """
             INSERT INTO paper_trades (
               trade_kind, triggering_alert_key, parent_trade_id, source_wallet,
               condition_id, asset_id, outcome, shares, fill_price, cost_usd,
-              nav_after_usd, ts
-            ) VALUES ('entry', ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              nav_after_usd, ts, triggering_alert_detector, rule_variant
+            ) VALUES ('entry', ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 triggering_alert_key,
@@ -2244,6 +2263,8 @@ class PaperTradesRepo:
                 cost_usd,
                 nav_after_usd,
                 ts,
+                triggering_alert_detector,
+                rule_variant,
             ),
         )
         self._conn.commit()
@@ -2292,7 +2313,8 @@ class PaperTradesRepo:
             """
             SELECT e.trade_id, e.triggering_alert_key, e.source_wallet,
                    e.condition_id, e.asset_id, e.outcome, e.shares,
-                   e.fill_price, e.cost_usd, e.nav_after_usd, e.ts
+                   e.fill_price, e.cost_usd, e.nav_after_usd, e.ts,
+                   e.triggering_alert_detector, e.rule_variant
               FROM paper_trades e
              WHERE e.trade_kind = 'entry'
                AND NOT EXISTS (
@@ -2315,6 +2337,8 @@ class PaperTradesRepo:
                 cost_usd=float(r["cost_usd"]),
                 nav_after_usd=float(r["nav_after_usd"]),
                 ts=int(r["ts"]),
+                triggering_alert_detector=r["triggering_alert_detector"],
+                rule_variant=r["rule_variant"],
             )
             for r in rows
         ]
@@ -2362,3 +2386,37 @@ class PaperTradesRepo:
             open_positions=int(open_n["n"]),
             closed_positions=int(closed_n["n"]),
         )
+
+    def summary_by_source(self, *, starting_bankroll: float) -> list[SourceSummary]:
+        """Per-source aggregate of open count, resolved count, realized PnL, win rate."""
+        del starting_bankroll  # reserved for future allocation analysis
+        rows = self._conn.execute(
+            """
+            SELECT
+              e.triggering_alert_detector AS detector,
+              e.rule_variant AS rule_variant,
+              SUM(CASE WHEN x.trade_id IS NULL THEN 1 ELSE 0 END) AS open_count,
+              SUM(CASE WHEN x.trade_id IS NOT NULL THEN 1 ELSE 0 END) AS resolved_count,
+              COALESCE(SUM(x.cost_usd - e.cost_usd), 0.0) AS realized_pnl,
+              AVG(CASE WHEN x.trade_id IS NOT NULL
+                       THEN CASE WHEN x.cost_usd > e.cost_usd THEN 1.0 ELSE 0.0 END
+                       ELSE NULL END) AS win_rate
+            FROM paper_trades e
+            LEFT JOIN paper_trades x
+              ON x.parent_trade_id = e.trade_id AND x.trade_kind = 'exit'
+            WHERE e.trade_kind = 'entry'
+            GROUP BY e.triggering_alert_detector, e.rule_variant
+            ORDER BY e.triggering_alert_detector, e.rule_variant
+            """,
+        ).fetchall()
+        return [
+            SourceSummary(
+                detector=r["detector"],
+                rule_variant=r["rule_variant"],
+                open_count=int(r["open_count"] or 0),
+                resolved_count=int(r["resolved_count"] or 0),
+                realized_pnl=float(r["realized_pnl"] or 0.0),
+                win_rate=float(r["win_rate"] or 0.0),
+            )
+            for r in rows
+        ]

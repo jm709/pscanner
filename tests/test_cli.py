@@ -405,6 +405,8 @@ def test_paper_status_renders_summary(
         repo = PaperTradesRepo(conn)
         p1 = repo.insert_entry(
             triggering_alert_key="smart:0xa:0xc:yes:1",
+            triggering_alert_detector="smart_money",
+            rule_variant=None,
             source_wallet="0xa",
             condition_id=ConditionId("0xc1"),
             asset_id=AssetId("a-y"),
@@ -417,6 +419,8 @@ def test_paper_status_renders_summary(
         )
         repo.insert_entry(
             triggering_alert_key="smart:0xb:0xc:no:2",
+            triggering_alert_detector="smart_money",
+            rule_variant=None,
             source_wallet="0xb",
             condition_id=ConditionId("0xc2"),
             asset_id=AssetId("a-n"),

@@ -200,6 +200,8 @@ class PaperTrader:
         try:
             self._paper_trades.insert_entry(
                 triggering_alert_key=alert.alert_key,
+                triggering_alert_detector="smart_money",
+                rule_variant=None,
                 source_wallet=wallet,
                 condition_id=cond,
                 asset_id=asset_id,

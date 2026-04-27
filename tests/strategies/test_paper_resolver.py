@@ -64,6 +64,8 @@ def _open_position(
 ) -> int:
     return repo.insert_entry(
         triggering_alert_key=f"k-{condition_id}-{outcome}",
+        triggering_alert_detector="smart_money",
+        rule_variant=None,
         source_wallet="0xw1",
         condition_id=ConditionId(condition_id),
         asset_id=AssetId(asset_id),
