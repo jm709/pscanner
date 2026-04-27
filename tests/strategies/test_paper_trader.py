@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 
+import pytest
+
 from pscanner.alerts.models import Alert
 from pscanner.alerts.sink import AlertSink
 from pscanner.config import PaperTradingConfig
@@ -310,3 +312,37 @@ async def test_paper_trader_idempotent_on_duplicate_alert_key(
         await asyncio.sleep(0)
     await trader.aclose()
     assert len(paper.list_open_positions()) == 1
+
+
+async def test_paper_trader_logs_warning_on_unexpected_db_error(
+    tmp_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-IntegrityError DB exceptions get logged as paper_trader.insert_failed WARN."""
+    cfg = PaperTradingConfig(enabled=True)
+    sink = AlertSink(AlertsRepo(tmp_db))
+    cache = MarketCacheRepo(tmp_db)
+    wallets = TrackedWalletsRepo(tmp_db)
+    paper = PaperTradesRepo(tmp_db)
+    _track_wallet(wallets, weighted_edge=0.4)
+    _cache_market(cache)
+    _seed_tick(tmp_db, asset_id="asset-yes", best_ask=0.5)
+
+    def boom(**_kwargs: object) -> int:
+        raise sqlite3.OperationalError("simulated transient DB failure")
+
+    monkeypatch.setattr(paper, "insert_entry", boom)
+
+    trader = PaperTrader(
+        config=cfg,
+        market_cache=cache,
+        tracked_wallets=wallets,
+        paper_trades=paper,
+        conn=tmp_db,
+    )
+    sink.subscribe(trader.handle_alert_sync)
+    await sink.emit(_smart_money_alert())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    await trader.aclose()
+    assert paper.list_open_positions() == []

@@ -186,6 +186,12 @@ class PaperTrader:
             )
         except sqlite3.IntegrityError:
             _LOG.debug("paper_trader.duplicate_alert", alert_key=alert.alert_key)
+        except Exception:
+            _LOG.warning(
+                "paper_trader.insert_failed",
+                alert_key=alert.alert_key,
+                exc_info=True,
+            )
 
     def _wallet_passes_edge_filter(self, wallet: str) -> bool:
         """Skip wallets whose ``weighted_edge`` is None or ≤ ``min_weighted_edge``."""
