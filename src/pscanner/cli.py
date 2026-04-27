@@ -8,6 +8,7 @@ Sub-commands:
 * ``pscanner watch <address>`` — add a wallet to the data-collection watchlist.
 * ``pscanner unwatch <address>`` — deactivate a watchlist entry.
 * ``pscanner watchlist`` — print every watchlist entry as a table.
+* ``pscanner paper status`` — summarise the paper-trading bankroll and PnL.
 
 The CLI returns an integer exit code so it composes cleanly with shell
 pipelines and ``uv run pscanner ...``.
@@ -20,7 +21,9 @@ import asyncio
 import datetime
 import json
 import logging
+import sqlite3
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 
@@ -32,10 +35,19 @@ from pscanner.alerts.models import Alert
 from pscanner.config import Config
 from pscanner.scheduler import Scanner
 from pscanner.store.db import init_db
-from pscanner.store.repo import AlertsRepo, WatchlistEntry, WatchlistRepo
+from pscanner.store.repo import (
+    AlertsRepo,
+    PaperSummary,
+    PaperTradesRepo,
+    WatchlistEntry,
+    WatchlistRepo,
+)
 
 _PROG = "pscanner"
 _STATUS_LIMIT: Final[int] = 50
+_PAPER_TOP_N: Final[int] = 3
+_PAPER_COND_PREFIX: Final[int] = 16
+_PAPER_WALLET_PREFIX: Final[int] = 10
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -69,17 +81,30 @@ def _dispatch_command(
     config: Config,
 ) -> int:
     """Route ``args.command`` to the matching ``_cmd_*`` handler."""
-    if args.command == "run":
-        return _cmd_run(config, once=bool(args.once))
-    if args.command == "status":
-        return _cmd_status(config)
-    if args.command == "watch":
-        return _cmd_watch(config, address=args.address, reason=args.reason)
-    if args.command == "unwatch":
-        return _cmd_unwatch(config, address=args.address)
-    if args.command == "watchlist":
-        return _cmd_watchlist(config)
-    parser.error(f"unknown command: {args.command}")
+    handlers: dict[str, Callable[[], int]] = {
+        "run": lambda: _cmd_run(config, once=bool(args.once)),
+        "status": lambda: _cmd_status(config),
+        "watch": lambda: _cmd_watch(config, address=args.address, reason=args.reason),
+        "unwatch": lambda: _cmd_unwatch(config, address=args.address),
+        "watchlist": lambda: _cmd_watchlist(config),
+        "paper": lambda: _dispatch_paper(parser, args, config),
+    }
+    handler = handlers.get(args.command)
+    if handler is None:
+        parser.error(f"unknown command: {args.command}")
+        return 2  # unreachable; argparse exits
+    return handler()
+
+
+def _dispatch_paper(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    config: Config,
+) -> int:
+    """Route ``pscanner paper <subcmd>`` to the matching handler."""
+    if args.paper_cmd == "status":
+        return _cmd_paper_status(config)
+    parser.error(f"unknown paper subcommand: {args.paper_cmd}")
     return 2  # unreachable; argparse exits
 
 
@@ -119,6 +144,10 @@ def _build_parser() -> argparse.ArgumentParser:
     unwatch.add_argument("address", type=str, help="0x-prefixed proxy wallet address")
 
     sub.add_parser("watchlist", help="print every watchlist entry as a table")
+
+    paper = sub.add_parser("paper", help="paper-trading commands")
+    paper_sub = paper.add_subparsers(dest="paper_cmd", required=True)
+    paper_sub.add_parser("status", help="summarise paper-trading bankroll and PnL")
     return parser
 
 
@@ -332,3 +361,119 @@ def _print_watchlist_table(entries: list[WatchlistEntry]) -> None:
             "yes" if entry.active else "no",
         )
     console.print(table)
+
+
+def _cmd_paper_status(config: Config) -> int:
+    """Print paper-trading status (NAV, open/closed counts, realized PnL, top trades)."""
+    conn = init_db(Path(config.scanner.db_path))
+    try:
+        paper = PaperTradesRepo(conn)
+        summary = paper.summary_stats(
+            starting_bankroll=config.paper_trading.starting_bankroll_usd,
+        )
+        leaderboard = _paper_leaderboard_rows(conn)
+        best = _paper_extreme_rows(conn, order="DESC")
+        worst = _paper_extreme_rows(conn, order="ASC")
+    finally:
+        conn.close()
+    console = Console(highlight=False)
+    _print_paper_summary(console, summary)
+    _print_paper_leaderboard(console, leaderboard)
+    _print_paper_extremes(console, "top 3 best settled trades", best)
+    _print_paper_extremes(console, "top 3 worst settled trades", worst)
+    return 0
+
+
+def _paper_leaderboard_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Per-wallet leaderboard: realized PnL, settled count, and open count.
+
+    Includes every wallet that has at least one entry — wallets with only
+    open positions still appear (with ``settled = 0`` and ``realized = 0``).
+    """
+    return conn.execute(
+        """
+        SELECT e.source_wallet AS wallet,
+               COALESCE(SUM(x.cost_usd - e.cost_usd), 0.0) AS realized,
+               SUM(CASE WHEN x.trade_id IS NOT NULL THEN 1 ELSE 0 END) AS settled,
+               SUM(CASE WHEN x.trade_id IS NULL     THEN 1 ELSE 0 END) AS open_n
+          FROM paper_trades e
+          LEFT JOIN paper_trades x
+                 ON x.parent_trade_id = e.trade_id AND x.trade_kind = 'exit'
+         WHERE e.trade_kind = 'entry'
+         GROUP BY e.source_wallet
+         ORDER BY realized DESC, e.source_wallet ASC
+        """,
+    ).fetchall()
+
+
+def _paper_extreme_rows(
+    conn: sqlite3.Connection,
+    *,
+    order: str,
+) -> list[sqlite3.Row]:
+    """Top-N best (``DESC``) or worst (``ASC``) settled trades by realized PnL."""
+    if order not in {"ASC", "DESC"}:
+        msg = f"order must be ASC or DESC, got {order!r}"
+        raise ValueError(msg)
+    return conn.execute(
+        f"""
+        SELECT e.condition_id AS condition_id,
+               e.outcome AS outcome,
+               e.source_wallet AS wallet,
+               (x.cost_usd - e.cost_usd) AS pnl
+          FROM paper_trades x
+          JOIN paper_trades e ON e.trade_id = x.parent_trade_id
+         WHERE x.trade_kind = 'exit' AND e.trade_kind = 'entry'
+         ORDER BY pnl {order}
+         LIMIT ?
+        """,  # noqa: S608 — `order` is whitelist-validated above
+        (_PAPER_TOP_N,),
+    ).fetchall()
+
+
+def _print_paper_summary(console: Console, summary: PaperSummary) -> None:
+    """Render the bankroll / NAV / realized PnL / counts header block."""
+    console.print(f"starting bankroll: ${summary.starting_bankroll:,.2f}")
+    console.print(f"current NAV:       ${summary.current_nav:,.2f}")
+    console.print(
+        f"realized PnL:      ${summary.realized_pnl:+,.2f} ({summary.total_return_pct:+.2f}%)",
+    )
+    console.print(
+        f"open positions: {summary.open_positions}    closed positions: {summary.closed_positions}",
+    )
+
+
+def _print_paper_leaderboard(console: Console, rows: list[sqlite3.Row]) -> None:
+    """Render the per-wallet leaderboard, skipping when empty."""
+    if not rows:
+        return
+    console.print("")
+    console.print("per-wallet PnL (realized + open counts):")
+    for row in rows:
+        wallet = str(row["wallet"] or "")
+        realized = float(row["realized"] or 0.0)
+        settled = int(row["settled"] or 0)
+        open_n = int(row["open_n"] or 0)
+        console.print(
+            f"  {wallet:<46}  PnL=${realized:+,.2f}  settled={settled}  open={open_n}",
+        )
+
+
+def _print_paper_extremes(
+    console: Console,
+    title: str,
+    rows: list[sqlite3.Row],
+) -> None:
+    """Render a best/worst settled-trades section, skipping when empty."""
+    if not rows:
+        return
+    console.print("")
+    console.print(f"{title}:")
+    for row in rows:
+        cond = str(row["condition_id"] or "")[:_PAPER_COND_PREFIX]
+        wallet = str(row["wallet"] or "")[:_PAPER_WALLET_PREFIX]
+        outcome = str(row["outcome"] or "")
+        pnl = float(row["pnl"] or 0.0)
+        console.print(
+            f"  PnL=${pnl:+,.2f}  cond={cond}…  outcome={outcome}  wallet={wallet}…",
+        )

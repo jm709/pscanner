@@ -19,8 +19,9 @@ import pytest
 
 from pscanner.alerts.models import Alert
 from pscanner.cli import main
+from pscanner.poly.ids import AssetId, ConditionId
 from pscanner.store.db import init_db
-from pscanner.store.repo import AlertsRepo, WatchlistRepo
+from pscanner.store.repo import AlertsRepo, PaperTradesRepo, WatchlistRepo
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore::pytest.PytestUnraisableExceptionWarning",
@@ -387,3 +388,86 @@ def test_main_watchlist_empty(
     assert rc == 0
     out = capsys.readouterr().out
     assert "empty" in out
+
+
+def test_paper_status_renders_summary(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``pscanner paper status`` prints the bankroll/NAV summary, counts,
+    realized PnL, top-N best/worst, and per-wallet leaderboard.
+    """
+    cfg = tmp_path / "config.toml"
+    db = tmp_path / "pscanner.sqlite3"
+    _write_config(cfg, db)
+    conn = init_db(db)
+    try:
+        repo = PaperTradesRepo(conn)
+        p1 = repo.insert_entry(
+            triggering_alert_key="smart:0xa:0xc:yes:1",
+            source_wallet="0xa",
+            condition_id=ConditionId("0xc1"),
+            asset_id=AssetId("a-y"),
+            outcome="yes",
+            shares=20.0,
+            fill_price=0.5,
+            cost_usd=10.0,
+            nav_after_usd=990.0,
+            ts=1700000000,
+        )
+        repo.insert_entry(
+            triggering_alert_key="smart:0xb:0xc:no:2",
+            source_wallet="0xb",
+            condition_id=ConditionId("0xc2"),
+            asset_id=AssetId("a-n"),
+            outcome="no",
+            shares=20.0,
+            fill_price=0.5,
+            cost_usd=10.0,
+            nav_after_usd=980.0,
+            ts=1700000010,
+        )
+        repo.insert_exit(
+            parent_trade_id=p1,
+            condition_id=ConditionId("0xc1"),
+            asset_id=AssetId("a-y"),
+            outcome="yes",
+            shares=20.0,
+            fill_price=1.0,
+            cost_usd=20.0,
+            nav_after_usd=1000.0,
+            ts=1700000100,
+        )
+    finally:
+        conn.close()
+
+    rc = main(["--config", str(cfg), "paper", "status"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "starting bankroll" in out.lower()
+    # Current NAV after one $10 win
+    assert "1010" in out or "1,010" in out
+    # Counts visible somehow (open=1 closed=1)
+    assert "open" in out.lower()
+    assert "closed" in out.lower()
+    # Realized PnL line
+    assert "realized" in out.lower()
+    # Per-wallet leaderboard mentions both wallets
+    assert "0xa" in out
+    assert "0xb" in out
+
+
+def test_paper_status_empty_db(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg = tmp_path / "config.toml"
+    db = tmp_path / "empty.sqlite3"
+    _write_config(cfg, db)
+    init_db(db).close()
+    rc = main(["--config", str(cfg), "paper", "status"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    # Empty case still renders the headline numbers
+    assert "open" in out.lower()
+    assert "closed" in out.lower()
