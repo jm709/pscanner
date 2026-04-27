@@ -8,6 +8,7 @@ without touching real network/IO.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, cast
@@ -44,8 +45,18 @@ from pscanner.config import (
 from pscanner.detectors.convergence import ConvergenceDetector
 from pscanner.detectors.move_attribution import MoveAttributionDetector
 from pscanner.detectors.velocity import PriceVelocityDetector
+from pscanner.poly.ids import AssetId, ConditionId, MarketId
 from pscanner.poly.models import Event, LeaderboardEntry, Market, Position
 from pscanner.scheduler import Scanner, SchedulerClients
+from pscanner.store.db import init_db
+from pscanner.store.repo import (
+    AlertsRepo,
+    CachedMarket,
+    MarketCacheRepo,
+    PaperTradesRepo,
+    TrackedWalletsRepo,
+)
+from pscanner.strategies.paper_resolver import PaperResolver
 from pscanner.util.clock import FakeClock
 
 
@@ -875,3 +886,132 @@ async def test_scanner_move_attribution_smoke_emits_cluster_candidate(
         assert any(w.source == "cluster.candidate" for w in watchlist)
     finally:
         await scanner.aclose()
+
+
+def _seed_paper_smoke_db(db_file: Path) -> None:
+    """Pre-seed a tracked wallet, cached market, and one tick row."""
+    seed_conn = init_db(db_file)
+    try:
+        TrackedWalletsRepo(seed_conn).upsert(
+            address="0xwallet1",
+            closed_position_count=50,
+            closed_position_wins=42,
+            winrate=0.84,
+            leaderboard_pnl=1000.0,
+            mean_edge=0.4,
+            weighted_edge=0.4,
+            excess_pnl_usd=1000.0,
+            total_stake_usd=1000.0,
+        )
+        MarketCacheRepo(seed_conn).upsert(
+            CachedMarket(
+                market_id=MarketId("mkt-1"),
+                event_id=None,
+                title="t",
+                liquidity_usd=1.0,
+                volume_usd=1.0,
+                outcome_prices=[0.6, 0.4],
+                outcomes=["Yes", "No"],
+                asset_ids=[AssetId("asset-yes"), AssetId("asset-no")],
+                active=True,
+                cached_at=1700000000,
+                condition_id=ConditionId("0xcond-1"),
+                event_slug=None,
+            ),
+        )
+        seed_conn.execute(
+            """
+            INSERT INTO market_ticks (asset_id, condition_id, snapshot_at,
+              mid_price, best_bid, best_ask, spread, bid_depth_top5,
+              ask_depth_top5, last_trade_price)
+            VALUES ('asset-yes', '0xcond-1', 1700000000, NULL, NULL, 0.5,
+              NULL, NULL, NULL, NULL)
+            """,
+        )
+        seed_conn.commit()
+    finally:
+        seed_conn.close()
+
+
+def _verify_entry_then_resolve(db_file: Path) -> None:
+    """Assert the expected entry row exists, then mark the market resolved."""
+    verify_conn = sqlite3.connect(db_file)
+    verify_conn.row_factory = sqlite3.Row
+    try:
+        rows = verify_conn.execute(
+            "SELECT * FROM paper_trades WHERE trade_kind='entry'",
+        ).fetchall()
+        assert len(rows) == 1
+        entry = rows[0]
+        assert entry["source_wallet"] == "0xwallet1"
+        assert entry["outcome"] == "Yes"
+        assert entry["fill_price"] == 0.5
+        assert entry["cost_usd"] == 10.0  # 1000 x 1%
+        verify_conn.execute(
+            "UPDATE market_cache SET active = 0, "
+            "outcome_prices_json = '[1.0, 0.0]' WHERE condition_id = '0xcond-1'",
+        )
+        verify_conn.commit()
+    finally:
+        verify_conn.close()
+
+
+@pytest.mark.asyncio
+async def test_scanner_wires_paper_trader_to_alert_sink_when_enabled(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: smart_money alert through the live AlertSink reaches
+    PaperTrader, which inserts an entry in paper_trades. Then a manual
+    flip of market_cache.active=False with a [1,0] outcome split + a
+    resolver scan books the exit and updates NAV."""
+    db_file = tmp_path / "pscanner.sqlite3"
+    base_cfg = _make_config()
+    cfg = base_cfg.model_copy(
+        update={
+            "paper_trading": base_cfg.paper_trading.model_copy(update={"enabled": True}),
+        },
+    )
+    _seed_paper_smoke_db(db_file)
+
+    scanner = Scanner(config=cfg, db_path=db_file, clients=_make_clients())
+    try:
+        await scanner.sink.emit(
+            Alert(
+                detector="smart_money",
+                alert_key="smart:0xwallet1:0xcond-1:Yes:smoke",
+                severity="med",
+                title="t",
+                body={
+                    "wallet": "0xwallet1",
+                    "condition_id": "0xcond-1",
+                    "side": "Yes",
+                    "delta_usd": 100.0,
+                },
+                created_at=1700000000,
+            ),
+        )
+        for _ in range(10):
+            await asyncio.sleep(0)
+        await scanner._detectors["paper_trader"].aclose()
+    finally:
+        await scanner.aclose()
+
+    _verify_entry_then_resolve(db_file)
+
+    # Run the resolver path manually (the scheduler wires it but we don't
+    # run the loop here).
+    resolver_conn = init_db(db_file)
+    try:
+        resolver = PaperResolver(
+            config=cfg.paper_trading,
+            market_cache=MarketCacheRepo(resolver_conn),
+            paper_trades=PaperTradesRepo(resolver_conn),
+        )
+        await resolver._scan(AlertSink(AlertsRepo(resolver_conn)))
+        assert PaperTradesRepo(resolver_conn).list_open_positions() == []
+        nav = PaperTradesRepo(resolver_conn).compute_cost_basis_nav(
+            starting_bankroll=cfg.paper_trading.starting_bankroll_usd,
+        )
+        assert nav == 1010.0  # 1000 + (20 shares x $1.0 - $10 cost)
+    finally:
+        resolver_conn.close()

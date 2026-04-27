@@ -62,6 +62,7 @@ from pscanner.store.repo import (
     MarketCacheRepo,
     MarketSnapshotsRepo,
     MarketTicksRepo,
+    PaperTradesRepo,
     PositionSnapshotsRepo,
     TrackedWalletCategoriesRepo,
     TrackedWalletsRepo,
@@ -73,6 +74,8 @@ from pscanner.store.repo import (
     WalletTradesRepo,
     WatchlistRepo,
 )
+from pscanner.strategies.paper_resolver import PaperResolver
+from pscanner.strategies.paper_trader import PaperTrader
 from pscanner.util.clock import Clock, RealClock
 
 _LOG = structlog.get_logger(__name__)
@@ -181,14 +184,20 @@ class Scanner:
         """Register every alert-driven detector as a subscriber on the sink.
 
         Mirrors :meth:`_wire_trade_callbacks` but for detectors that listen
-        to upstream alerts rather than per-trade callbacks. The detector's
-        ``_sink`` must be populated before its run-loop starts so the
-        synchronous ``handle_alert_sync`` callback can spawn ``evaluate``
-        tasks correctly during the very first ``AlertSink.emit`` call.
+        to upstream alerts rather than per-trade callbacks. Detectors that
+        re-emit downstream alerts (e.g. :class:`MoveAttributionDetector`)
+        also need their ``_sink`` populated before the run-loop starts so
+        the synchronous ``handle_alert_sync`` callback can spawn
+        ``evaluate`` tasks correctly during the very first
+        ``AlertSink.emit`` call. :class:`PaperTrader` only consumes
+        alerts — it never emits — so it just needs the subscription.
         """
         for detector in self._detectors.values():
             if isinstance(detector, MoveAttributionDetector):
                 detector._sink = self._sink
+                self._sink.subscribe(detector.handle_alert_sync)
+                _LOG.info("scanner.alert_driven_detector_wired", detector=detector.name)
+            elif isinstance(detector, PaperTrader):
                 self._sink.subscribe(detector.handle_alert_sync)
                 _LOG.info("scanner.alert_driven_detector_wired", detector=detector.name)
 
@@ -331,6 +340,21 @@ class Scanner:
                 config=self._config.move_attribution,
                 data_client=self._clients.data_client,
                 watchlist_repo=self._watchlist_repo,
+            )
+        if self._config.paper_trading.enabled:
+            paper_trades_repo = PaperTradesRepo(self._db)
+            detectors["paper_trader"] = PaperTrader(
+                config=self._config.paper_trading,
+                market_cache=self._market_cache_repo,
+                tracked_wallets=self._tracked_repo,
+                paper_trades=paper_trades_repo,
+                market_ticks=self._ticks_repo,
+            )
+            detectors["paper_resolver"] = PaperResolver(
+                config=self._config.paper_trading,
+                market_cache=self._market_cache_repo,
+                paper_trades=paper_trades_repo,
+                clock=self._clock,
             )
         self._maybe_attach_velocity_detector(detectors)
         return detectors

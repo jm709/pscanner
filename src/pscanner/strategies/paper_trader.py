@@ -17,6 +17,7 @@ from typing import TypeIs
 import structlog
 
 from pscanner.alerts.models import Alert
+from pscanner.alerts.sink import AlertSink
 from pscanner.config import PaperTradingConfig
 from pscanner.poly.ids import AssetId, ConditionId
 from pscanner.store.repo import (
@@ -88,6 +89,18 @@ class PaperTrader:
         self._paper_trades = paper_trades
         self._market_ticks = market_ticks
         self._pending_tasks: set[asyncio.Task[None]] = set()
+
+    async def run(self, sink: AlertSink) -> None:
+        """Park forever — this subscriber is alert-driven, not periodic.
+
+        The :class:`Scanner` supervision loop calls ``run`` on every
+        registered detector. ``PaperTrader`` has no internal loop of its
+        own; entries are spawned from :meth:`handle_alert_sync` in
+        response to ``AlertSink`` callbacks. Returning would trigger the
+        supervisor's restart logic, so we wait on a sentinel forever.
+        """
+        del sink  # contract: detectors take a sink; we don't emit
+        await asyncio.Event().wait()
 
     def handle_alert_sync(self, alert: Alert) -> None:
         """:meth:`AlertSink.subscribe` callback. Spawns evaluate as a tracked task."""
