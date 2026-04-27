@@ -223,6 +223,8 @@ async def test_paper_trader_inserts_entry_on_smart_money_alert(
     assert p.fill_price == 0.5
     assert p.cost_usd == 10.0
     assert p.shares == 20.0
+    # NAV is cost-basis (starting_bankroll + realized_pnl); entries don't move it.
+    assert p.nav_after_usd == cfg.starting_bankroll_usd
 
 
 async def test_paper_trader_skips_non_smart_money(tmp_db: sqlite3.Connection) -> None:

@@ -207,7 +207,7 @@ class PaperTrader:
                 shares=shares,
                 fill_price=fill_price,
                 cost_usd=cost_usd,
-                nav_after_usd=nav - cost_usd,
+                nav_after_usd=nav,
                 ts=int(time.time()),
             )
         except sqlite3.IntegrityError:
