@@ -1885,6 +1885,24 @@ class MarketTicksRepo:
         self._conn.commit()
         return cur.rowcount == 1
 
+    def latest_for_asset(self, asset_id: AssetId) -> MarketTick | None:
+        """Return the most recent ``market_ticks`` row for an asset, or ``None``."""
+        row = self._conn.execute(
+            """
+            SELECT asset_id, condition_id, snapshot_at, mid_price, best_bid,
+                   best_ask, spread, bid_depth_top5, ask_depth_top5,
+                   last_trade_price
+              FROM market_ticks
+             WHERE asset_id = ?
+             ORDER BY snapshot_at DESC
+             LIMIT 1
+            """,
+            (asset_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _row_to_market_tick(row)
+
     def recent_for_asset(self, asset_id: AssetId, *, limit: int = 200) -> list[MarketTick]:
         """Return the asset's most recent ticks, newest first.
 

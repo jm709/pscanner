@@ -15,6 +15,7 @@ from pscanner.store.repo import (
     AlertsRepo,
     CachedMarket,
     MarketCacheRepo,
+    MarketTicksRepo,
     PaperTradesRepo,
     TrackedWalletsRepo,
 )
@@ -138,7 +139,7 @@ def _build_trader(
         market_cache=cache,
         tracked_wallets=wallets,
         paper_trades=paper,
-        conn=tmp_db,
+        market_ticks=MarketTicksRepo(tmp_db),
     )
     sink.subscribe(trader.handle_alert_sync)
     return sink, trader, cache, wallets, paper
@@ -338,7 +339,7 @@ async def test_paper_trader_logs_warning_on_unexpected_db_error(
         market_cache=cache,
         tracked_wallets=wallets,
         paper_trades=paper,
-        conn=tmp_db,
+        market_ticks=MarketTicksRepo(tmp_db),
     )
     sink.subscribe(trader.handle_alert_sync)
     await sink.emit(_smart_money_alert())

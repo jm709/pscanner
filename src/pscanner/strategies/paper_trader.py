@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import time
+from typing import TypeIs
 
 import structlog
 
@@ -20,6 +21,7 @@ from pscanner.config import PaperTradingConfig
 from pscanner.poly.ids import AssetId, ConditionId
 from pscanner.store.repo import (
     MarketCacheRepo,
+    MarketTicksRepo,
     PaperTradesRepo,
     TrackedWalletsRepo,
 )
@@ -50,7 +52,7 @@ def _size_trade(
     return (cost, shares)
 
 
-def _is_valid_price(value: object) -> bool:
+def _is_valid_price(value: object) -> TypeIs[int | float]:
     """Return ``True`` when ``value`` is a numeric fill price in ``(0, 1)``."""
     if not isinstance(value, int | float):
         return False
@@ -69,7 +71,7 @@ class PaperTrader:
         market_cache: MarketCacheRepo,
         tracked_wallets: TrackedWalletsRepo,
         paper_trades: PaperTradesRepo,
-        conn: sqlite3.Connection,
+        market_ticks: MarketTicksRepo,
     ) -> None:
         """Bind dependencies. Subscribers must call :meth:`subscribe` separately.
 
@@ -78,13 +80,13 @@ class PaperTrader:
             market_cache: Read-side cache mapping condition+outcome to asset_id.
             tracked_wallets: Lookup for the source wallet's edge metadata.
             paper_trades: Repo that owns the entry/exit ledger.
-            conn: SQLite connection (for the ``market_ticks`` price lookup).
+            market_ticks: Tick history repo for the entry-price lookup.
         """
         self._config = config
         self._market_cache = market_cache
         self._tracked_wallets = tracked_wallets
         self._paper_trades = paper_trades
-        self._conn = conn
+        self._market_ticks = market_ticks
         self._pending_tasks: set[asyncio.Task[None]] = set()
 
     def handle_alert_sync(self, alert: Alert) -> None:
@@ -231,29 +233,19 @@ class PaperTrader:
 
     def _lookup_fill_price(self, asset_id: AssetId) -> float | None:
         """Read the latest ``best_ask`` (or ``last_trade_price`` fallback)."""
-        row = self._conn.execute(
-            """
-            SELECT best_ask, last_trade_price FROM market_ticks
-             WHERE asset_id = ?
-             ORDER BY snapshot_at DESC
-             LIMIT 1
-            """,
-            (asset_id,),
-        ).fetchone()
-        if row is None:
+        tick = self._market_ticks.latest_for_asset(asset_id)
+        if tick is None:
             _LOG.warning("paper_trade.no_price", asset_id=asset_id)
             return None
-        best_ask = row["best_ask"]
-        last_trade = row["last_trade_price"]
-        if _is_valid_price(best_ask):
-            return float(best_ask)
-        if _is_valid_price(last_trade):
-            return float(last_trade)
+        if _is_valid_price(tick.best_ask):
+            return float(tick.best_ask)
+        if _is_valid_price(tick.last_trade_price):
+            return float(tick.last_trade_price)
         _LOG.warning(
             "paper_trade.no_price",
             asset_id=asset_id,
-            best_ask=best_ask,
-            last_trade=last_trade,
+            best_ask=tick.best_ask,
+            last_trade=tick.last_trade_price,
         )
         return None
 
