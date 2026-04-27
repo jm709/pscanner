@@ -59,6 +59,11 @@ _FP_HIGH_PRICE = 0.56
 _FP_SUB_100 = 0.52
 _FP_BAND = 0.47
 
+# Polymarket caps /trades and /activity pagination at this offset; beyond it
+# the server returns 400. Treated as end-of-data (see issue #30).
+_POLYMARKET_OFFSET_CAP = 3500
+_HTTP_BAD_REQUEST = 400
+
 # Size buckets for the fingerprint computation (USD).
 _HIGH_PRICE_THRESHOLD = 0.95
 _DUST_USD = 100.0
@@ -148,6 +153,10 @@ async def _fetch_market_trades(
             f"{_DATA_API}/trades",
             params={"market": market.condition_id, "limit": _PAGE_SIZE, "offset": offset},
         )
+        # Polymarket caps /trades pagination at offset ~3500 with a 400.
+        # Treat that as end-of-data, not a hard error (see issue #30).
+        if r.status_code == _HTTP_BAD_REQUEST and offset >= _POLYMARKET_OFFSET_CAP:
+            break
         r.raise_for_status()
         page = r.json()
         if not isinstance(page, list) or not page:
