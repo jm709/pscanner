@@ -11,6 +11,7 @@ from pscanner.strategies.evaluators.protocol import (
     SignalEvaluator,
 )
 from pscanner.strategies.evaluators.smart_money import SmartMoneyEvaluator
+from pscanner.strategies.evaluators.velocity import VelocityEvaluator
 
 __all__ = [
     "MispricingEvaluator",
@@ -18,4 +19,5 @@ __all__ = [
     "ParsedSignal",
     "SignalEvaluator",
     "SmartMoneyEvaluator",
+    "VelocityEvaluator",
 ]
