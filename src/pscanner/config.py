@@ -307,7 +307,7 @@ class WorkerSinkConfig(_Section):
     """
 
     velocity_maxsize: int = 4096
-    stats_interval_seconds: int = 60
+    stats_interval_seconds: float = 60.0
 
 
 class Config(BaseModel):
