@@ -180,7 +180,14 @@ class ClusterDetector:
             return 0
         seen_cluster_ids: set[str] = set()
         new_count = 0
+        # Path 1: existing creation-window partition.
         for group in self._iter_candidate_groups(recent):
+            if await self._consider_group(group, seen_cluster_ids, sink):
+                new_count += 1
+        # Path 2: co-occurrence partition (organic clusters via shared
+        # obscure-market overlap). _consider_group's _cluster_id_for SHA256
+        # dedupe ensures clusters surfaced by both paths emit exactly once.
+        for group in self._iter_co_trade_groups(recent):
             if await self._consider_group(group, seen_cluster_ids, sink):
                 new_count += 1
         return new_count

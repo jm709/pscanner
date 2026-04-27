@@ -119,6 +119,31 @@ def _wallet_trades_for_markets(wallet: str, condition_ids: list[str]) -> list[Wa
     ]
 
 
+def _trades_with_synchronized_buy(
+    wallets: list[str],
+    condition_ids: list[str],
+    *,
+    bucket_ts: int,
+) -> dict[str, list[WalletTrade]]:
+    """For each (wallet, condition_id) pair, emit one BUY trade with the
+    same asset_id and timestamp inside ``direction_window_seconds`` so
+    Signal D can fire."""
+    out: dict[str, list[WalletTrade]] = {}
+    for w in wallets:
+        out[w] = [
+            _trade(
+                wallet=w,
+                condition_id=cid,
+                asset_id=f"{cid}-asset",
+                timestamp=bucket_ts,
+                side="BUY",
+                size=100.0,
+            )
+            for cid in condition_ids
+        ]
+    return out
+
+
 class StubFirstSeenRepo:
     """In-memory ``WalletFirstSeenRepo.list_recent`` stub."""
 
@@ -903,3 +928,206 @@ def test_co_trade_groups_size_cap_truncates() -> None:
     assert len(groups[0]) == 100
     expected_kept = sorted(addrs)[:100]
     assert sorted(w.address for w in groups[0]) == expected_kept
+
+
+# ---------------------------------------------------------------------------
+# discovery_scan — end-to-end tests covering both candidate-group paths
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_discovery_scan_organic_cluster_emits_via_co_trade_path() -> None:
+    """5 wallets created weeks apart, share 4 obscure markets, low size CV,
+    synchronized BUY direction → score 5 from B/C/D, fires cluster.discovered."""
+    markets = ["0xobs1", "0xobs2", "0xobs3", "0xobs4"]
+    wallets = ["0xa", "0xb", "0xc", "0xd", "0xe"]
+    bucket_ts = _NOW + 10_000
+    per_wallet = _trades_with_synchronized_buy(wallets, markets, bucket_ts=bucket_ts)
+    trades = StubTradesRepo(
+        per_wallet=per_wallet,
+        distinct_for_condition={cid: set(wallets) for cid in markets},
+    )
+    market_cache = StubMarketCache({m: _obscure_market(m) for m in markets})
+    # Spread wallets' first_activity_at across 60 days — beyond 24h window.
+    recent = [_first_seen(w, first_at=_NOW + i * 86_400 * 12) for i, w in enumerate(wallets)]
+    sink = CapturingSink()
+    detector = _make_detector(
+        first_seen=StubFirstSeenRepo(recent),
+        trades=trades,
+        market_cache=market_cache,
+    )
+
+    new_count = await detector.discovery_scan(sink)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+
+    assert new_count == 1
+    assert len(sink.alerts) == 1
+    body = sink.alerts[0].body
+    assert body["member_count"] == 5
+    # Signal A (cohesion) returns 0 for this group; B+C+D = 5 hits threshold.
+    assert body["detection_score"] == 5
+
+
+@pytest.mark.asyncio
+async def test_discovery_scan_cavill_shape_still_emits_via_creation_path() -> None:
+    """Regression: 9 wallets within 24h, share 3 obscure markets, low CV,
+    synchronized BUY → existing path still produces score=7 alert."""
+    markets = ["0xobs1", "0xobs2", "0xobs3"]
+    wallets = [f"0x{i:02x}" for i in range(9)]
+    bucket_ts = _NOW + 10_000
+    per_wallet = _trades_with_synchronized_buy(wallets, markets, bucket_ts=bucket_ts)
+    trades = StubTradesRepo(
+        per_wallet=per_wallet,
+        distinct_for_condition={cid: set(wallets) for cid in markets},
+    )
+    market_cache = StubMarketCache({m: _obscure_market(m) for m in markets})
+    # All within 24h.
+    recent = [_first_seen(w, first_at=_NOW + i * 60) for i, w in enumerate(wallets)]
+    sink = CapturingSink()
+    detector = _make_detector(
+        first_seen=StubFirstSeenRepo(recent),
+        trades=trades,
+        market_cache=market_cache,
+    )
+
+    new_count = await detector.discovery_scan(sink)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+
+    assert new_count == 1
+    assert sink.alerts[0].body["detection_score"] == 7
+    assert sink.alerts[0].body["member_count"] == 9
+
+
+@pytest.mark.asyncio
+async def test_discovery_scan_dedupes_when_both_paths_find_same_cluster() -> None:
+    """Cluster that satisfies BOTH path 1 and path 2 emits exactly once."""
+    markets = ["0xobs1", "0xobs2", "0xobs3", "0xobs4"]
+    wallets = [f"0x{i:02x}" for i in range(9)]
+    bucket_ts = _NOW + 10_000
+    per_wallet = _trades_with_synchronized_buy(wallets, markets, bucket_ts=bucket_ts)
+    trades = StubTradesRepo(
+        per_wallet=per_wallet,
+        distinct_for_condition={cid: set(wallets) for cid in markets},
+    )
+    market_cache = StubMarketCache({m: _obscure_market(m) for m in markets})
+    recent = [_first_seen(w, first_at=_NOW + i * 60) for i, w in enumerate(wallets)]
+    clusters_repo = StubClustersRepo()
+    sink = CapturingSink()
+    detector = _make_detector(
+        first_seen=StubFirstSeenRepo(recent),
+        trades=trades,
+        market_cache=market_cache,
+        clusters=clusters_repo,
+    )
+
+    new_count = await detector.discovery_scan(sink)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+
+    assert new_count == 1
+    assert len(sink.alerts) == 1
+
+
+@pytest.mark.asyncio
+async def test_discovery_scan_organic_below_threshold_does_not_emit() -> None:
+    """5 wallets share obscure markets but no synchronized direction → score=3 < 5."""
+    markets = ["0xobs1", "0xobs2", "0xobs3"]
+    wallets = ["0xa", "0xb", "0xc", "0xd", "0xe"]
+    # Each wallet trades the same markets but at DIFFERENT timestamps,
+    # so Signal D cannot find a 600s bucket with ≥3 wallets.
+    per_wallet: dict[str, list[WalletTrade]] = {}
+    for i, w in enumerate(wallets):
+        per_wallet[w] = [
+            _trade(
+                wallet=w,
+                condition_id=cid,
+                asset_id=f"{cid}-asset",
+                timestamp=_NOW + i * 100_000,  # spread across hours
+                size=100.0,
+                side="BUY",
+            )
+            for cid in markets
+        ]
+    trades = StubTradesRepo(per_wallet=per_wallet)
+    market_cache = StubMarketCache({m: _obscure_market(m) for m in markets})
+    recent = [_first_seen(w, first_at=_NOW + i * 86_400 * 12) for i, w in enumerate(wallets)]
+    sink = CapturingSink()
+    detector = _make_detector(
+        first_seen=StubFirstSeenRepo(recent),
+        trades=trades,
+        market_cache=market_cache,
+    )
+
+    new_count = await detector.discovery_scan(sink)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+
+    assert new_count == 0
+    assert sink.alerts == []
+
+
+@pytest.mark.asyncio
+async def test_discovery_scan_high_volume_markets_dont_trigger_co_trade() -> None:
+    """8 wallets co-trade 5 high-volume markets → obscurity gate excludes,
+    no candidate group formed by the new path.
+
+    Confirms this work doesn't accidentally flag the volume-farming cluster.
+    """
+    markets = ["0xhi1", "0xhi2", "0xhi3", "0xhi4", "0xhi5"]
+    wallets = [f"0x{i:02x}" for i in range(8)]
+    bucket_ts = _NOW + 10_000
+    per_wallet = _trades_with_synchronized_buy(wallets, markets, bucket_ts=bucket_ts)
+    trades = StubTradesRepo(per_wallet=per_wallet)
+    market_cache = StubMarketCache({m: _high_volume_market(m) for m in markets})
+    recent = [_first_seen(w, first_at=_NOW + i * 86_400 * 5) for i, w in enumerate(wallets)]
+    sink = CapturingSink()
+    detector = _make_detector(
+        first_seen=StubFirstSeenRepo(recent),
+        trades=trades,
+        market_cache=market_cache,
+    )
+
+    new_count = await detector.discovery_scan(sink)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+
+    assert new_count == 0
+    assert sink.alerts == []
+
+
+@pytest.mark.asyncio
+async def test_discovery_scan_organic_with_null_first_activity() -> None:
+    """5 wallets connected via shared markets; one has NULL first_activity_at.
+
+    Path 1 (creation-window) skips the NULL wallet and emits a 4-wallet alert
+    (cohesion fires on the within-24h non-NULL timestamps). Path 2 (co-trade)
+    surfaces the full 5-wallet component — Signal A also scores +2 because
+    ``_compute_creation_cohesion_score`` filters NULL out and the remaining
+    4 ≥ ``min_cluster_size`` are within window. Both alerts hit threshold;
+    cluster ids differ (4 vs 5 wallets) so dedupe does not collapse them.
+    The point of this test is that the NULL wallet does not poison Path 2.
+    """
+    markets = ["0xobs1", "0xobs2", "0xobs3", "0xobs4"]
+    wallets = ["0xa", "0xb", "0xc", "0xd", "0xe"]
+    bucket_ts = _NOW + 10_000
+    per_wallet = _trades_with_synchronized_buy(wallets, markets, bucket_ts=bucket_ts)
+    trades = StubTradesRepo(
+        per_wallet=per_wallet,
+        distinct_for_condition={cid: set(wallets) for cid in markets},
+    )
+    market_cache = StubMarketCache({m: _obscure_market(m) for m in markets})
+    # 4 wallets within 24h (cohesion fires); 1 with NULL first_activity_at.
+    recent = [
+        _first_seen("0xa", first_at=_NOW),
+        _first_seen("0xb", first_at=_NOW + 100),
+        _first_seen("0xc", first_at=_NOW + 200),
+        _first_seen("0xd", first_at=_NOW + 300),
+        WalletFirstSeen(address="0xe", first_activity_at=None, total_trades=10, cached_at=_NOW),
+    ]
+    sink = CapturingSink()
+    detector = _make_detector(
+        first_seen=StubFirstSeenRepo(recent),
+        trades=trades,
+        market_cache=market_cache,
+    )
+
+    new_count = await detector.discovery_scan(sink)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+
+    member_counts = sorted(a.body["member_count"] for a in sink.alerts)
+    assert new_count == len(sink.alerts)
+    assert 5 in member_counts, "Path 2 must surface the full 5-wallet component"
+    five_alert = next(a for a in sink.alerts if a.body["member_count"] == 5)
+    # 4 non-NULL within 24h → cohesion +2; B+C+D = 5 → total 7.
+    assert five_alert.body["detection_score"] == 7
