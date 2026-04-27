@@ -13,12 +13,21 @@ from pathlib import Path
 from typing import Any, Literal, cast
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from pscanner.poly import data as data_module
 from pscanner.poly.data import DataClient
 from pscanner.poly.http import PolyHttpClient
 from pscanner.poly.models import ClosedPosition, LeaderboardEntry, Position
+
+
+def _http_400_error(*, message: str = "offset too large") -> httpx.HTTPStatusError:
+    """Build a synthetic 400 ``HTTPStatusError`` for side_effect injection."""
+    request = httpx.Request("GET", "https://data-api.polymarket.com/")
+    response = httpx.Response(400, json={"error": message}, request=request)
+    return httpx.HTTPStatusError(message, request=request, response=response)
+
 
 _FIXTURE_DIR = Path(__file__).parent.parent / "fixtures"
 
@@ -639,3 +648,82 @@ async def test_get_market_slug_by_condition_id_returns_none_when_first_item_not_
     data_http.get.return_value = ["malformed-string-instead-of-dict"]
 
     assert await client.get_market_slug_by_condition_id("0xabc") is None
+
+
+async def test_get_first_activity_timestamp_swallows_offset_cap_400(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    """A 400 at offset>=3500 must terminate pagination cleanly (Polymarket cap)."""
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    # Pages 0..6 (offsets 0, 500, ..., 3000) return full 500-row pages; page at
+    # offset=3500 raises the offset-cap 400 the API actually emits.
+    full_page = [{"timestamp": 1_700_000_000 + i} for i in range(500)]
+    data_http.get.side_effect = [*([full_page] * 7), _http_400_error()]
+
+    earliest = await client.get_first_activity_timestamp("0xa")
+
+    assert earliest == 1_700_000_000
+    assert data_http.get.await_count == 8
+    last_call_kwargs = data_http.get.await_args_list[-1].kwargs
+    assert last_call_kwargs["params"]["offset"] == 3500
+
+
+async def test_get_first_activity_timestamp_propagates_400_at_offset_zero(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    """A 400 at offset=0 should propagate (real validation error, not the cap)."""
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    data_http.get.side_effect = _http_400_error(message="bad user id")
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.get_first_activity_timestamp("0xbad")
+
+
+async def test_get_market_trades_swallows_offset_cap_400(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    """A 400 at offset>=3500 in /trades pagination must break cleanly."""
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    full_page = [
+        {
+            "proxyWallet": f"0x{i}",
+            "timestamp": 2_000_000_000,
+            "size": 1.0,
+            "price": 0.5,
+            "side": "BUY",
+            "outcome": "Yes",
+        }
+        for i in range(500)
+    ]
+    data_http.get.side_effect = [*([full_page] * 7), _http_400_error()]
+
+    out = await client.get_market_trades(
+        condition_id="0xabc",
+        since_ts=0,
+        until_ts=3_000_000_000,
+    )
+
+    # 7 successful pages * 500 rows = 3500 trades, then 400 at offset=3500.
+    assert len(out) == 7 * 500
+    assert data_http.get.await_count == 8
+    last_call_kwargs = data_http.get.await_args_list[-1].kwargs
+    assert last_call_kwargs["params"]["offset"] == 3500
+
+
+async def test_get_market_trades_propagates_400_at_offset_zero(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    """A 400 at offset=0 should propagate (not the offset cap)."""
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    data_http.get.side_effect = _http_400_error(message="bad market")
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.get_market_trades(
+            condition_id="0xbad",
+            since_ts=0,
+            until_ts=3_000_000_000,
+        )

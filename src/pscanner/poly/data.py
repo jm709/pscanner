@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Final, Literal
 
+import httpx
 import structlog
 
 from pscanner.poly.http import PolyHttpClient
@@ -25,6 +26,13 @@ _ACTIVITY_PAGE_SIZE: Final[int] = 500
 
 _TRADES_PAGE_SIZE: Final[int] = 500
 _TRADES_PAGE_CAP: Final[int] = 30  # 15k trades per condition_id maximum
+
+# Polymarket caps offset-based pagination on /activity and /trades at this
+# offset, returning HTTP 400 once the requested offset reaches it. We treat
+# such 400s as end-of-data; other 400s (e.g. malformed address at offset=0)
+# still propagate.
+_POLYMARKET_OFFSET_CAP: Final[int] = 3500
+_HTTP_BAD_REQUEST: Final[int] = 400
 
 _log = structlog.get_logger(__name__)
 
@@ -210,13 +218,7 @@ class DataClient:
         out: list[dict[str, Any]] = []
         offset = 0
         for _ in range(_TRADES_PAGE_CAP):
-            params: dict[str, Any] = {
-                "market": condition_id,
-                "limit": _TRADES_PAGE_SIZE,
-                "offset": offset,
-            }
-            payload = await self._data_http.get("/trades", params=params)
-            page = _ensure_list(payload, endpoint="/trades")
+            page = await self._fetch_market_trades_page(condition_id, offset=offset)
             if not page:
                 break
             page_max_ts = max(
@@ -224,8 +226,6 @@ class DataClient:
                 default=0,
             )
             for item in page:
-                if not isinstance(item, dict):
-                    continue
                 ts = item.get("timestamp")
                 if isinstance(ts, int) and since_ts <= ts <= until_ts:
                     out.append(item)
@@ -233,6 +233,37 @@ class DataClient:
                 break
             offset += _TRADES_PAGE_SIZE
         return out
+
+    async def _fetch_market_trades_page(
+        self,
+        condition_id: str,
+        *,
+        offset: int,
+    ) -> list[dict[str, Any]]:
+        """Fetch one ``_TRADES_PAGE_SIZE`` page of market trades at ``offset``.
+
+        Returns ``[]`` (which the caller treats as end-of-data) when Polymarket
+        returns 400 at ``offset >= _POLYMARKET_OFFSET_CAP`` — the API caps
+        offset-based pagination there. Other 400s propagate.
+        """
+        params: dict[str, Any] = {
+            "market": condition_id,
+            "limit": _TRADES_PAGE_SIZE,
+            "offset": offset,
+        }
+        try:
+            payload = await self._data_http.get("/trades", params=params)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == _HTTP_BAD_REQUEST and offset >= _POLYMARKET_OFFSET_CAP:
+                _log.info(
+                    "data_client.trades_offset_capped",
+                    condition_id=condition_id,
+                    offset=offset,
+                )
+                return []
+            raise
+        items = _ensure_list(payload, endpoint="/trades")
+        return [item for item in items if isinstance(item, dict)]
 
     async def get_market_slug_by_condition_id(self, condition_id: str) -> str | None:
         """Return a market's ``slug`` by querying its first trade.
@@ -294,13 +325,29 @@ class DataClient:
         *,
         offset: int,
     ) -> list[dict[str, Any]]:
-        """Fetch one ``_ACTIVITY_PAGE_SIZE`` page of activity at ``offset``."""
+        """Fetch one ``_ACTIVITY_PAGE_SIZE`` page of activity at ``offset``.
+
+        Returns ``[]`` (which callers treat as end-of-data) when Polymarket
+        returns 400 at ``offset >= _POLYMARKET_OFFSET_CAP`` — the API caps
+        offset-based pagination there. Other 400s propagate so genuine
+        validation errors at ``offset == 0`` are not silently swallowed.
+        """
         params: dict[str, Any] = {
             "user": address,
             "limit": _ACTIVITY_PAGE_SIZE,
             "offset": offset,
         }
-        payload = await self._data_http.get("/activity", params=params)
+        try:
+            payload = await self._data_http.get("/activity", params=params)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == _HTTP_BAD_REQUEST and offset >= _POLYMARKET_OFFSET_CAP:
+                _log.info(
+                    "data_client.activity_offset_capped",
+                    address=address,
+                    offset=offset,
+                )
+                return []
+            raise
         items = _ensure_list(payload, endpoint="/activity")
         return [item for item in items if isinstance(item, dict)]
 
