@@ -3,7 +3,7 @@
 Subscribes to :class:`AlertSink`. Filters to ``smart_money`` alerts whose
 source wallet has positive ``weighted_edge``. Resolves the alerted outcome
 to an ``asset_id`` via :class:`MarketCacheRepo` and a fill price via
-``market_ticks``. Sizes trades at ``cfg.position_fraction`` of cost-basis
+``market_ticks``. Sizes trades at ``cfg.evaluators.smart_money.position_fraction`` of cost-basis
 NAV. Inserts an ``entry`` row into ``paper_trades``.
 """
 
@@ -48,7 +48,7 @@ def _size_trade(
     """
     if not (_FILL_PRICE_LO < fill_price < _FILL_PRICE_HI):
         return None
-    cost = nav * cfg.position_fraction
+    cost = nav * cfg.evaluators.smart_money.position_fraction
     if cost < cfg.min_position_cost_usd:
         return None
     shares = cost / fill_price
@@ -228,7 +228,7 @@ class PaperTrader:
             _LOG.debug("paper_trader.no_edge", wallet=wallet)
             return False
         edge = tracked.weighted_edge
-        if edge is None or edge <= self._config.min_weighted_edge:
+        if edge is None or edge <= self._config.evaluators.smart_money.min_weighted_edge:
             _LOG.debug("paper_trader.below_edge", wallet=wallet, edge=edge)
             return False
         return True

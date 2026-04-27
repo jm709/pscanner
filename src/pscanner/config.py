@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -279,21 +279,94 @@ class MoveAttributionConfig(_Section):
     max_contributors_per_burst: int = 50
 
 
-class PaperTradingConfig(_Section):
-    """Thresholds + cadence for the smart-money copy-trade paper strategy.
+class SmartMoneyEvaluatorConfig(_Section):
+    """Smart-money copy-trade evaluator tunables.
 
-    Off by default. When enabled, the in-daemon ``PaperTrader`` subscribes
-    to ``AlertSink`` and mirrors ``smart_money`` alerts onto a virtual
-    bankroll. ``PaperResolver`` runs as a periodic detector that books PnL
-    when the underlying market resolves. State lives in ``paper_trades``.
+    Today's PaperTrader config — moved here so each source has its own
+    config block with the same shape (enabled, position_fraction, +
+    source-specific gates).
+    """
+
+    enabled: bool = True
+    position_fraction: float = 0.01
+    min_weighted_edge: float = 0.0
+
+
+class MoveAttributionEvaluatorConfig(_Section):
+    """Move-attribution evaluator tunables.
+
+    Trades the (outcome, side) pair surfaced by MoveAttributionDetector
+    when >= ``min_wallets`` distinct wallets converged on a market in
+    the burst window.
+    """
+
+    enabled: bool = True
+    position_fraction: float = 0.01
+    min_severity: Literal["low", "med", "high"] = "med"
+    min_wallets: int = 3
+
+
+class VelocityEvaluatorConfig(_Section):
+    """Velocity twin-trade evaluator tunables.
+
+    Each velocity alert spawns two ParsedSignals (follow + fade) at the
+    per-side ``position_fraction`` (default 0.25%, pair total 0.5%).
+    Constant size off ``starting_bankroll_usd``, not running NAV.
+    """
+
+    enabled: bool = True
+    position_fraction: float = 0.0025
+    min_severity: Literal["low", "med", "high"] = "high"
+    allow_consolidation: bool = False
+
+
+class MispricingEvaluatorConfig(_Section):
+    """Mispricing arbitrage evaluator tunables.
+
+    Trades the most-overpriced or most-underpriced YES leg of a mispriced
+    event, using the detector-emitted ``target_*`` body fields. The
+    edge gate is the gap between fair (proportional rebalance) and
+    current price.
+    """
+
+    enabled: bool = True
+    position_fraction: float = 0.01
+    min_edge_dollars: float = 0.05
+
+
+class EvaluatorsConfig(_Section):
+    """Container for the four per-source evaluator configs.
+
+    Disabling a source via its ``enabled`` flag prevents that Evaluator
+    from being constructed at scheduler boot — no detector code path
+    changes; the alert is simply not handled by anyone.
+    """
+
+    smart_money: SmartMoneyEvaluatorConfig = Field(default_factory=SmartMoneyEvaluatorConfig)
+    move_attribution: MoveAttributionEvaluatorConfig = Field(
+        default_factory=MoveAttributionEvaluatorConfig,
+    )
+    velocity: VelocityEvaluatorConfig = Field(default_factory=VelocityEvaluatorConfig)
+    mispricing: MispricingEvaluatorConfig = Field(default_factory=MispricingEvaluatorConfig)
+
+
+class PaperTradingConfig(_Section):
+    """Thresholds + cadence for the paper-trading subsystem.
+
+    Off by default. When enabled, PaperTrader subscribes to AlertSink and
+    fans every alert through the evaluators list to mirror trades onto a
+    virtual bankroll. PaperResolver runs as a periodic detector that books
+    PnL when the underlying market resolves. State lives in ``paper_trades``.
+
+    Per-source tunables (enabled, position_fraction, quality gates) live
+    under ``evaluators.<source>``.
     """
 
     enabled: bool = False
     starting_bankroll_usd: float = 1000.0
-    position_fraction: float = 0.01
-    min_weighted_edge: float = 0.0
     min_position_cost_usd: float = 0.50
     resolver_scan_interval_seconds: float = 300.0
+    evaluators: EvaluatorsConfig = Field(default_factory=EvaluatorsConfig)
 
 
 class WorkerSinkConfig(_Section):

@@ -10,7 +10,11 @@ import pytest
 
 from pscanner.alerts.models import Alert
 from pscanner.alerts.sink import AlertSink
-from pscanner.config import PaperTradingConfig
+from pscanner.config import (
+    EvaluatorsConfig,
+    PaperTradingConfig,
+    SmartMoneyEvaluatorConfig,
+)
 from pscanner.poly.ids import AssetId, ConditionId, MarketId
 from pscanner.poly.models import Market
 from pscanner.store.repo import (
@@ -177,8 +181,10 @@ def test_size_trade_happy_path() -> None:
     cfg = PaperTradingConfig(
         enabled=True,
         starting_bankroll_usd=1000.0,
-        position_fraction=0.01,
         min_position_cost_usd=0.5,
+        evaluators=EvaluatorsConfig(
+            smart_money=SmartMoneyEvaluatorConfig(position_fraction=0.01),
+        ),
     )
     result = _size_trade(nav=1000.0, fill_price=0.5, cfg=cfg)
     assert result is not None
@@ -188,7 +194,12 @@ def test_size_trade_happy_path() -> None:
 
 
 def test_size_trade_below_minimum_returns_none() -> None:
-    cfg = PaperTradingConfig(min_position_cost_usd=0.50, position_fraction=0.01)
+    cfg = PaperTradingConfig(
+        min_position_cost_usd=0.50,
+        evaluators=EvaluatorsConfig(
+            smart_money=SmartMoneyEvaluatorConfig(position_fraction=0.01),
+        ),
+    )
     assert _size_trade(nav=40.0, fill_price=0.5, cfg=cfg) is None
 
 
@@ -246,7 +257,12 @@ async def test_paper_trader_skips_non_smart_money(tmp_db: sqlite3.Connection) ->
 
 
 async def test_paper_trader_skips_wallet_below_edge(tmp_db: sqlite3.Connection) -> None:
-    cfg = PaperTradingConfig(enabled=True, min_weighted_edge=0.0)
+    cfg = PaperTradingConfig(
+        enabled=True,
+        evaluators=EvaluatorsConfig(
+            smart_money=SmartMoneyEvaluatorConfig(min_weighted_edge=0.0),
+        ),
+    )
     sink, trader, cache, wallets, paper = _build_trader(tmp_db, cfg)
     _track_wallet(wallets, weighted_edge=-0.1)
     _cache_market(cache)

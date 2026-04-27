@@ -5,8 +5,13 @@ from __future__ import annotations
 from pscanner.config import (
     ClusterConfig,
     Config,
+    EvaluatorsConfig,
+    MispricingEvaluatorConfig,
     MoveAttributionConfig,
+    MoveAttributionEvaluatorConfig,
     PaperTradingConfig,
+    SmartMoneyEvaluatorConfig,
+    VelocityEvaluatorConfig,
     WorkerSinkConfig,
 )
 
@@ -36,8 +41,6 @@ def test_paper_trading_defaults() -> None:
     cfg = PaperTradingConfig()
     assert cfg.enabled is False  # opt-in
     assert cfg.starting_bankroll_usd == 1000.0
-    assert cfg.position_fraction == 0.01
-    assert cfg.min_weighted_edge == 0.0
     assert cfg.min_position_cost_usd == 0.50
     assert cfg.resolver_scan_interval_seconds == 300.0
 
@@ -60,3 +63,48 @@ def test_worker_sink_config_defaults() -> None:
 
     root = Config()
     assert root.worker_sink == cfg
+
+
+def test_evaluators_config_defaults() -> None:
+    cfg = EvaluatorsConfig()
+    assert cfg.smart_money == SmartMoneyEvaluatorConfig()
+    assert cfg.move_attribution == MoveAttributionEvaluatorConfig()
+    assert cfg.velocity == VelocityEvaluatorConfig()
+    assert cfg.mispricing == MispricingEvaluatorConfig()
+
+    sm = SmartMoneyEvaluatorConfig()
+    assert sm.enabled is True
+    assert sm.position_fraction == 0.01
+    assert sm.min_weighted_edge == 0.0
+
+    ma = MoveAttributionEvaluatorConfig()
+    assert ma.enabled is True
+    assert ma.position_fraction == 0.01
+    assert ma.min_severity == "med"
+    assert ma.min_wallets == 3
+
+    v = VelocityEvaluatorConfig()
+    assert v.enabled is True
+    assert v.position_fraction == 0.0025
+    assert v.min_severity == "high"
+    assert v.allow_consolidation is False
+
+    m = MispricingEvaluatorConfig()
+    assert m.enabled is True
+    assert m.position_fraction == 0.01
+    assert m.min_edge_dollars == 0.05
+
+    root = Config()
+    assert root.paper_trading.evaluators == cfg
+
+
+def test_paper_trading_config_no_longer_has_position_fraction() -> None:
+    """The old `position_fraction` and `min_weighted_edge` fields are removed
+    from PaperTradingConfig — they live under evaluators.smart_money now."""
+    cfg = PaperTradingConfig()
+    assert not hasattr(cfg, "position_fraction"), (
+        "position_fraction must move to evaluators.smart_money.position_fraction"
+    )
+    assert not hasattr(cfg, "min_weighted_edge"), (
+        "min_weighted_edge must move to evaluators.smart_money.min_weighted_edge"
+    )
