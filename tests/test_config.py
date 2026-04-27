@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pscanner.config import Config, MoveAttributionConfig, PaperTradingConfig
+from pscanner.config import ClusterConfig, Config, MoveAttributionConfig, PaperTradingConfig
 
 
 def test_move_attribution_defaults() -> None:
@@ -40,3 +40,8 @@ def test_paper_trading_attached_to_root_config() -> None:
     cfg = Config()
     assert isinstance(cfg.paper_trading, PaperTradingConfig)
     assert cfg.paper_trading.enabled is False
+
+
+def test_cluster_max_co_trade_group_size_default() -> None:
+    cfg = ClusterConfig()
+    assert cfg.max_co_trade_group_size == 100

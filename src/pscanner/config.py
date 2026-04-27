@@ -245,6 +245,11 @@ class ClusterConfig(_Section):
     active_window_seconds: int = 300
     active_min_members: int = 2
 
+    # Safety cap for the co-occurrence candidate-group path. Connected
+    # components above this size are truncated deterministically to prevent
+    # a misconfigured obscurity gate from producing runaway candidates.
+    max_co_trade_group_size: int = 100
+
 
 class MoveAttributionConfig(_Section):
     """Thresholds + cadence for the alert-driven move-attribution detector.
