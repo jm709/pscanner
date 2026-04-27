@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from pscanner.alerts.sink import AlertSink
@@ -225,3 +227,32 @@ def test_resolver_interval_from_config(tmp_db) -> None:
         paper_trades=PaperTradesRepo(tmp_db),
     )
     assert resolver._interval_seconds() == 120.0
+
+
+@pytest.mark.asyncio
+async def test_resolver_keeps_position_open_when_insert_exit_raises(tmp_db, monkeypatch) -> None:
+    """If insert_exit raises, the position must stay open for retry next cycle."""
+    cfg = PaperTradingConfig(enabled=True)
+    cache = MarketCacheRepo(tmp_db)
+    paper = PaperTradesRepo(tmp_db)
+    _cache_market(cache, active=False, outcome_prices=[1.0, 0.0])
+    _open_position(paper, outcome="yes", cost_usd=10.0, shares=20.0)
+
+    def boom(**_kwargs: object) -> int:
+        raise sqlite3.OperationalError("simulated transient DB failure")
+
+    monkeypatch.setattr(paper, "insert_exit", boom)
+    clock = FakeClock(start=float(_NOW + 100))
+    resolver = PaperResolver(
+        config=cfg,
+        market_cache=cache,
+        paper_trades=paper,
+        clock=clock,
+    )
+    # Must not raise
+    await resolver._scan(AlertSink(AlertsRepo(tmp_db)))
+    # Position is still open (retry will happen next cycle)
+    open_positions = paper.list_open_positions()
+    assert len(open_positions) == 1
+    # NAV unchanged because no exit was booked
+    assert paper.compute_cost_basis_nav(starting_bankroll=1000.0) == 1000.0

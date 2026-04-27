@@ -42,10 +42,8 @@ def _check_resolution(
     if len(prices) != len(cached.asset_ids):
         return None
     for price, asset_id in zip(prices, cached.asset_ids, strict=True):
-        if price == _DEFINITIVE:
-            other = sum(p for p in prices if p is not None)
-            if other == _DEFINITIVE:  # exactly one outcome at 1.0
-                return asset_id
+        if price == _DEFINITIVE and sum(prices) == _DEFINITIVE:
+            return asset_id
     return None
 
 
