@@ -76,7 +76,13 @@ from pscanner.store.repo import (
     WalletTradesRepo,
     WatchlistRepo,
 )
-from pscanner.strategies.evaluators import SmartMoneyEvaluator
+from pscanner.strategies.evaluators import (
+    MispricingEvaluator,
+    MoveAttributionEvaluator,
+    SignalEvaluator,
+    SmartMoneyEvaluator,
+    VelocityEvaluator,
+)
 from pscanner.strategies.paper_resolver import PaperResolver
 from pscanner.strategies.paper_trader import PaperTrader
 from pscanner.util.clock import Clock, RealClock
@@ -348,16 +354,9 @@ class Scanner:
             )
         if self._config.paper_trading.enabled:
             paper_trades_repo = PaperTradesRepo(self._db)
-            # T8: fan out to all four evaluators (move_attribution, mispricing,
-            # velocity).
             detectors["paper_trader"] = PaperTrader(
                 config=self._config.paper_trading,
-                evaluators=[
-                    SmartMoneyEvaluator(
-                        config=self._config.paper_trading.evaluators.smart_money,
-                        tracked_wallets=self._tracked_repo,
-                    ),
-                ],
+                evaluators=self._build_paper_evaluators(),
                 market_cache=self._market_cache_repo,
                 paper_trades=paper_trades_repo,
                 market_ticks=self._ticks_repo,
@@ -372,6 +371,42 @@ class Scanner:
             )
         self._maybe_attach_velocity_detector(detectors)
         return detectors
+
+    def _build_paper_evaluators(self) -> list[SignalEvaluator]:
+        """Construct enabled evaluators in fixed order.
+
+        Each evaluator is gated by its ``enabled`` flag in
+        ``paper_trading.evaluators.<source>``; disabled sources are simply
+        not in the list. Order is fixed: smart_money, move_attribution,
+        mispricing, velocity. Order matters because PaperTrader.evaluate
+        returns on first acceptance — though there's no overlap today
+        (each evaluator accepts a unique detector name).
+        """
+        cfg = self._config.paper_trading.evaluators
+        evaluators: list[SignalEvaluator] = []
+        if cfg.smart_money.enabled:
+            evaluators.append(
+                SmartMoneyEvaluator(
+                    config=cfg.smart_money,
+                    tracked_wallets=self._tracked_repo,
+                )
+            )
+        if cfg.move_attribution.enabled:
+            evaluators.append(
+                MoveAttributionEvaluator(config=cfg.move_attribution),
+            )
+        if cfg.mispricing.enabled:
+            evaluators.append(
+                MispricingEvaluator(config=cfg.mispricing),
+            )
+        if cfg.velocity.enabled:
+            evaluators.append(
+                VelocityEvaluator(
+                    config=cfg.velocity,
+                    market_cache=self._market_cache_repo,
+                ),
+            )
+        return evaluators
 
     def _maybe_attach_velocity_detector(self, detectors: dict[str, Any]) -> None:
         """Attach the velocity detector if both ticks and velocity are enabled.

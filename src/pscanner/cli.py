@@ -39,6 +39,7 @@ from pscanner.store.repo import (
     AlertsRepo,
     PaperSummary,
     PaperTradesRepo,
+    SourceSummary,
     WatchlistEntry,
     WatchlistRepo,
 )
@@ -374,6 +375,7 @@ def _cmd_paper_status(config: Config) -> int:
         leaderboard = _paper_leaderboard_rows(conn)
         best = _paper_extreme_rows(conn, order="DESC")
         worst = _paper_extreme_rows(conn, order="ASC")
+        sources = paper.summary_by_source()
     finally:
         conn.close()
     console = Console(highlight=False)
@@ -381,6 +383,7 @@ def _cmd_paper_status(config: Config) -> int:
     _print_paper_leaderboard(console, leaderboard)
     _print_paper_extremes(console, "top 3 best settled trades", best)
     _print_paper_extremes(console, "top 3 worst settled trades", worst)
+    _print_paper_sources(console, sources)
     return 0
 
 
@@ -476,4 +479,25 @@ def _print_paper_extremes(
         pnl = float(row["pnl"] or 0.0)
         console.print(
             f"  PnL=${pnl:+,.2f}  cond={cond}…  outcome={outcome}  wallet={wallet}…",
+        )
+
+
+def _print_paper_sources(console: Console, sources: list[SourceSummary]) -> None:
+    """Render the per-(detector, rule_variant) breakdown, skipping when empty."""
+    if not sources:
+        return
+    console.print("")
+    console.print("Per-source breakdown:")
+    header = (
+        f"  {'detector':<20s} {'variant':<8s} "
+        f"{'open':>5s} {'resolved':>9s} {'pnl':>9s} {'win_rate':>9s}"
+    )
+    console.print(header)
+    for s in sources:
+        det = s.detector or "(unknown)"
+        variant = s.rule_variant or "-"
+        console.print(
+            f"  {det:<20s} {variant:<8s} "
+            f"{s.open_count:>5d} {s.resolved_count:>9d} "
+            f"{s.realized_pnl:>+9.2f} {s.win_rate * 100:>8.1f}%",
         )

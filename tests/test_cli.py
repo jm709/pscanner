@@ -475,3 +475,82 @@ def test_paper_status_empty_db(
     # Empty case still renders the headline numbers
     assert "open" in out.lower()
     assert "closed" in out.lower()
+
+
+def test_paper_status_shows_per_source_breakdown(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg = tmp_path / "config.toml"
+    db = tmp_path / "pscanner.sqlite3"
+    _write_config(cfg, db)
+    conn = init_db(db)
+    try:
+        repo = PaperTradesRepo(conn)
+        # smart_money entry (resolved win)
+        e1 = repo.insert_entry(
+            triggering_alert_key="smart:0xa:1",
+            triggering_alert_detector="smart_money",
+            rule_variant=None,
+            source_wallet="0xa",
+            condition_id=ConditionId("0xc1"),
+            asset_id=AssetId("a-y"),
+            outcome="yes",
+            shares=20.0,
+            fill_price=0.5,
+            cost_usd=10.0,
+            nav_after_usd=1000.0,
+            ts=1700000000,
+        )
+        repo.insert_exit(
+            parent_trade_id=e1,
+            condition_id=ConditionId("0xc1"),
+            asset_id=AssetId("a-y"),
+            outcome="yes",
+            shares=20.0,
+            fill_price=1.0,
+            cost_usd=20.0,
+            nav_after_usd=1010.0,
+            ts=1700000100,
+        )
+        # velocity follow (open)
+        repo.insert_entry(
+            triggering_alert_key="vel:0xb:1",
+            triggering_alert_detector="velocity",
+            rule_variant="follow",
+            source_wallet=None,
+            condition_id=ConditionId("0xc2"),
+            asset_id=AssetId("b-y"),
+            outcome="yes",
+            shares=10.0,
+            fill_price=0.25,
+            cost_usd=2.5,
+            nav_after_usd=1010.0,
+            ts=1700000200,
+        )
+        # mispricing entry, still open
+        repo.insert_entry(
+            triggering_alert_key="mis:ev1:1",
+            triggering_alert_detector="mispricing",
+            rule_variant=None,
+            source_wallet=None,
+            condition_id=ConditionId("0xc3"),
+            asset_id=AssetId("c-no"),
+            outcome="NO",
+            shares=10.0,
+            fill_price=0.5,
+            cost_usd=5.0,
+            nav_after_usd=1010.0,
+            ts=1700000300,
+        )
+    finally:
+        conn.close()
+
+    rc = main(["--config", str(cfg), "paper", "status"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Per-source breakdown" in out
+    assert "smart_money" in out
+    assert "velocity" in out
+    assert "follow" in out
+    assert "mispricing" in out
