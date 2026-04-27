@@ -24,9 +24,14 @@ run window:
 We want to (1) book trades from `move_attribution`, `velocity`, and `mispricing`
 in addition to `smart_money`, (2) handle velocity's directional ambiguity by
 running both follow and fade simultaneously so we can learn which works where,
-(3) enrich the mispricing detector to make it tradeable, and (4) build the
+(3) enrich the mispricing detector to make it tradeable, (4) build the
 architecture so adding a future signal source is one new class plus one config
-block.
+block, and (5) **maximize data collection by decoupling bet sizing from
+realized PnL** — bets stay constant size regardless of cumulative losses, and
+trades keep booking even when the cost-basis NAV goes negative. This is a
+research configuration; no real bankroll constraint is modeled. The goal is
+labeled-outcome data per `(source, rule_variant)` pair, not realistic PnL
+simulation.
 
 ## Goal
 
@@ -54,17 +59,25 @@ tracking columns and CLI breakdown.
 `PaperTrader.evaluate(alert)` today hardcodes the smart-money body shape: parse
 `(wallet, condition_id, side)`, look up `weighted_edge`, resolve outcome, size
 by a single `position_fraction`, insert one entry. Every step is smart_money
-specific.
+specific. Sizing reads `compute_cost_basis_nav` and gates on `nav <= 0`.
 
-The expansion pluralizes the pipeline. We introduce a `SignalEvaluator`
-Protocol with four methods:
+The expansion pluralizes the pipeline AND switches to constant sizing. We
+introduce a `SignalEvaluator` Protocol with four methods:
 
 ```python
 def accepts(alert: Alert) -> bool
 def parse(alert: Alert) -> list[ParsedSignal]
 def quality_passes(parsed: ParsedSignal) -> bool
-def size(nav: float, parsed: ParsedSignal) -> float
+def size(bankroll: float, parsed: ParsedSignal) -> float
 ```
+
+The `size` method receives `starting_bankroll_usd` (a config constant), not
+the running cost-basis NAV. Bet size is therefore constant across the run:
+$10 (or $2.50 per velocity side) regardless of cumulative wins or losses.
+The `if nav <= 0` gate is removed — trades keep booking even if realized PnL
+goes deeply negative. We still compute cost-basis NAV once per alert and write
+it to `paper_trades.nav_after_usd` for analysis (it can be negative; that's
+informative, not blocking).
 
 Four concrete implementations live in their own files:
 
@@ -115,7 +128,7 @@ Moves today's parse/qualify/size logic out of `PaperTrader` unchanged.
 - `parse`: extracts `(wallet, condition_id, side)`. Returns 1 ParsedSignal.
 - `quality_passes`: `tracked_wallets[wallet].weighted_edge >
   config.min_weighted_edge` (default 0.0).
-- `size`: `nav * config.position_fraction` (default 0.01).
+- `size`: `bankroll * config.position_fraction` (default 0.01).
 
 ### New: `src/pscanner/strategies/evaluators/move_attribution.py` (~60 LOC)
 
@@ -126,7 +139,7 @@ Moves today's parse/qualify/size logic out of `PaperTrader` unchanged.
   Returns 1 ParsedSignal where `side = outcome`.
 - `quality_passes`: `severity ∈ {med, high}` AND `n_wallets >=
   config.min_wallets` (default 3).
-- `size`: `nav * config.position_fraction` (default 0.01).
+- `size`: `bankroll * config.position_fraction` (default 0.01).
 
 ### New: `src/pscanner/strategies/evaluators/velocity.py` (~90 LOC)
 
@@ -139,8 +152,9 @@ Moves today's parse/qualify/size logic out of `PaperTrader` unchanged.
     `rule_variant="fade"` and `side=opposing_outcome`.
   - If market_cache misses (no opposing-side asset_id known), return only
     the follow side.
-- `size`: `nav * config.position_fraction` per ParsedSignal (default 0.0025
-  per side, so a pair totals 0.5% of NAV).
+- `size`: `bankroll * config.position_fraction` per ParsedSignal (default
+  0.0025 per side, so a pair totals 0.5% of starting bankroll = $5 on
+  $1000).
 
 ### New: `src/pscanner/strategies/evaluators/mispricing.py` (~60 LOC)
 
@@ -151,7 +165,7 @@ Moves today's parse/qualify/size logic out of `PaperTrader` unchanged.
   logs at debug.
 - `quality_passes`: `abs(target_fair_price - target_current_price) >=
   config.min_edge_dollars` (default 0.05).
-- `size`: `nav * config.position_fraction` (default 0.01).
+- `size`: `bankroll * config.position_fraction` (default 0.01).
 
 ### New: `src/pscanner/strategies/evaluators/__init__.py` (~10 LOC)
 
@@ -318,16 +332,17 @@ AlertSink.emit(alert)
                            if ev.accepts(alert):
                              try:
                                parsed_list = ev.parse(alert)
-                               nav = paper_trades.compute_cost_basis_nav(...)
-                               if nav <= 0: return
+                               bankroll = config.starting_bankroll_usd  # constant
+                               nav = paper_trades.compute_cost_basis_nav(...) # for ledger
                                for parsed in parsed_list:
                                  if not ev.quality_passes(parsed): continue
                                  resolved = await self._resolve_outcome(...)
                                  if resolved is None: continue
-                                 cost = ev.size(nav, parsed)
+                                 cost = ev.size(bankroll, parsed)
                                  if not _size_valid(cost, fill_price): continue
                                  paper_trades.insert_entry(
                                    ...,
+                                   nav_after_usd=nav,  # informational, may be negative
                                    triggering_alert_detector=alert.detector,
                                    rule_variant=parsed.rule_variant,
                                  )
@@ -340,8 +355,10 @@ AlertSink.emit(alert)
 
 Three properties:
 
-1. **Single NAV read per alert.** Velocity's two ParsedSignals see the same
-   `nav` snapshot; sizing is symmetric across the pair.
+1. **Constant sizing.** Bet size is `starting_bankroll_usd * position_fraction`
+   on every entry — independent of realized PnL. NAV is still read once per
+   alert and written to `nav_after_usd` for analysis but plays no role in
+   sizing or in any go/no-go gate.
 2. **Per-ParsedSignal independence.** If quality_passes / resolve / size
    rejects one of velocity's two signals, the other still books.
 3. **Order matters in the evaluator list.** First-match `accepts`. Scheduler
@@ -414,12 +431,14 @@ ORDER BY realized_pnl DESC;
 | mispricing | 1.0% | $10 | $10 (1 entry) |
 | velocity | 0.25% | $2.50 | $5 (2 entries: follow + fade) |
 
-`position_fraction` is per-entry, not per-alert. Velocity's smaller value
-reflects that each side of the pair is a smaller bet, but the pair total
-($5) still comes in below the other signals' $10 — matching the user's
-intent of less bankroll on the experimental signal. Future per-bucket
-sizing (severity-tiered, change_pct-bucketed, etc.) is a method change
-inside the relevant Evaluator's `size`.
+`position_fraction` is per-entry, not per-alert, and applied against
+`starting_bankroll_usd` (a constant), not against running NAV. Bet sizes
+therefore stay fixed regardless of cumulative wins or losses — by design,
+since the goal is maximum data collection per source. Velocity's smaller
+fraction reflects that each side of the pair is a smaller bet; pair total
+$5 stays below the other signals' $10. Future per-bucket sizing
+(severity-tiered, change_pct-bucketed, etc.) is a method change inside the
+relevant Evaluator's `size`.
 
 ## Error handling
 
@@ -429,7 +448,7 @@ inside the relevant Evaluator's `size`.
 | Body-shape mismatch (missing field) | `parse` returns `[]`; debug log `paper_trader.bad_body`. Most common error path. |
 | `_resolve_outcome` returns None (cache miss + gamma fallback fail) | ParsedSignal skipped at debug; remaining ParsedSignals from same alert continue. |
 | `_size_trade` returns None (cost < min, or fill_price ∉ (0,1)) | ParsedSignal skipped at debug. |
-| `compute_cost_basis_nav <= 0` | Whole alert skipped; info log `paper_trade.bankroll_exhausted`. |
+| Cost-basis NAV is negative | Trades continue booking; `nav_after_usd` is written as-is (potentially negative). The `bankroll_exhausted` gate that existed before this spec is removed — research configuration assumes infinite money for data collection. |
 | Duplicate alert (replay) | Existing UNIQUE-on-entry index catches it; `_insert_entry` swallows IntegrityError with debug log `paper_trader.duplicate_alert`. Index now keyed on `(triggering_alert_key, rule_variant)` so velocity's two entries don't collide. |
 | Mispricing alert lacks `target_*` fields (stale/legacy) | `MispricingEvaluator.parse` returns `[]` and logs at debug. Forward-compatible. |
 | Backfill UPDATE fails | Existing `_apply_migrations` swallows `OperationalError`; rows stay NULL and surface in an `unknown` source bucket. |
