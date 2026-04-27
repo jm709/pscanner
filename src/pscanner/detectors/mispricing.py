@@ -288,6 +288,8 @@ def _build_body(
         "market_count": count,
         "markets": [_market_summary(market) for market in event.markets],
     }
+    # target is None only when price_sum <= 0, which the caller's
+    # count >= 2 guard in evaluate_event makes unreachable in practice.
     if target is not None:
         target_market, target_yes_price, target_fair_yes_price = target
         if target_yes_price > target_fair_yes_price:
@@ -313,6 +315,8 @@ def _pick_target_market(
 
     Fair price uses proportional rebalancing: fair[i] = current[i] / sum(current). Returns
     None if no market in the event has a populated YES price.
+
+    On ties, the first market encountered in ``event.markets`` order wins.
     """
     if price_sum <= 0.0:
         return None
