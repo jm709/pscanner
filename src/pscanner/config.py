@@ -282,9 +282,10 @@ class MoveAttributionConfig(_Section):
 class SmartMoneyEvaluatorConfig(_Section):
     """Smart-money copy-trade evaluator tunables.
 
-    Today's PaperTrader config — moved here so each source has its own
-    config block with the same shape (enabled, position_fraction, +
-    source-specific gates).
+    Mirrors trades from tracked wallets whose ``weighted_edge`` exceeds
+    ``min_weighted_edge`` (default ``0.0`` — any positive edge passes).
+    Bumping the gate trades volume for selectivity. ``position_fraction``
+    is applied per-entry against ``starting_bankroll_usd``.
     """
 
     enabled: bool = True
