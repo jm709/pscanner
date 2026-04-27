@@ -209,6 +209,29 @@ class TrackedWalletsRepo:
         ).fetchall()
         return [_row_to_tracked_wallet(row) for row in rows]
 
+    def get(self, address: str) -> TrackedWallet | None:
+        """Return the tracked wallet for ``address``, or ``None`` if not tracked.
+
+        Args:
+            address: 0x-prefixed proxy wallet address.
+
+        Returns:
+            The matching :class:`TrackedWallet`, or ``None`` if no row exists.
+        """
+        row = self._conn.execute(
+            """
+            SELECT address, closed_position_count, closed_position_wins,
+                   winrate, leaderboard_pnl, last_refreshed_at,
+                   mean_edge, weighted_edge, excess_pnl_usd, total_stake_usd
+              FROM tracked_wallets
+             WHERE address = ?
+            """,
+            (address,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _row_to_tracked_wallet(row)
+
 
 def _row_to_tracked_wallet(row: sqlite3.Row) -> TrackedWallet:
     """Convert a ``tracked_wallets`` row to a ``TrackedWallet`` dataclass."""
