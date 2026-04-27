@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 Severity = Literal["low", "med", "high"]
+SEVERITY_RANK: dict[Severity, int] = {"low": 0, "med": 1, "high": 2}
+"""Numeric ranking for ``Severity`` to enable comparisons in evaluator quality gates."""
+
 DetectorName = Literal[
     "smart_money",
     "mispricing",

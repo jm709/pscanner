@@ -13,14 +13,12 @@ from __future__ import annotations
 
 import structlog
 
-from pscanner.alerts.models import Alert
+from pscanner.alerts.models import SEVERITY_RANK, Alert
 from pscanner.config import MoveAttributionEvaluatorConfig
 from pscanner.poly.ids import ConditionId
 from pscanner.strategies.evaluators.protocol import ParsedSignal
 
 _LOG = structlog.get_logger(__name__)
-
-_SEVERITY_RANK = {"low": 0, "med": 1, "high": 2}
 
 
 class MoveAttributionEvaluator:
@@ -65,7 +63,7 @@ class MoveAttributionEvaluator:
         n_wallets = parsed.metadata.get("n_wallets")
         if not isinstance(severity, str) or not isinstance(n_wallets, int):
             return False
-        if _SEVERITY_RANK.get(severity, -1) < _SEVERITY_RANK.get(self._config.min_severity, 1):
+        if SEVERITY_RANK.get(severity, -1) < SEVERITY_RANK[self._config.min_severity]:
             return False
         return n_wallets >= self._config.min_wallets
 
