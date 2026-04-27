@@ -905,3 +905,91 @@ async def test_max_market_count_override_allows_large_event_to_alert() -> None:
     assert len(captured) == 1
     assert captured[0].body["market_count"] == 12
     assert captured[0].body["price_sum"] == pytest.approx(1.1)
+
+
+def _make_event_with_yes_prices(
+    *,
+    event_id: str,
+    title: str,
+    markets: list[tuple[str, str, float]],
+) -> Event:
+    """Build an Event whose markets have conditionId and a specified YES price.
+
+    Each element of ``markets`` is ``(market_id, question, yes_price)``.  The
+    helper sets ``conditionId = f"{market_id}-cond"`` so tests can assert on
+    ``target_condition_id`` without guessing the generated value.
+    """
+    market_objs: list[Market] = []
+    for market_id, question, yes_price in markets:
+        payload: dict[str, Any] = {
+            "id": market_id,
+            "question": question,
+            "slug": f"slug-{market_id}",
+            "conditionId": f"{market_id}-cond",
+            "outcomes": ["Yes", "No"],
+            "outcomePrices": [yes_price, 1.0 - yes_price],
+            "enableOrderBook": True,
+            "groupItemTitle": None,
+            "groupItemThreshold": None,
+            "liquidity": None,
+        }
+        market_objs.append(Market.model_validate(payload))
+    return _event(event_id=event_id, title=title, markets=market_objs)
+
+
+async def _build_alert_for_event(event: Event) -> Alert:
+    """Run the detector against a single event and return the captured alert.
+
+    Configures a low threshold (0.01) so any realistic mispricing fires.
+    """
+    detector, _ = _make_detector(
+        [event],
+        sum_deviation_threshold=0.01,
+        alert_max_deviation=0.99,
+    )
+    sink, captured = _capturing_sink()
+    await detector._scan(sink)
+    assert len(captured) == 1, f"Expected 1 alert, got {len(captured)}"
+    return captured[0]
+
+
+async def test_alert_body_includes_target_fields_for_overpriced() -> None:
+    """deviation > 0 => most-overpriced YES leg => target_side='NO' with flipped prices."""
+    # 3 markets with YES prices [0.4, 0.5, 0.5], sum 1.4, deviation +0.4.
+    # Proportional fair = [0.286, 0.357, 0.357].
+    # Most-extreme deviation: market 1 or 2 (both 0.143). First-by-tiebreak: market 1.
+    # target_side="NO" because YES (0.5) > fair (0.357).
+    # target_current_price = 1 - 0.5 = 0.5.
+    # target_fair_price = 1 - 0.357 ≈ 0.643.
+    event = _make_event_with_yes_prices(
+        event_id="ev1",
+        title="Three-way race",
+        markets=[("m0", "Q0?", 0.4), ("m1", "Q1?", 0.5), ("m2", "Q2?", 0.5)],
+    )
+    alert = await _build_alert_for_event(event)
+
+    body = alert.body
+    assert body["target_condition_id"] == "m1-cond"  # the first 0.5 market wins tiebreak
+    assert body["target_side"] == "NO"
+    assert body["target_current_price"] == pytest.approx(0.5)
+    assert body["target_fair_price"] == pytest.approx(1 - 0.5 / 1.4, abs=1e-3)
+
+
+async def test_alert_body_includes_target_fields_for_underpriced() -> None:
+    """deviation < 0 => most-underpriced YES leg => target_side='YES' with raw prices."""
+    # 3 markets with YES prices [0.2, 0.2, 0.2], sum 0.6, deviation -0.4.
+    # Proportional fair = [0.333, 0.333, 0.333].
+    # All equally under-priced (deviation -0.133). First-by-tiebreak: market 0.
+    # target_side="YES" because YES (0.2) < fair (0.333).
+    event = _make_event_with_yes_prices(
+        event_id="ev2",
+        title="Three-way underpriced",
+        markets=[("m0", "Q0?", 0.2), ("m1", "Q1?", 0.2), ("m2", "Q2?", 0.2)],
+    )
+    alert = await _build_alert_for_event(event)
+
+    body = alert.body
+    assert body["target_condition_id"] == "m0-cond"
+    assert body["target_side"] == "YES"
+    assert body["target_current_price"] == pytest.approx(0.2)
+    assert body["target_fair_price"] == pytest.approx(0.2 / 0.6, abs=1e-3)

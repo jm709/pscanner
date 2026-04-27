@@ -270,8 +270,17 @@ def _build_body(
     deviation: float,
     count: int,
 ) -> dict[str, Any]:
-    """Build the JSON-serialisable body the alert sink will persist."""
-    return {
+    """Build the JSON-serialisable body the alert sink will persist.
+
+    Includes target_* fields naming the most-extreme leg for tradeable
+    arbitrage entry. Fair price uses proportional rebalancing:
+    fair[i] = current[i] / sum(current). The most-extreme leg is the one
+    whose absolute deviation from fair is largest (first-by-iteration on
+    ties). Direction follows the sign: current > fair => YES is over-priced
+    => trade NO with flipped current/fair prices; otherwise trade YES.
+    """
+    target = _pick_target_market(event, price_sum)
+    body: dict[str, Any] = {
         "event_id": event.id,
         "event_title": event.title,
         "price_sum": price_sum,
@@ -279,6 +288,46 @@ def _build_body(
         "market_count": count,
         "markets": [_market_summary(market) for market in event.markets],
     }
+    if target is not None:
+        target_market, target_yes_price, target_fair_yes_price = target
+        if target_yes_price > target_fair_yes_price:
+            target_side = "NO"
+            target_current = 1.0 - target_yes_price
+            target_fair = 1.0 - target_fair_yes_price
+        else:
+            target_side = "YES"
+            target_current = target_yes_price
+            target_fair = target_fair_yes_price
+        body["target_condition_id"] = target_market.condition_id
+        body["target_side"] = target_side
+        body["target_current_price"] = target_current
+        body["target_fair_price"] = target_fair
+    return body
+
+
+def _pick_target_market(
+    event: Event,
+    price_sum: float,
+) -> tuple[Market, float, float] | None:
+    """Return (market, yes_price, fair_yes_price) for the leg with the largest absolute deviation.
+
+    Fair price uses proportional rebalancing: fair[i] = current[i] / sum(current). Returns
+    None if no market in the event has a populated YES price.
+    """
+    if price_sum <= 0.0:
+        return None
+    best: tuple[Market, float, float] | None = None
+    best_dev = -1.0
+    for market in event.markets:
+        if not market.outcome_prices:
+            continue
+        yes_price = market.outcome_prices[0]
+        fair_yes_price = yes_price / price_sum
+        dev = abs(yes_price - fair_yes_price)
+        if dev > best_dev:
+            best_dev = dev
+            best = (market, yes_price, fair_yes_price)
+    return best
 
 
 def _market_summary(market: Market) -> dict[str, Any]:
