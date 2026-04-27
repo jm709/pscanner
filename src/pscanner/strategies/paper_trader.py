@@ -253,7 +253,7 @@ class PaperTrader:
                     side=side,
                 )
                 return None
-        fill_price = self._lookup_fill_price(asset_id)
+        fill_price = self._lookup_fill_price(condition_id, asset_id)
         if fill_price is None:
             return None
         return (asset_id, fill_price)
@@ -302,23 +302,85 @@ class PaperTrader:
         )
         return True
 
-    def _lookup_fill_price(self, asset_id: AssetId) -> float | None:
-        """Read the latest ``best_ask`` (or ``last_trade_price`` fallback)."""
+    def _lookup_fill_price(
+        self,
+        condition_id: ConditionId,
+        asset_id: AssetId,
+    ) -> float | None:
+        """Resolve a fill price via the prioritised lookup chain.
+
+        Order:
+
+        1. ``market_ticks.best_ask`` (live orderbook ask).
+        2. ``market_ticks.last_trade_price`` (last printed trade).
+        3. ``market_cache.outcome_prices[outcome_index]`` (gamma's cached
+           last-known quote — populated at backfill time, seconds-stale
+           but always available immediately after a cache miss recovery).
+
+        Returns ``None`` when none of the three sources yields a price in
+        ``(0, 1)``. The fallback path emits ``paper_trade.fill_price_fallback``
+        at INFO level so operators can grep how often live ticks were
+        unavailable.
+        """
         tick = self._market_ticks.latest_for_asset(asset_id)
-        if tick is None:
-            _LOG.warning("paper_trade.no_price", asset_id=asset_id)
-            return None
-        if _is_valid_price(tick.best_ask):
-            return float(tick.best_ask)
-        if _is_valid_price(tick.last_trade_price):
-            return float(tick.last_trade_price)
+        if tick is not None:
+            if _is_valid_price(tick.best_ask):
+                return float(tick.best_ask)
+            if _is_valid_price(tick.last_trade_price):
+                return float(tick.last_trade_price)
+        fallback_price = self._cached_outcome_price(condition_id, asset_id)
+        if fallback_price is not None:
+            _LOG.info(
+                "paper_trade.fill_price_fallback",
+                asset_id=asset_id,
+                condition_id=condition_id,
+                fallback_price=fallback_price,
+            )
+            return fallback_price
         _LOG.warning(
             "paper_trade.no_price",
             asset_id=asset_id,
-            best_ask=tick.best_ask,
-            last_trade=tick.last_trade_price,
+            condition_id=condition_id,
+            best_ask=tick.best_ask if tick is not None else None,
+            last_trade=tick.last_trade_price if tick is not None else None,
         )
         return None
+
+    def _cached_outcome_price(
+        self,
+        condition_id: ConditionId,
+        asset_id: AssetId,
+    ) -> float | None:
+        """Return the cached gamma outcome price for ``asset_id``, or None.
+
+        Used as a third-tier fill-price fallback when ``market_ticks`` has
+        no row for an asset (e.g. immediately after a cache backfill,
+        before the tick stream picks up the new asset). Reads
+        ``market_cache``'s ``asset_ids`` / ``outcome_prices`` lists, looks
+        up ``asset_id``'s index, and returns ``outcome_prices[index]`` if
+        it's a valid fill price (in ``(0, 1)``).
+
+        Returns ``None`` when the market is missing, the asset_id is not
+        in the cached asset_ids, the lists have mismatched lengths, or
+        the price is not in the valid range.
+
+        Args:
+            condition_id: The market's on-chain condition id.
+            asset_id: The CLOB token id whose price to look up.
+        """
+        cached = self._market_cache.get_by_condition_id(condition_id)
+        if cached is None:
+            return None
+        if len(cached.asset_ids) != len(cached.outcome_prices):
+            return None
+        try:
+            idx = cached.asset_ids.index(asset_id)
+        except ValueError:
+            return None
+        price = cached.outcome_prices[idx]
+        if not _is_valid_price(price):
+            return None
+        return float(price)
 
     async def aclose(self) -> None:
         """Wait for any in-flight evaluation tasks (test helper)."""

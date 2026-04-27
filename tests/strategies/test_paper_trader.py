@@ -84,6 +84,7 @@ def _cache_market(
     condition_id: str = "0xcond-1",
     outcomes: list[str] | None = None,
     asset_ids: list[str] | None = None,
+    outcome_prices: list[float] | None = None,
 ) -> None:
     repo.upsert(
         CachedMarket(
@@ -92,7 +93,7 @@ def _cache_market(
             title="Test market",
             liquidity_usd=1.0,
             volume_usd=1.0,
-            outcome_prices=[0.6, 0.4],
+            outcome_prices=outcome_prices if outcome_prices is not None else [0.6, 0.4],
             outcomes=outcomes or ["Yes", "No"],
             asset_ids=[AssetId(a) for a in (asset_ids or ["asset-yes", "asset-no"])],
             active=True,
@@ -293,10 +294,13 @@ async def test_paper_trader_skips_when_outcome_unmappable(tmp_db: sqlite3.Connec
 
 
 async def test_paper_trader_skips_when_no_price(tmp_db: sqlite3.Connection) -> None:
+    """No tick AND no usable cached outcome price (resolved market): skip."""
     cfg = PaperTradingConfig(enabled=True)
     sink, trader, cache, wallets, paper = _build_trader(tmp_db, cfg)
     _track_wallet(wallets, weighted_edge=0.4)
-    _cache_market(cache)
+    # outcome_prices at the boundary mean both the tick lookup and the
+    # cached-price fallback yield no usable fill price.
+    _cache_market(cache, outcome_prices=[1.0, 0.0])
 
     await sink.emit(_smart_money_alert())
     await _drain()
@@ -317,6 +321,123 @@ async def test_paper_trader_falls_back_to_last_trade_price(tmp_db: sqlite3.Conne
     open_positions = paper.list_open_positions()
     assert len(open_positions) == 1
     assert open_positions[0].fill_price == 0.55
+
+
+async def test_paper_trader_falls_back_to_cached_outcome_price(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """When market_ticks has no row, paper_trader uses cached outcome_prices."""
+    cfg = PaperTradingConfig(enabled=True)
+    sink, trader, cache, wallets, paper = _build_trader(tmp_db, cfg)
+    _track_wallet(wallets, weighted_edge=0.4)
+    _cache_market(
+        cache,
+        outcomes=["Yes", "No"],
+        asset_ids=["asset-yes", "asset-no"],
+        outcome_prices=[0.6, 0.4],
+    )
+    # No market_ticks row at all.
+
+    await sink.emit(_smart_money_alert(side="Yes"))
+    await _drain()
+    await trader.aclose()
+
+    open_positions = paper.list_open_positions()
+    assert len(open_positions) == 1
+    # Fill price came from cached outcome_prices[0] for "Yes".
+    assert open_positions[0].fill_price == 0.6
+
+
+async def test_paper_trader_prefers_tick_over_cached_price(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """When market_ticks has best_ask, that wins over cached outcome_prices."""
+    cfg = PaperTradingConfig(enabled=True)
+    sink, trader, cache, wallets, paper = _build_trader(tmp_db, cfg)
+    _track_wallet(wallets, weighted_edge=0.4)
+    _cache_market(
+        cache,
+        outcomes=["Yes", "No"],
+        asset_ids=["asset-yes", "asset-no"],
+        outcome_prices=[0.6, 0.4],
+    )
+    _seed_tick(tmp_db, asset_id="asset-yes", best_ask=0.45)
+
+    await sink.emit(_smart_money_alert(side="Yes"))
+    await _drain()
+    await trader.aclose()
+
+    open_positions = paper.list_open_positions()
+    assert len(open_positions) == 1
+    assert open_positions[0].fill_price == 0.45
+
+
+async def test_paper_trader_skips_when_cached_price_out_of_range(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """If outcome_prices[idx] is 0 or 1 (resolved), no fallback happens."""
+    cfg = PaperTradingConfig(enabled=True)
+    sink, trader, cache, wallets, paper = _build_trader(tmp_db, cfg)
+    _track_wallet(wallets, weighted_edge=0.4)
+    _cache_market(
+        cache,
+        outcomes=["Yes", "No"],
+        asset_ids=["asset-yes", "asset-no"],
+        outcome_prices=[1.0, 0.0],
+    )
+
+    await sink.emit(_smart_money_alert(side="Yes"))
+    await _drain()
+    await trader.aclose()
+
+    assert paper.list_open_positions() == []
+
+
+def test_cached_outcome_price_unit_happy(tmp_db: sqlite3.Connection) -> None:
+    """``_cached_outcome_price`` returns the parallel-indexed price."""
+    cfg = PaperTradingConfig(enabled=True)
+    _, trader, cache, _wallets, _paper = _build_trader(tmp_db, cfg)
+    _cache_market(
+        cache,
+        outcomes=["Yes", "No"],
+        asset_ids=["asset-yes", "asset-no"],
+        outcome_prices=[0.55, 0.45],
+    )
+
+    price = trader._cached_outcome_price(
+        ConditionId("0xcond-1"),
+        AssetId("asset-yes"),
+    )
+    assert price == 0.55
+
+
+def test_cached_outcome_price_unit_unknown_asset(tmp_db: sqlite3.Connection) -> None:
+    """Asset_id not in cached asset_ids returns None."""
+    cfg = PaperTradingConfig(enabled=True)
+    _, trader, cache, _wallets, _paper = _build_trader(tmp_db, cfg)
+    _cache_market(
+        cache,
+        outcomes=["Yes", "No"],
+        asset_ids=["asset-yes", "asset-no"],
+    )
+
+    price = trader._cached_outcome_price(
+        ConditionId("0xcond-1"),
+        AssetId("asset-nope"),
+    )
+    assert price is None
+
+
+def test_cached_outcome_price_unit_missing_market(tmp_db: sqlite3.Connection) -> None:
+    """No cached market for the condition id returns None."""
+    cfg = PaperTradingConfig(enabled=True)
+    _, trader, _cache, _wallets, _paper = _build_trader(tmp_db, cfg)
+
+    price = trader._cached_outcome_price(
+        ConditionId("0xcond-missing"),
+        AssetId("asset-yes"),
+    )
+    assert price is None
 
 
 async def test_paper_trader_idempotent_on_duplicate_alert_key(
