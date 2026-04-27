@@ -234,6 +234,32 @@ class DataClient:
             offset += _TRADES_PAGE_SIZE
         return out
 
+    async def get_market_slug_by_condition_id(self, condition_id: str) -> str | None:
+        """Return a market's ``slug`` by querying its first trade.
+
+        Polymarket's ``/trades?market=<conditionId>&limit=1`` returns recent
+        trade rows with full market metadata (slug, title, outcome, asset_id).
+        We pull the slug so the caller can fetch the full ``Market`` from
+        gamma, since gamma's ``/markets`` endpoint does not filter by
+        ``condition_id`` directly.
+
+        Args:
+            condition_id: 0x-prefixed market condition_id.
+
+        Returns:
+            The market's ``slug``, or ``None`` if the market has no trades or
+            the response is malformed.
+        """
+        payload = await self._data_http.get(
+            "/trades",
+            params={"market": condition_id, "limit": 1},
+        )
+        items = _ensure_list(payload, endpoint="/trades")
+        if not items or not isinstance(items[0], dict):
+            return None
+        slug = items[0].get("slug")
+        return slug if isinstance(slug, str) and slug else None
+
     async def get_first_activity_timestamp(self, address: str) -> int | None:
         """Return the unix-seconds timestamp of a wallet's earliest activity.
 

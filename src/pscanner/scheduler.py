@@ -349,6 +349,8 @@ class Scanner:
                 tracked_wallets=self._tracked_repo,
                 paper_trades=paper_trades_repo,
                 market_ticks=self._ticks_repo,
+                data_client=self._clients.data_client,
+                gamma_client=self._clients.gamma_client,
             )
             detectors["paper_resolver"] = PaperResolver(
                 config=self._config.paper_trading,

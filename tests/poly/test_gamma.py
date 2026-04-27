@@ -209,6 +209,51 @@ async def test_iter_markets_paginates() -> None:
     assert all(isinstance(m, Market) for m in collected)
 
 
+async def test_get_market_by_slug_returns_first_match() -> None:
+    """``/markets?slug=`` is a single-element-array response on a hit."""
+    market_payload = {
+        "id": "1234",
+        "conditionId": "0xabc",
+        "question": "Test market",
+        "slug": "test-slug",
+        "outcomes": '["Yes", "No"]',
+        "outcomePrices": '["0.6", "0.4"]',
+        "clobTokenIds": '["asset-yes", "asset-no"]',
+        "active": True,
+        "closed": False,
+        "liquidity": 1.0,
+        "volume": 1.0,
+    }
+    http = _mock_http_returning([market_payload])
+    client = GammaClient(http=http)
+
+    market = await client.get_market_by_slug("test-slug")
+
+    assert market is not None
+    assert isinstance(market, Market)
+    assert market.condition_id == "0xabc"
+    assert market.outcomes == ["Yes", "No"]
+    assert market.clob_token_ids == ["asset-yes", "asset-no"]
+    http.get.assert_awaited_once_with("/markets", params={"slug": "test-slug"})
+
+
+async def test_get_market_by_slug_returns_none_on_empty_array() -> None:
+    """An unknown slug yields ``[]`` from gamma → ``None``."""
+    http = _mock_http_returning([])
+    client = GammaClient(http=http)
+
+    assert await client.get_market_by_slug("nope") is None
+
+
+async def test_get_market_by_slug_rejects_non_array_payload() -> None:
+    """A non-list payload is a contract violation and raises ``TypeError``."""
+    http = _mock_http_returning({"error": "oops"})
+    client = GammaClient(http=http)
+
+    with pytest.raises(TypeError, match="expected JSON array"):
+        await client.get_market_by_slug("test-slug")
+
+
 async def test_aclose_does_not_close_borrowed_http() -> None:
     http = _mock_http_returning([])
     client = GammaClient(http=http)

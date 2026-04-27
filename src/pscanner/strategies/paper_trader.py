@@ -19,6 +19,8 @@ import structlog
 from pscanner.alerts.models import Alert
 from pscanner.alerts.sink import AlertSink
 from pscanner.config import PaperTradingConfig
+from pscanner.poly.data import DataClient
+from pscanner.poly.gamma import GammaClient
 from pscanner.poly.ids import AssetId, ConditionId
 from pscanner.store.repo import (
     MarketCacheRepo,
@@ -73,6 +75,8 @@ class PaperTrader:
         tracked_wallets: TrackedWalletsRepo,
         paper_trades: PaperTradesRepo,
         market_ticks: MarketTicksRepo,
+        data_client: DataClient,
+        gamma_client: GammaClient,
     ) -> None:
         """Bind dependencies. Subscribers must call :meth:`subscribe` separately.
 
@@ -82,12 +86,19 @@ class PaperTrader:
             tracked_wallets: Lookup for the source wallet's edge metadata.
             paper_trades: Repo that owns the entry/exit ledger.
             market_ticks: Tick history repo for the entry-price lookup.
+            data_client: Polymarket data-API client. Used by the cache-miss
+                fallback to discover an unknown market's slug from one of its
+                trades.
+            gamma_client: Polymarket gamma-API client. Used by the cache-miss
+                fallback to fetch the full ``Market`` once a slug is known.
         """
         self._config = config
         self._market_cache = market_cache
         self._tracked_wallets = tracked_wallets
         self._paper_trades = paper_trades
         self._market_ticks = market_ticks
+        self._data_client = data_client
+        self._gamma_client = gamma_client
         self._pending_tasks: set[asyncio.Task[None]] = set()
 
     async def run(self, sink: AlertSink) -> None:
@@ -123,7 +134,7 @@ class PaperTrader:
         wallet, cond, side = parsed
         if not self._wallet_passes_edge_filter(wallet):
             return
-        resolved = self._resolve_outcome(cond, side)
+        resolved = await self._resolve_outcome(cond, side)
         if resolved is None:
             return
         asset_id, fill_price = resolved
@@ -220,29 +231,76 @@ class PaperTrader:
             return False
         return True
 
-    def _resolve_outcome(
+    async def _resolve_outcome(
         self,
         condition_id: ConditionId,
         side: str,
     ) -> tuple[AssetId, float] | None:
         """Map ``side`` (outcome name) to ``(asset_id, fill_price)``.
 
-        Returns ``None`` when the market is not cached, the outcome name is
-        not in the cached outcomes, no price is available, or the price is
-        outside ``(0, 1)``.
+        Returns ``None`` when the market is not cached (and cannot be
+        backfilled), the outcome name is not in the cached outcomes, no
+        price is available, or the price is outside ``(0, 1)``.
         """
         asset_id = self._market_cache.outcome_to_asset(condition_id, side)
         if asset_id is None:
-            _LOG.warning(
-                "paper_trade.outcome_unmappable",
-                condition_id=condition_id,
-                side=side,
-            )
-            return None
+            if await self._backfill_market_cache(condition_id):
+                asset_id = self._market_cache.outcome_to_asset(condition_id, side)
+            if asset_id is None:
+                _LOG.warning(
+                    "paper_trade.outcome_unmappable",
+                    condition_id=condition_id,
+                    side=side,
+                )
+                return None
         fill_price = self._lookup_fill_price(asset_id)
         if fill_price is None:
             return None
         return (asset_id, fill_price)
+
+    async def _backfill_market_cache(self, condition_id: ConditionId) -> bool:
+        """Fetch a market's metadata via gamma and write it to ``market_cache``.
+
+        Two-step sequence: the data-api ``/trades`` endpoint exposes a
+        market's slug per trade row, gamma's ``/markets?slug=`` returns the
+        full ``Market``. Returns ``True`` on success, ``False`` if either
+        step fails or raises.
+
+        Args:
+            condition_id: The market's on-chain condition id.
+
+        Returns:
+            ``True`` when the cache was successfully populated.
+        """
+        try:
+            slug = await self._data_client.get_market_slug_by_condition_id(
+                condition_id,
+            )
+            if slug is None:
+                _LOG.debug("paper_trader.no_slug", condition_id=condition_id)
+                return False
+            market = await self._gamma_client.get_market_by_slug(slug)
+            if market is None:
+                _LOG.debug(
+                    "paper_trader.no_gamma_market",
+                    condition_id=condition_id,
+                    slug=slug,
+                )
+                return False
+        except Exception:
+            _LOG.warning(
+                "paper_trader.backfill_failed",
+                condition_id=condition_id,
+                exc_info=True,
+            )
+            return False
+        self._market_cache.upsert(market)
+        _LOG.info(
+            "paper_trader.market_cache_backfilled",
+            condition_id=condition_id,
+            slug=market.slug,
+        )
+        return True
 
     def _lookup_fill_price(self, asset_id: AssetId) -> float | None:
         """Read the latest ``best_ask`` (or ``last_trade_price`` fallback)."""

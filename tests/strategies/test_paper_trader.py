@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -11,6 +12,7 @@ from pscanner.alerts.models import Alert
 from pscanner.alerts.sink import AlertSink
 from pscanner.config import PaperTradingConfig
 from pscanner.poly.ids import AssetId, ConditionId, MarketId
+from pscanner.poly.models import Market
 from pscanner.store.repo import (
     AlertsRepo,
     CachedMarket,
@@ -121,8 +123,26 @@ def _seed_tick(
     conn.commit()
 
 
+def _default_data_client() -> AsyncMock:
+    """Default mock that signals "no slug for this market" so the backfill no-ops."""
+    client = AsyncMock()
+    client.get_market_slug_by_condition_id.return_value = None
+    return client
+
+
+def _default_gamma_client() -> AsyncMock:
+    """Default mock that signals "no market for this slug" so the backfill no-ops."""
+    client = AsyncMock()
+    client.get_market_by_slug.return_value = None
+    return client
+
+
 def _build_trader(
-    tmp_db: sqlite3.Connection, cfg: PaperTradingConfig
+    tmp_db: sqlite3.Connection,
+    cfg: PaperTradingConfig,
+    *,
+    data_client: AsyncMock | None = None,
+    gamma_client: AsyncMock | None = None,
 ) -> tuple[
     AlertSink,
     PaperTrader,
@@ -140,6 +160,8 @@ def _build_trader(
         tracked_wallets=wallets,
         paper_trades=paper,
         market_ticks=MarketTicksRepo(tmp_db),
+        data_client=data_client or _default_data_client(),
+        gamma_client=gamma_client or _default_gamma_client(),
     )
     sink.subscribe(trader.handle_alert_sync)
     return sink, trader, cache, wallets, paper
@@ -315,6 +337,130 @@ async def test_paper_trader_idempotent_on_duplicate_alert_key(
     assert len(paper.list_open_positions()) == 1
 
 
+async def test_paper_trader_backfills_market_cache_on_miss(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """On cache miss, fetch slug via data-api, market via gamma, then retry."""
+    cfg = PaperTradingConfig(enabled=True)
+    data_client = AsyncMock()
+    data_client.get_market_slug_by_condition_id.return_value = "test-slug"
+    gamma_client = AsyncMock()
+    gamma_client.get_market_by_slug.return_value = Market.model_validate(
+        {
+            "id": "mkt-1",
+            "conditionId": "0xcond-1",
+            "question": "Test",
+            "slug": "test-slug",
+            "outcomes": ["Yes", "No"],
+            "outcomePrices": ["0.6", "0.4"],
+            "clobTokenIds": ["asset-yes", "asset-no"],
+            "active": True,
+            "closed": False,
+            "liquidity": 1.0,
+            "volume": 1.0,
+        },
+    )
+
+    sink, trader, cache, wallets, paper = _build_trader(
+        tmp_db,
+        cfg,
+        data_client=data_client,
+        gamma_client=gamma_client,
+    )
+    _track_wallet(wallets, weighted_edge=0.4)
+    # Note: market_cache is intentionally empty to trigger the miss.
+    _seed_tick(tmp_db, asset_id="asset-yes", best_ask=0.5)
+
+    await sink.emit(_smart_money_alert())
+    await _drain()
+    await trader.aclose()
+
+    # Backfill ran and the entry was inserted at the resolved asset_id.
+    open_positions = paper.list_open_positions()
+    assert len(open_positions) == 1
+    assert open_positions[0].asset_id == AssetId("asset-yes")
+
+    # And market_cache now carries the row.
+    cached = cache.get_by_condition_id(ConditionId("0xcond-1"))
+    assert cached is not None
+    assert cached.outcomes == ["Yes", "No"]
+    assert cached.asset_ids == [AssetId("asset-yes"), AssetId("asset-no")]
+
+    data_client.get_market_slug_by_condition_id.assert_awaited_once_with("0xcond-1")
+    gamma_client.get_market_by_slug.assert_awaited_once_with("test-slug")
+
+
+async def test_paper_trader_skips_when_backfill_finds_no_slug(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """If the data-api has no trades on the market, skip cleanly."""
+    cfg = PaperTradingConfig(enabled=True)
+    data_client = AsyncMock()
+    data_client.get_market_slug_by_condition_id.return_value = None
+    gamma_client = AsyncMock()
+    sink, trader, _cache, wallets, paper = _build_trader(
+        tmp_db,
+        cfg,
+        data_client=data_client,
+        gamma_client=gamma_client,
+    )
+    _track_wallet(wallets, weighted_edge=0.4)
+
+    await sink.emit(_smart_money_alert())
+    await _drain()
+    await trader.aclose()
+
+    assert paper.list_open_positions() == []
+    gamma_client.get_market_by_slug.assert_not_awaited()
+
+
+async def test_paper_trader_skips_when_backfill_finds_no_market(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """If gamma doesn't recognise the slug, skip cleanly."""
+    cfg = PaperTradingConfig(enabled=True)
+    data_client = AsyncMock()
+    data_client.get_market_slug_by_condition_id.return_value = "test-slug"
+    gamma_client = AsyncMock()
+    gamma_client.get_market_by_slug.return_value = None
+    sink, trader, _cache, wallets, paper = _build_trader(
+        tmp_db,
+        cfg,
+        data_client=data_client,
+        gamma_client=gamma_client,
+    )
+    _track_wallet(wallets, weighted_edge=0.4)
+
+    await sink.emit(_smart_money_alert())
+    await _drain()
+    await trader.aclose()
+
+    assert paper.list_open_positions() == []
+
+
+async def test_paper_trader_swallows_backfill_exception(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """A network/HTTP failure inside the backfill leaves the alert as a no-op."""
+    cfg = PaperTradingConfig(enabled=True)
+    data_client = AsyncMock()
+    data_client.get_market_slug_by_condition_id.side_effect = RuntimeError("boom")
+    gamma_client = AsyncMock()
+    sink, trader, _cache, wallets, paper = _build_trader(
+        tmp_db,
+        cfg,
+        data_client=data_client,
+        gamma_client=gamma_client,
+    )
+    _track_wallet(wallets, weighted_edge=0.4)
+
+    await sink.emit(_smart_money_alert())
+    await _drain()
+    await trader.aclose()
+
+    assert paper.list_open_positions() == []
+
+
 async def test_paper_trader_logs_warning_on_unexpected_db_error(
     tmp_db: sqlite3.Connection,
     monkeypatch: pytest.MonkeyPatch,
@@ -340,6 +486,8 @@ async def test_paper_trader_logs_warning_on_unexpected_db_error(
         tracked_wallets=wallets,
         paper_trades=paper,
         market_ticks=MarketTicksRepo(tmp_db),
+        data_client=AsyncMock(),
+        gamma_client=AsyncMock(),
     )
     sink.subscribe(trader.handle_alert_sync)
     await sink.emit(_smart_money_alert())

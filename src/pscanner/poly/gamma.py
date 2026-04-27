@@ -170,6 +170,32 @@ class GammaClient:
         payload = await self._http.get("/markets", params=params)
         return _parse_list(payload, Market)
 
+    async def get_market_by_slug(self, slug: str) -> Market | None:
+        """Fetch a single market by slug, or ``None`` if no market matches.
+
+        Mirrors :meth:`get_event_by_slug`: gamma's ``/markets`` endpoint
+        accepts a ``slug`` query parameter and returns a (possibly empty)
+        list. Useful for the paper-trader cache-miss fallback when the only
+        identifier we have is the slug a trade row carried.
+
+        Args:
+            slug: Market slug (e.g. ``"nhl-edm-ana-2026-04-26"``).
+
+        Returns:
+            The matching market, or ``None`` if the slug is unknown to gamma.
+
+        Raises:
+            httpx.HTTPStatusError: On non-404 HTTP errors.
+            TypeError: If gamma returns a non-list payload.
+        """
+        payload = await self._http.get("/markets", params={"slug": slug})
+        if not isinstance(payload, list):
+            msg = f"expected JSON array for /markets?slug={slug}, got {type(payload).__name__}"
+            raise TypeError(msg)
+        if not payload:
+            return None
+        return Market.model_validate(payload[0])
+
     async def iter_markets(
         self,
         *,

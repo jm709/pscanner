@@ -546,3 +546,96 @@ async def test_get_market_trades_stops_at_page_cap(
 
     assert data_http.get.await_count == 30
     assert len(out) == 30 * 500
+
+
+async def test_get_market_slug_by_condition_id_returns_slug(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    """``/trades?market=&limit=1`` slug field is surfaced unchanged."""
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    data_http.get.return_value = [
+        {
+            "proxyWallet": "0xa",
+            "timestamp": 1,
+            "size": 1.0,
+            "price": 0.5,
+            "side": "BUY",
+            "outcome": "Yes",
+            "slug": "nhl-edm-ana-2026-04-26",
+            "conditionId": "0xabc",
+        },
+    ]
+
+    slug = await client.get_market_slug_by_condition_id("0xabc")
+
+    assert slug == "nhl-edm-ana-2026-04-26"
+    data_http.get.assert_awaited_once_with(
+        "/trades",
+        params={"market": "0xabc", "limit": 1},
+    )
+
+
+async def test_get_market_slug_by_condition_id_returns_none_when_empty(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    """An empty page (no trades on this market) returns ``None``."""
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    data_http.get.return_value = []
+
+    assert await client.get_market_slug_by_condition_id("0xabc") is None
+
+
+async def test_get_market_slug_by_condition_id_returns_none_when_slug_missing(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    """A trade row that doesn't carry a ``slug`` field returns ``None``."""
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    data_http.get.return_value = [
+        {
+            "proxyWallet": "0xa",
+            "timestamp": 1,
+            "size": 1.0,
+            "price": 0.5,
+            "side": "BUY",
+            "outcome": "Yes",
+            "conditionId": "0xabc",
+        },
+    ]
+
+    assert await client.get_market_slug_by_condition_id("0xabc") is None
+
+
+async def test_get_market_slug_by_condition_id_returns_none_when_slug_blank(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    """A trade row whose ``slug`` is the empty string returns ``None``."""
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    data_http.get.return_value = [
+        {
+            "proxyWallet": "0xa",
+            "timestamp": 1,
+            "size": 1.0,
+            "price": 0.5,
+            "side": "BUY",
+            "outcome": "Yes",
+            "slug": "",
+            "conditionId": "0xabc",
+        },
+    ]
+
+    assert await client.get_market_slug_by_condition_id("0xabc") is None
+
+
+async def test_get_market_slug_by_condition_id_returns_none_when_first_item_not_dict(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    """A malformed first item (not a dict) returns ``None`` rather than raising."""
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    data_http.get.return_value = ["malformed-string-instead-of-dict"]
+
+    assert await client.get_market_slug_by_condition_id("0xabc") is None
