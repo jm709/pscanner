@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from typing import Literal
 from unittest.mock import AsyncMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from pscanner.alerts.models import Alert
 from pscanner.alerts.sink import AlertSink
@@ -25,10 +27,8 @@ from pscanner.store.repo import (
     PaperTradesRepo,
     TrackedWalletsRepo,
 )
-from pscanner.strategies.paper_trader import (
-    PaperTrader,
-    _size_trade,
-)
+from pscanner.strategies.evaluators import ParsedSignal, SmartMoneyEvaluator
+from pscanner.strategies.paper_trader import PaperTrader
 
 _NOW = 1700000000
 
@@ -159,10 +159,14 @@ def _build_trader(
     cache = MarketCacheRepo(tmp_db)
     wallets = TrackedWalletsRepo(tmp_db)
     paper = PaperTradesRepo(tmp_db)
+    smart_money = SmartMoneyEvaluator(
+        config=cfg.evaluators.smart_money,
+        tracked_wallets=wallets,
+    )
     trader = PaperTrader(
         config=cfg,
+        evaluators=[smart_money],
         market_cache=cache,
-        tracked_wallets=wallets,
         paper_trades=paper,
         market_ticks=MarketTicksRepo(tmp_db),
         data_client=data_client or _default_data_client(),
@@ -175,40 +179,6 @@ def _build_trader(
 async def _drain() -> None:
     for _ in range(5):
         await asyncio.sleep(0)
-
-
-def test_size_trade_happy_path() -> None:
-    cfg = PaperTradingConfig(
-        enabled=True,
-        starting_bankroll_usd=1000.0,
-        min_position_cost_usd=0.5,
-        evaluators=EvaluatorsConfig(
-            smart_money=SmartMoneyEvaluatorConfig(position_fraction=0.01),
-        ),
-    )
-    result = _size_trade(nav=1000.0, fill_price=0.5, cfg=cfg)
-    assert result is not None
-    cost, shares = result
-    assert cost == 10.0
-    assert shares == 20.0
-
-
-def test_size_trade_below_minimum_returns_none() -> None:
-    cfg = PaperTradingConfig(
-        min_position_cost_usd=0.50,
-        evaluators=EvaluatorsConfig(
-            smart_money=SmartMoneyEvaluatorConfig(position_fraction=0.01),
-        ),
-    )
-    assert _size_trade(nav=40.0, fill_price=0.5, cfg=cfg) is None
-
-
-def test_size_trade_bad_fill_price_returns_none() -> None:
-    cfg = PaperTradingConfig()
-    assert _size_trade(nav=1000.0, fill_price=0.0, cfg=cfg) is None
-    assert _size_trade(nav=1000.0, fill_price=1.0, cfg=cfg) is None
-    assert _size_trade(nav=1000.0, fill_price=-0.1, cfg=cfg) is None
-    assert _size_trade(nav=1000.0, fill_price=1.5, cfg=cfg) is None
 
 
 async def test_paper_trader_inserts_entry_on_smart_money_alert(
@@ -621,8 +591,13 @@ async def test_paper_trader_logs_warning_on_unexpected_db_error(
 
     trader = PaperTrader(
         config=cfg,
+        evaluators=[
+            SmartMoneyEvaluator(
+                config=cfg.evaluators.smart_money,
+                tracked_wallets=wallets,
+            ),
+        ],
         market_cache=cache,
-        tracked_wallets=wallets,
         paper_trades=paper,
         market_ticks=MarketTicksRepo(tmp_db),
         data_client=AsyncMock(),
@@ -634,3 +609,225 @@ async def test_paper_trader_logs_warning_on_unexpected_db_error(
         await asyncio.sleep(0)
     await trader.aclose()
     assert paper.list_open_positions() == []
+
+
+def _velocity_alert(
+    *,
+    condition_id: str = "0xc1",
+    asset_id: str = "a-y",
+    severity: Literal["low", "med", "high"] = "high",
+    consolidation: bool = False,
+) -> Alert:
+    return Alert(
+        detector="velocity",
+        alert_key=f"velocity:{condition_id}:{asset_id}",
+        severity=severity,
+        title="velocity",
+        body={
+            "condition_id": condition_id,
+            "asset_id": asset_id,
+            "consolidation": consolidation,
+        },
+        created_at=_NOW,
+    )
+
+
+def _seed_market(
+    repo: MarketCacheRepo,
+    *,
+    condition_id: str,
+    outcomes: list[str],
+    asset_ids: list[str],
+    outcome_prices: list[float] | None = None,
+) -> None:
+    """Compatibility wrapper around ``_cache_market`` for new tests."""
+    _cache_market(
+        repo,
+        condition_id=condition_id,
+        outcomes=outcomes,
+        asset_ids=asset_ids,
+        outcome_prices=outcome_prices,
+    )
+
+
+def _stub_data_client() -> AsyncMock:
+    """Alias kept for the new tests' naming style."""
+    return _default_data_client()
+
+
+def _stub_gamma_client() -> AsyncMock:
+    """Alias kept for the new tests' naming style."""
+    return _default_gamma_client()
+
+
+def test_paper_trader_accepts_evaluator_list(tmp_db: sqlite3.Connection) -> None:
+    """The new ctor takes evaluators=[...]; the old tracked_wallets kwarg is gone
+    (smart_money's edge filter now lives inside SmartMoneyEvaluator)."""
+    cfg = PaperTradingConfig(enabled=True)
+    market_cache = MarketCacheRepo(tmp_db)
+    paper = PaperTradesRepo(tmp_db)
+    market_ticks = MarketTicksRepo(tmp_db)
+    data = _stub_data_client()
+    gamma = _stub_gamma_client()
+
+    trader = PaperTrader(
+        config=cfg,
+        evaluators=[],
+        market_cache=market_cache,
+        paper_trades=paper,
+        market_ticks=market_ticks,
+        data_client=data,
+        gamma_client=gamma,
+    )
+    assert trader is not None
+
+
+async def test_evaluate_dispatches_to_first_acceptor(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """PaperTrader walks the list, picks the first ev whose accepts() is True."""
+    seen: list[str] = []
+
+    class _StubEvaluator:
+        def __init__(self, name: str, accepts_detector: str) -> None:
+            self._name = name
+            self._accepts_detector = accepts_detector
+
+        def accepts(self, alert: Alert) -> bool:
+            return alert.detector == self._accepts_detector
+
+        def parse(self, alert: Alert) -> list[ParsedSignal]:
+            del alert
+            seen.append(self._name)
+            return []
+
+        def quality_passes(self, parsed: ParsedSignal) -> bool:
+            del parsed
+            return True
+
+        def size(self, bankroll: float, parsed: ParsedSignal) -> float:
+            del bankroll, parsed
+            return 0.0
+
+    cfg = PaperTradingConfig(enabled=True)
+    paper = PaperTradesRepo(tmp_db)
+    trader = PaperTrader(
+        config=cfg,
+        evaluators=[
+            _StubEvaluator("smart_money_ev", "smart_money"),
+            _StubEvaluator("velocity_ev", "velocity"),
+        ],
+        market_cache=MarketCacheRepo(tmp_db),
+        paper_trades=paper,
+        market_ticks=MarketTicksRepo(tmp_db),
+        data_client=_stub_data_client(),
+        gamma_client=_stub_gamma_client(),
+    )
+
+    await trader.evaluate(_velocity_alert())
+    assert seen == ["velocity_ev"]
+
+
+async def test_evaluator_exception_logs_and_continues(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """A raising evaluator does not kill PaperTrader; warning is logged."""
+
+    class _RaisingEvaluator:
+        def accepts(self, alert: Alert) -> bool:
+            del alert
+            return True
+
+        def parse(self, alert: Alert) -> list[ParsedSignal]:
+            del alert
+            raise RuntimeError("boom")
+
+        def quality_passes(self, parsed: ParsedSignal) -> bool:
+            del parsed
+            return True
+
+        def size(self, bankroll: float, parsed: ParsedSignal) -> float:
+            del bankroll, parsed
+            return 0.0
+
+    cfg = PaperTradingConfig(enabled=True)
+    paper = PaperTradesRepo(tmp_db)
+    trader = PaperTrader(
+        config=cfg,
+        evaluators=[_RaisingEvaluator()],
+        market_cache=MarketCacheRepo(tmp_db),
+        paper_trades=paper,
+        market_ticks=MarketTicksRepo(tmp_db),
+        data_client=_stub_data_client(),
+        gamma_client=_stub_gamma_client(),
+    )
+
+    with capture_logs() as logs:
+        await trader.evaluate(_smart_money_alert())
+    assert any(log["event"] == "paper_trader.evaluator_failed" for log in logs)
+
+
+async def test_evaluate_writes_detector_and_variant_to_entry(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """Each ParsedSignal becomes an insert_entry with the alert detector +
+    parsed rule_variant stamped onto the row."""
+
+    class _DummyEvaluator:
+        def accepts(self, alert: Alert) -> bool:
+            return alert.detector == "velocity"
+
+        def parse(self, alert: Alert) -> list[ParsedSignal]:
+            del alert
+            return [
+                ParsedSignal(
+                    condition_id=ConditionId("0xc1"),
+                    side="yes",
+                    rule_variant="follow",
+                ),
+                ParsedSignal(
+                    condition_id=ConditionId("0xc1"),
+                    side="no",
+                    rule_variant="fade",
+                ),
+            ]
+
+        def quality_passes(self, parsed: ParsedSignal) -> bool:
+            del parsed
+            return True
+
+        def size(self, bankroll: float, parsed: ParsedSignal) -> float:
+            del bankroll, parsed
+            return 2.5
+
+    cfg = PaperTradingConfig(enabled=True)
+    paper = PaperTradesRepo(tmp_db)
+    cache = MarketCacheRepo(tmp_db)
+    _seed_market(
+        cache,
+        condition_id="0xc1",
+        outcomes=["yes", "no"],
+        asset_ids=["a-y", "a-n"],
+    )
+    _seed_tick(tmp_db, asset_id="a-y", best_ask=0.5)
+    _seed_tick(tmp_db, asset_id="a-n", best_ask=0.5)
+
+    trader = PaperTrader(
+        config=cfg,
+        evaluators=[_DummyEvaluator()],
+        market_cache=cache,
+        paper_trades=paper,
+        market_ticks=MarketTicksRepo(tmp_db),
+        data_client=_stub_data_client(),
+        gamma_client=_stub_gamma_client(),
+    )
+
+    await trader.evaluate(_velocity_alert())
+
+    rows = list(
+        tmp_db.execute(
+            "SELECT triggering_alert_detector, rule_variant FROM paper_trades "
+            "WHERE trade_kind = 'entry' ORDER BY trade_id",
+        ),
+    )
+    assert [tuple(r) for r in rows] == [("velocity", "follow"), ("velocity", "fade")]

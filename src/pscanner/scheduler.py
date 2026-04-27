@@ -76,6 +76,7 @@ from pscanner.store.repo import (
     WalletTradesRepo,
     WatchlistRepo,
 )
+from pscanner.strategies.evaluators import SmartMoneyEvaluator
 from pscanner.strategies.paper_resolver import PaperResolver
 from pscanner.strategies.paper_trader import PaperTrader
 from pscanner.util.clock import Clock, RealClock
@@ -349,8 +350,13 @@ class Scanner:
             paper_trades_repo = PaperTradesRepo(self._db)
             detectors["paper_trader"] = PaperTrader(
                 config=self._config.paper_trading,
+                evaluators=[
+                    SmartMoneyEvaluator(
+                        config=self._config.paper_trading.evaluators.smart_money,
+                        tracked_wallets=self._tracked_repo,
+                    ),
+                ],
                 market_cache=self._market_cache_repo,
-                tracked_wallets=self._tracked_repo,
                 paper_trades=paper_trades_repo,
                 market_ticks=self._ticks_repo,
                 data_client=self._clients.data_client,

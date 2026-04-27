@@ -1,10 +1,11 @@
-"""Smart-money copy-trade paper-trading subscriber.
+"""Multi-signal paper-trading subscriber.
 
-Subscribes to :class:`AlertSink`. Filters to ``smart_money`` alerts whose
-source wallet has positive ``weighted_edge``. Resolves the alerted outcome
-to an ``asset_id`` via :class:`MarketCacheRepo` and a fill price via
-``market_ticks``. Sizes trades at ``cfg.evaluators.smart_money.position_fraction`` of cost-basis
-NAV. Inserts an ``entry`` row into ``paper_trades``.
+Subscribes to :class:`AlertSink`. Walks a list of :class:`SignalEvaluator`
+instances; the first one whose ``accepts(alert)`` returns ``True`` parses
+the alert into one or more :class:`ParsedSignal` instances. Each signal is
+independently quality-gated, resolved to an ``asset_id`` + fill price,
+sized at constant ``starting_bankroll_usd * position_fraction``, and
+booked as a ``paper_trades`` entry row.
 """
 
 from __future__ import annotations
@@ -26,33 +27,13 @@ from pscanner.store.repo import (
     MarketCacheRepo,
     MarketTicksRepo,
     PaperTradesRepo,
-    TrackedWalletsRepo,
 )
+from pscanner.strategies.evaluators import ParsedSignal, SignalEvaluator
 
 _LOG = structlog.get_logger(__name__)
 
 _FILL_PRICE_LO = 0.0
 _FILL_PRICE_HI = 1.0
-
-
-def _size_trade(
-    *,
-    nav: float,
-    fill_price: float,
-    cfg: PaperTradingConfig,
-) -> tuple[float, float] | None:
-    """Return ``(cost_usd, shares)`` or ``None`` if the trade can't be sized.
-
-    Returns ``None`` when the computed cost falls below
-    ``min_position_cost_usd`` or when ``fill_price`` is outside ``(0, 1)``.
-    """
-    if not (_FILL_PRICE_LO < fill_price < _FILL_PRICE_HI):
-        return None
-    cost = nav * cfg.evaluators.smart_money.position_fraction
-    if cost < cfg.min_position_cost_usd:
-        return None
-    shares = cost / fill_price
-    return (cost, shares)
 
 
 def _is_valid_price(value: object) -> TypeIs[int | float]:
@@ -62,8 +43,15 @@ def _is_valid_price(value: object) -> TypeIs[int | float]:
     return _FILL_PRICE_LO < value < _FILL_PRICE_HI
 
 
+def _size_valid(cost: float, fill_price: float, *, min_cost: float) -> bool:
+    """Reject sizes below the floor or fill prices outside ``(0, 1)``."""
+    if cost < min_cost:
+        return False
+    return _FILL_PRICE_LO < fill_price < _FILL_PRICE_HI
+
+
 class PaperTrader:
-    """Alert-driven paper-trading subscriber."""
+    """Alert-driven multi-signal paper-trading subscriber."""
 
     name = "paper_trader"
 
@@ -71,8 +59,8 @@ class PaperTrader:
         self,
         *,
         config: PaperTradingConfig,
+        evaluators: list[SignalEvaluator],
         market_cache: MarketCacheRepo,
-        tracked_wallets: TrackedWalletsRepo,
         paper_trades: PaperTradesRepo,
         market_ticks: MarketTicksRepo,
         data_client: DataClient,
@@ -81,9 +69,13 @@ class PaperTrader:
         """Bind dependencies. Subscribers must call :meth:`subscribe` separately.
 
         Args:
-            config: Tuning thresholds (bankroll, fraction, min cost, edge cut).
-            market_cache: Read-side cache mapping condition+outcome to asset_id.
-            tracked_wallets: Lookup for the source wallet's edge metadata.
+            config: Bankroll + min-cost thresholds (per-source tunables live
+                under each evaluator's own config).
+            evaluators: Per-detector :class:`SignalEvaluator` instances. The
+                first one whose ``accepts`` returns ``True`` for an alert
+                runs the parse → quality → size pipeline.
+            market_cache: Read-side cache mapping ``(condition_id, outcome)``
+                to ``asset_id``.
             paper_trades: Repo that owns the entry/exit ledger.
             market_ticks: Tick history repo for the entry-price lookup.
             data_client: Polymarket data-API client. Used by the cache-miss
@@ -93,8 +85,8 @@ class PaperTrader:
                 fallback to fetch the full ``Market`` once a slug is known.
         """
         self._config = config
+        self._evaluators = evaluators
         self._market_cache = market_cache
-        self._tracked_wallets = tracked_wallets
         self._paper_trades = paper_trades
         self._market_ticks = market_ticks
         self._data_client = data_client
@@ -115,8 +107,6 @@ class PaperTrader:
 
     def handle_alert_sync(self, alert: Alert) -> None:
         """:meth:`AlertSink.subscribe` callback. Spawns evaluate as a tracked task."""
-        if alert.detector != "smart_money":
-            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -127,85 +117,97 @@ class PaperTrader:
         task.add_done_callback(self._pending_tasks.discard)
 
     async def evaluate(self, alert: Alert) -> None:
-        """Run the entry pipeline for one smart-money alert."""
-        parsed = self._parse_alert(alert)
-        if parsed is None:
-            return
-        wallet, cond, side = parsed
-        if not self._wallet_passes_edge_filter(wallet):
-            return
-        resolved = await self._resolve_outcome(cond, side)
-        if resolved is None:
-            return
-        asset_id, fill_price = resolved
-        nav = self._paper_trades.compute_cost_basis_nav(
-            starting_bankroll=self._config.starting_bankroll_usd,
-        )
-        if nav <= 0:
-            _LOG.info(
-                "paper_trade.bankroll_exhausted",
-                alert_key=alert.alert_key,
-                nav=nav,
-            )
-            return
-        sized = _size_trade(nav=nav, fill_price=fill_price, cfg=self._config)
-        if sized is None:
-            _LOG.debug(
-                "paper_trade.size_too_small_or_bad_price",
-                alert_key=alert.alert_key,
-                nav=nav,
-                fill_price=fill_price,
-            )
-            return
-        cost_usd, shares = sized
-        self._insert_entry(
-            alert=alert,
-            wallet=wallet,
-            cond=cond,
-            asset_id=asset_id,
-            side=side,
-            shares=shares,
-            fill_price=fill_price,
-            cost_usd=cost_usd,
-            nav=nav,
-        )
+        """Run the evaluator pipeline for one alert.
 
-    def _parse_alert(self, alert: Alert) -> tuple[str, ConditionId, str] | None:
-        """Extract ``(wallet, condition_id, side)`` from a smart-money body."""
-        body = alert.body if isinstance(alert.body, dict) else {}
-        wallet = body.get("wallet")
-        condition_id_str = body.get("condition_id")
-        side = body.get("side")
-        if not (
-            isinstance(wallet, str) and isinstance(condition_id_str, str) and isinstance(side, str)
-        ):
-            _LOG.debug("paper_trader.bad_body", alert_key=alert.alert_key)
-            return None
-        return (wallet, ConditionId(condition_id_str), side)
+        Walks ``self._evaluators`` in order, returning after the first
+        evaluator whose ``accepts`` is ``True``. A raise inside that
+        evaluator's pipeline is logged and contained — it does not
+        propagate to the alert sink.
+        """
+        for evaluator in self._evaluators:
+            if not evaluator.accepts(alert):
+                continue
+            try:
+                await self._run_pipeline(evaluator, alert)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _LOG.warning(
+                    "paper_trader.evaluator_failed",
+                    detector=alert.detector,
+                    evaluator=type(evaluator).__name__,
+                    alert_key=alert.alert_key,
+                    exc_info=True,
+                )
+            return
+
+    async def _run_pipeline(
+        self,
+        evaluator: SignalEvaluator,
+        alert: Alert,
+    ) -> None:
+        """Parse, quality-gate, resolve, size, and insert each ParsedSignal."""
+        parsed_list = evaluator.parse(alert)
+        if not parsed_list:
+            return
+        bankroll = self._config.starting_bankroll_usd
+        nav = self._paper_trades.compute_cost_basis_nav(
+            starting_bankroll=bankroll,
+        )
+        for parsed in parsed_list:
+            if not evaluator.quality_passes(parsed):
+                continue
+            resolved = await self._resolve_outcome(parsed.condition_id, parsed.side)
+            if resolved is None:
+                continue
+            asset_id, fill_price = resolved
+            cost = evaluator.size(bankroll, parsed)
+            if not _size_valid(
+                cost,
+                fill_price,
+                min_cost=self._config.min_position_cost_usd,
+            ):
+                _LOG.debug(
+                    "paper_trade.size_too_small_or_bad_price",
+                    alert_key=alert.alert_key,
+                    cost=cost,
+                    fill_price=fill_price,
+                )
+                continue
+            shares = cost / fill_price
+            self._insert_entry(
+                alert=alert,
+                parsed=parsed,
+                asset_id=asset_id,
+                shares=shares,
+                fill_price=fill_price,
+                cost_usd=cost,
+                nav=nav,
+            )
 
     def _insert_entry(
         self,
         *,
         alert: Alert,
-        wallet: str,
-        cond: ConditionId,
+        parsed: ParsedSignal,
         asset_id: AssetId,
-        side: str,
         shares: float,
         fill_price: float,
         cost_usd: float,
         nav: float,
     ) -> None:
         """Persist the ``entry`` row, swallowing duplicate-key collisions."""
+        wallet = parsed.metadata.get("wallet")
+        source_wallet = wallet if isinstance(wallet, str) else None
         try:
             self._paper_trades.insert_entry(
                 triggering_alert_key=alert.alert_key,
-                triggering_alert_detector="smart_money",
-                rule_variant=None,
-                source_wallet=wallet,
-                condition_id=cond,
+                triggering_alert_detector=alert.detector,
+                rule_variant=parsed.rule_variant,
+                source_wallet=source_wallet,
+                condition_id=parsed.condition_id,
                 asset_id=asset_id,
-                outcome=side,
+                outcome=parsed.side,
                 shares=shares,
                 fill_price=fill_price,
                 cost_usd=cost_usd,
@@ -220,18 +222,6 @@ class PaperTrader:
                 alert_key=alert.alert_key,
                 exc_info=True,
             )
-
-    def _wallet_passes_edge_filter(self, wallet: str) -> bool:
-        """Skip wallets whose ``weighted_edge`` is None or ≤ ``min_weighted_edge``."""
-        tracked = self._tracked_wallets.get(wallet)
-        if tracked is None:
-            _LOG.debug("paper_trader.no_edge", wallet=wallet)
-            return False
-        edge = tracked.weighted_edge
-        if edge is None or edge <= self._config.evaluators.smart_money.min_weighted_edge:
-            _LOG.debug("paper_trader.below_edge", wallet=wallet, edge=edge)
-            return False
-        return True
 
     async def _resolve_outcome(
         self,
@@ -391,4 +381,4 @@ class PaperTrader:
         await asyncio.gather(*self._pending_tasks, return_exceptions=True)
 
 
-__all__ = ["PaperTrader", "_size_trade"]
+__all__ = ["PaperTrader"]
