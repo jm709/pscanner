@@ -672,3 +672,64 @@ def test_alert_severity_threshold_med_at_five() -> None:
     )
     alert = _build_discovered_alert(cluster, [], [])
     assert alert.severity == "med"
+
+
+# ---------------------------------------------------------------------------
+# Signal A — creation cohesion scoring
+# ---------------------------------------------------------------------------
+
+
+def test_compute_creation_cohesion_all_within_window_returns_2() -> None:
+    detector = _make_detector()
+    group = [
+        _first_seen("0xa", first_at=_NOW),
+        _first_seen("0xb", first_at=_NOW + 1000),
+        _first_seen("0xc", first_at=_NOW + 5000),
+    ]
+    # Default creation_window_seconds=86400, so 5000s spread is within.
+    assert detector._compute_creation_cohesion_score(group) == 2
+
+
+def test_compute_creation_cohesion_spread_beyond_window_returns_0() -> None:
+    detector = _make_detector()
+    group = [
+        _first_seen("0xa", first_at=_NOW),
+        _first_seen("0xb", first_at=_NOW + 86_401),  # 1s past 24h
+        _first_seen("0xc", first_at=_NOW + 100_000),
+    ]
+    assert detector._compute_creation_cohesion_score(group) == 0
+
+
+def test_compute_creation_cohesion_all_null_returns_0() -> None:
+    detector = _make_detector()
+    group = [
+        WalletFirstSeen(address="0xa", first_activity_at=None, total_trades=0, cached_at=_NOW),
+        WalletFirstSeen(address="0xb", first_activity_at=None, total_trades=0, cached_at=_NOW),
+        WalletFirstSeen(address="0xc", first_activity_at=None, total_trades=0, cached_at=_NOW),
+    ]
+    assert detector._compute_creation_cohesion_score(group) == 0
+
+
+def test_compute_creation_cohesion_mixed_null_passing() -> None:
+    """Some NULL, remaining >= min_cluster_size, all within window → 2."""
+    detector = _make_detector()
+    group = [
+        _first_seen("0xa", first_at=_NOW),
+        _first_seen("0xb", first_at=_NOW + 100),
+        _first_seen("0xc", first_at=_NOW + 200),
+        WalletFirstSeen(address="0xd", first_activity_at=None, total_trades=0, cached_at=_NOW),
+    ]
+    assert detector._compute_creation_cohesion_score(group) == 2
+
+
+def test_compute_creation_cohesion_mixed_null_below_min_returns_0() -> None:
+    """Some NULL, remaining < min_cluster_size → 0 (cannot conclude clustering)."""
+    detector = _make_detector()
+    # Default min_cluster_size is 3; one non-NULL wallet, three NULL.
+    group = [
+        _first_seen("0xa", first_at=_NOW),
+        WalletFirstSeen(address="0xb", first_activity_at=None, total_trades=0, cached_at=_NOW),
+        WalletFirstSeen(address="0xc", first_activity_at=None, total_trades=0, cached_at=_NOW),
+        WalletFirstSeen(address="0xd", first_activity_at=None, total_trades=0, cached_at=_NOW),
+    ]
+    assert detector._compute_creation_cohesion_score(group) == 0

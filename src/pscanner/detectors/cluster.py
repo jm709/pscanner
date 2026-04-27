@@ -246,6 +246,22 @@ class ClusterDetector:
         if len(wave) >= self._config.min_cluster_size:
             yield wave
 
+    def _compute_creation_cohesion_score(self, group: list[WalletFirstSeen]) -> int:
+        """Score creation-timestamp cohesion for a candidate group.
+
+        Returns 2 if the group's non-NULL ``first_activity_at`` timestamps
+        all fit within ``creation_window_seconds``, else 0. Wallets with
+        NULL ``first_activity_at`` are excluded from the comparison. If the
+        remaining non-NULL set is below ``min_cluster_size``, returns 0 —
+        we can't conclude creation clustering with too few timestamps.
+        """
+        timestamps = [w.first_activity_at for w in group if w.first_activity_at is not None]
+        if len(timestamps) < self._config.min_cluster_size:
+            return 0
+        if max(timestamps) - min(timestamps) <= self._config.creation_window_seconds:
+            return 2
+        return 0
+
     def _score_candidate(
         self,
         group: list[WalletFirstSeen],
@@ -257,9 +273,11 @@ class ClusterDetector:
         """
         wallets = [w.address for w in group]
         score = 0
-        # Signal A — wallet creation clustering (group already passed min size).
-        if len(group) >= self._config.min_cluster_size:
-            score += 2
+        # Signal A — wallet creation clustering. For Path 1 (creation-window
+        # partition) this always returns 2 by construction; for Path 2
+        # (co-occurrence — added in a later task) it is a real bonus when
+        # the discovered cluster also has tight creation timestamps.
+        score += self._compute_creation_cohesion_score(group)
         shared = self._find_shared_obscure_markets(wallets)
         if len(shared) >= self._config.min_shared_markets:
             score += 2
