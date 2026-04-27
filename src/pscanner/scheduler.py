@@ -29,8 +29,10 @@ from typing import Any
 
 import structlog
 
+from pscanner.alerts.protocol import IAlertSink
 from pscanner.alerts.sink import AlertSink
 from pscanner.alerts.terminal import TerminalRenderer
+from pscanner.alerts.worker_sink import WorkerSink
 from pscanner.collectors.activity import ActivityCollector
 from pscanner.collectors.base import Collector
 from pscanner.collectors.events import EventCollector
@@ -152,6 +154,8 @@ class Scanner:
         self._clients = clients or self._build_default_clients()
         self._renderer = TerminalRenderer()
         self._sink = AlertSink(self._alerts_repo, renderer=self._renderer)
+        self._detector_sinks: dict[str, IAlertSink] = {}
+        self._workers: list[WorkerSink] = []
         self._watchlist_registry = WatchlistRegistry(self._watchlist_repo)
         self._tick_stream = BroadcastTickStream()
         self._collectors = self._build_collectors()
@@ -367,6 +371,10 @@ class Scanner:
         Velocity subscribes to the shared :class:`BroadcastTickStream`; if the
         tick collector isn't enabled the stream stays silent and the detector
         would idle forever, so we still gate construction on ticks being on.
+
+        Velocity goes through a per-detector :class:`WorkerSink` that defers
+        the alert-emit work off its tick-consume hot loop. The worker's
+        lifecycle is owned by the scheduler.
         """
         if not self._config.velocity.enabled:
             return
@@ -379,6 +387,15 @@ class Scanner:
             market_cache=self._market_cache_repo,
             clock=self._clock,
         )
+        worker = WorkerSink(
+            self._sink,
+            maxsize=self._config.worker_sink.velocity_maxsize,
+            name="velocity",
+            stats_interval_seconds=self._config.worker_sink.stats_interval_seconds,
+            clock=self._clock,
+        )
+        self._detector_sinks["velocity"] = worker
+        self._workers.append(worker)
 
     @property
     def sink(self) -> AlertSink:
@@ -401,6 +418,8 @@ class Scanner:
 
         Catches :class:`KeyboardInterrupt` to perform graceful shutdown.
         """
+        for worker in self._workers:
+            await worker.start()
         try:
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(self._renderer.run(), name="renderer")
@@ -422,13 +441,14 @@ class Scanner:
     async def _supervise_detector(
         self,
         name: str,
-        run_fn: Callable[[AlertSink], Awaitable[None]],
+        run_fn: Callable[[IAlertSink], Awaitable[None]],
     ) -> None:
         """Restart a detector on unexpected return/exception, up to a cap."""
         restarts: list[float] = []
+        sink: IAlertSink = self._detector_sinks.get(name, self._sink)
         while True:
             try:
-                await run_fn(self._sink)
+                await run_fn(sink)
                 _LOG.warning("scanner.detector.returned", detector=name)
             except asyncio.CancelledError:
                 raise
@@ -712,6 +732,9 @@ class Scanner:
             return
         self._closed = True
         self._collectors_stop.set()
+        for worker in self._workers:
+            with contextlib.suppress(Exception):
+                await worker.aclose()
         with contextlib.suppress(Exception):
             await self._renderer.stop()
         if self._owns_clients:

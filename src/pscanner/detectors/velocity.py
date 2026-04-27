@@ -32,7 +32,7 @@ from typing import Any, cast
 import structlog
 
 from pscanner.alerts.models import Alert, DetectorName, Severity
-from pscanner.alerts.sink import AlertSink
+from pscanner.alerts.protocol import IAlertSink
 from pscanner.config import VelocityConfig
 from pscanner.poly.ids import AssetId, ConditionId
 from pscanner.poly.tick_stream import TickEvent, TickStream
@@ -84,7 +84,7 @@ class PriceVelocityDetector:
         self._mid_history: dict[AssetId, collections.deque[tuple[int, float]]] = {}
         self._tick_history: dict[AssetId, collections.deque[TickEvent]] = {}
 
-    async def run(self, sink: AlertSink) -> None:
+    async def run(self, sink: IAlertSink) -> None:
         """Subscribe to the tick stream and evaluate every incoming event.
 
         The scheduler's TaskGroup drives shutdown; on cancellation we
@@ -102,7 +102,7 @@ class PriceVelocityDetector:
             except Exception:
                 _LOG.exception("velocity.evaluate_failed", asset_id=tick.asset_id)
 
-    async def evaluate(self, tick: TickEvent, sink: AlertSink) -> None:
+    async def evaluate(self, tick: TickEvent, sink: IAlertSink) -> None:
         """Append ``tick`` to the rolling history and emit an alert if tripped.
 
         Public so it can be driven directly from tests.
