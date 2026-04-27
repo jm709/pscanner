@@ -39,11 +39,14 @@ class VelocityEvaluator:
         return alert.detector == "velocity"
 
     def parse(self, alert: Alert) -> list[ParsedSignal]:
-        """Resolve outcome names for follow + fade sides via market cache.
+        """Resolve the alert's asset_id to follow + fade outcome names.
 
-        Returns one signal (follow only) when the cached market has a single
-        outcome, two signals (follow + fade) when binary, and ``[]`` on cache
-        miss / unknown asset_id / missing required body fields.
+        For binary markets, returns 2 ParsedSignals (follow + fade). For
+        markets with more than two outcomes, the fade is assigned to the
+        FIRST non-matching outcome in cache insertion order; remaining
+        outcomes are ignored. For 1-outcome markets, returns just the
+        follow signal. Returns ``[]`` on missing required fields, cache
+        miss, or alert asset_id not in the cached market.
         """
         body = alert.body if isinstance(alert.body, dict) else {}
         condition_id_str = body.get("condition_id")

@@ -104,6 +104,39 @@ def test_parse_returns_two_paired_signals(tmp_db: sqlite3.Connection) -> None:
     assert follow.condition_id == fade.condition_id == ConditionId("0xc1")
 
 
+def test_parse_follow_is_second_outcome_when_alert_on_no(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """Symmetric case: alert on outcomes[1] → follow=no, fade=yes.
+
+    The parallel-list walk must correctly identify follow regardless of
+    which slot the alert's asset_id occupies. A regression in the loop
+    ordering would only show up here, not in the
+    test_parse_returns_two_paired_signals case.
+    """
+    ev, cache = _evaluator(tmp_db)
+    _seed_market(
+        cache,
+        condition_id="0xc1",
+        outcomes=["yes", "no"],
+        asset_ids=["asset-yes", "asset-no"],
+    )
+    body = {
+        "condition_id": "0xc1",
+        "asset_id": "asset-no",  # second outcome
+        "change_pct": -0.12,
+        "consolidation": False,
+    }
+
+    signals = ev.parse(_alert(body=body))
+
+    assert len(signals) == 2
+    follow = next(s for s in signals if s.rule_variant == "follow")
+    fade = next(s for s in signals if s.rule_variant == "fade")
+    assert follow.side == "no"
+    assert fade.side == "yes"
+
+
 def test_parse_returns_empty_on_cache_miss(tmp_db: sqlite3.Connection) -> None:
     """If market_cache has no entry, neither side resolves; skip the alert."""
     ev, _ = _evaluator(tmp_db)
@@ -162,6 +195,15 @@ def test_parse_returns_empty_on_missing_field(tmp_db: sqlite3.Connection) -> Non
     ev, _ = _evaluator(tmp_db)
     # Missing condition_id.
     assert ev.parse(_alert(body={"asset_id": "asset-yes"})) == []
+
+
+def test_parse_returns_empty_on_missing_asset_id(
+    tmp_db: sqlite3.Connection,
+) -> None:
+    """The isinstance guard rejects when asset_id is absent (symmetric to
+    test_parse_returns_empty_on_missing_field which covers condition_id)."""
+    ev, _ = _evaluator(tmp_db)
+    assert ev.parse(_alert(body={"condition_id": "0xc1"})) == []
 
 
 def test_quality_passes_high_severity_no_consolidation(
