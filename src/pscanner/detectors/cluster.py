@@ -335,13 +335,13 @@ class ClusterDetector:
         recent: list[WalletFirstSeen],
         adjacency: dict[str, set[str]],
     ) -> Iterable[list[WalletFirstSeen]]:
-        """BFS the adjacency graph and yield components within size bounds."""
+        """Walk the adjacency graph and yield components within size bounds."""
         by_address = {w.address: w for w in recent}
         visited: set[str] = set()
         for start in sorted(adjacency):
             if start in visited:
                 continue
-            component_addrs = self._bfs_component(start, adjacency)
+            component_addrs = self._reachable_from(start, adjacency)
             visited |= component_addrs
             if len(component_addrs) < self._config.min_cluster_size:
                 continue
@@ -351,6 +351,7 @@ class ClusterDetector:
                     "cluster.cotrade_group_truncated",
                     original_size=len(component_addrs),
                     keep=cap,
+                    first_address=min(component_addrs),
                 )
                 kept = sorted(component_addrs)[:cap]
                 yield [by_address[a] for a in kept]
@@ -358,7 +359,7 @@ class ClusterDetector:
                 yield [by_address[a] for a in sorted(component_addrs)]
 
     @staticmethod
-    def _bfs_component(
+    def _reachable_from(
         start: str,
         adjacency: dict[str, set[str]],
     ) -> set[str]:
