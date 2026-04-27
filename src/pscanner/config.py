@@ -274,6 +274,23 @@ class MoveAttributionConfig(_Section):
     max_contributors_per_burst: int = 50
 
 
+class PaperTradingConfig(_Section):
+    """Thresholds + cadence for the smart-money copy-trade paper strategy.
+
+    Off by default. When enabled, the in-daemon ``PaperTrader`` subscribes
+    to ``AlertSink`` and mirrors ``smart_money`` alerts onto a virtual
+    bankroll. ``PaperResolver`` runs as a periodic detector that books PnL
+    when the underlying market resolves. State lives in ``paper_trades``.
+    """
+
+    enabled: bool = False
+    starting_bankroll_usd: float = 1000.0
+    position_fraction: float = 0.01
+    min_weighted_edge: float = 0.0
+    min_position_cost_usd: float = 0.50
+    resolver_scan_interval_seconds: float = 300.0
+
+
 class Config(BaseModel):
     """Root pscanner config aggregating every section."""
 
@@ -293,6 +310,7 @@ class Config(BaseModel):
     velocity: VelocityConfig = Field(default_factory=VelocityConfig)
     cluster: ClusterConfig = Field(default_factory=ClusterConfig)
     move_attribution: MoveAttributionConfig = Field(default_factory=MoveAttributionConfig)
+    paper_trading: PaperTradingConfig = Field(default_factory=PaperTradingConfig)
 
     @classmethod
     def load(cls, path: Path | None = None) -> Config:
