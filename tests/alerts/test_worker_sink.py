@@ -15,7 +15,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import pytest
-import structlog  # noqa: F401 — re-exported helper from T1 imports
 from structlog.testing import capture_logs
 
 import pscanner.alerts.worker_sink as ws_mod

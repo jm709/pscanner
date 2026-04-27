@@ -124,12 +124,12 @@ class WorkerSink:
                     remaining=self._queue.qsize(),
                 )
             self._drain_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._drain_task
             self._drain_task = None
         if self._stats_task is not None:
             self._stats_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._stats_task
             self._stats_task = None
 
