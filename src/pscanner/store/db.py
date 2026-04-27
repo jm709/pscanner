@@ -231,6 +231,30 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_wcm_wallet ON wallet_cluster_members(wallet)",
+    """
+    CREATE TABLE IF NOT EXISTS paper_trades (
+      trade_id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      trade_kind           TEXT    NOT NULL,
+      triggering_alert_key TEXT,
+      parent_trade_id      INTEGER,
+      source_wallet        TEXT,
+      condition_id         TEXT    NOT NULL,
+      asset_id             TEXT    NOT NULL,
+      outcome              TEXT    NOT NULL,
+      shares               REAL    NOT NULL,
+      fill_price           REAL    NOT NULL,
+      cost_usd             REAL    NOT NULL,
+      nav_after_usd        REAL    NOT NULL,
+      ts                   INTEGER NOT NULL,
+      FOREIGN KEY (parent_trade_id) REFERENCES paper_trades(trade_id)
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_trades_alert_key "
+    "ON paper_trades(triggering_alert_key) "
+    "WHERE trade_kind = 'entry' AND triggering_alert_key IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_paper_trades_open "
+    "ON paper_trades(condition_id, asset_id) WHERE trade_kind = 'entry'",
+    "CREATE INDEX IF NOT EXISTS idx_paper_trades_parent ON paper_trades(parent_trade_id)",
 )
 
 _MIGRATIONS: tuple[str, ...] = (

@@ -2121,3 +2121,203 @@ class WalletClusterMembersRepo:
         if row is None:
             return None
         return row["cluster_id"]
+
+
+@dataclass(frozen=True, slots=True)
+class OpenPaperPosition:
+    """An entry row in ``paper_trades`` with no matching exit."""
+
+    trade_id: int
+    triggering_alert_key: str | None
+    source_wallet: str | None
+    condition_id: ConditionId
+    asset_id: AssetId
+    outcome: str
+    shares: float
+    fill_price: float
+    cost_usd: float
+    nav_after_usd: float
+    ts: int
+
+
+@dataclass(frozen=True, slots=True)
+class PaperSummary:
+    """Aggregate stats for the ``paper status`` CLI."""
+
+    starting_bankroll: float
+    current_nav: float
+    total_return_pct: float
+    realized_pnl: float
+    open_positions: int
+    closed_positions: int
+
+
+class PaperTradesRepo:
+    """CRUD + aggregates for the ``paper_trades`` table.
+
+    ``paper_trades`` stores both entries (``trade_kind = 'entry'``) and exits
+    (``trade_kind = 'exit'``). An exit row's ``parent_trade_id`` points at the
+    entry it closes; an entry with no matching exit is an open position.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        """Bind the repo to an already-initialised connection."""
+        self._conn = conn
+
+    def insert_entry(
+        self,
+        *,
+        triggering_alert_key: str | None,
+        source_wallet: str | None,
+        condition_id: ConditionId,
+        asset_id: AssetId,
+        outcome: str,
+        shares: float,
+        fill_price: float,
+        cost_usd: float,
+        nav_after_usd: float,
+        ts: int,
+    ) -> int:
+        """Insert an entry row and return its ``trade_id``.
+
+        A non-null ``triggering_alert_key`` is unique among entries — re-inserting
+        the same key raises ``sqlite3.IntegrityError`` so callers can dedupe by
+        alert without an extra SELECT.
+        """
+        cur = self._conn.execute(
+            """
+            INSERT INTO paper_trades (
+              trade_kind, triggering_alert_key, parent_trade_id, source_wallet,
+              condition_id, asset_id, outcome, shares, fill_price, cost_usd,
+              nav_after_usd, ts
+            ) VALUES ('entry', ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                triggering_alert_key,
+                source_wallet,
+                condition_id,
+                asset_id,
+                outcome,
+                shares,
+                fill_price,
+                cost_usd,
+                nav_after_usd,
+                ts,
+            ),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid or 0)
+
+    def insert_exit(
+        self,
+        *,
+        parent_trade_id: int,
+        condition_id: ConditionId,
+        asset_id: AssetId,
+        outcome: str,
+        shares: float,
+        fill_price: float,
+        cost_usd: float,
+        nav_after_usd: float,
+        ts: int,
+    ) -> int:
+        """Insert an exit row linked to ``parent_trade_id``; return its ``trade_id``."""
+        cur = self._conn.execute(
+            """
+            INSERT INTO paper_trades (
+              trade_kind, triggering_alert_key, parent_trade_id, source_wallet,
+              condition_id, asset_id, outcome, shares, fill_price, cost_usd,
+              nav_after_usd, ts
+            ) VALUES ('exit', NULL, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                parent_trade_id,
+                condition_id,
+                asset_id,
+                outcome,
+                shares,
+                fill_price,
+                cost_usd,
+                nav_after_usd,
+                ts,
+            ),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid or 0)
+
+    def list_open_positions(self) -> list[OpenPaperPosition]:
+        """Return entries with no matching exit, oldest first."""
+        rows = self._conn.execute(
+            """
+            SELECT e.trade_id, e.triggering_alert_key, e.source_wallet,
+                   e.condition_id, e.asset_id, e.outcome, e.shares,
+                   e.fill_price, e.cost_usd, e.nav_after_usd, e.ts
+              FROM paper_trades e
+             WHERE e.trade_kind = 'entry'
+               AND NOT EXISTS (
+                 SELECT 1 FROM paper_trades x
+                  WHERE x.parent_trade_id = e.trade_id
+               )
+             ORDER BY e.ts ASC
+            """,
+        ).fetchall()
+        return [
+            OpenPaperPosition(
+                trade_id=int(r["trade_id"]),
+                triggering_alert_key=r["triggering_alert_key"],
+                source_wallet=r["source_wallet"],
+                condition_id=ConditionId(r["condition_id"]),
+                asset_id=AssetId(r["asset_id"]),
+                outcome=r["outcome"],
+                shares=float(r["shares"]),
+                fill_price=float(r["fill_price"]),
+                cost_usd=float(r["cost_usd"]),
+                nav_after_usd=float(r["nav_after_usd"]),
+                ts=int(r["ts"]),
+            )
+            for r in rows
+        ]
+
+    def compute_cost_basis_nav(self, *, starting_bankroll: float) -> float:
+        """Return ``starting_bankroll + realized_pnl``.
+
+        Realized PnL is the sum of ``exit.cost_usd - parent_entry.cost_usd``
+        across resolved trades. Open positions sit at cost basis and contribute
+        nothing to NAV until they are closed.
+        """
+        row = self._conn.execute(
+            """
+            SELECT COALESCE(SUM(x.cost_usd - e.cost_usd), 0.0) AS realized_pnl
+              FROM paper_trades x
+              JOIN paper_trades e ON e.trade_id = x.parent_trade_id
+             WHERE x.trade_kind = 'exit' AND e.trade_kind = 'entry'
+            """,
+        ).fetchone()
+        realized = float(row["realized_pnl"] or 0.0)
+        return starting_bankroll + realized
+
+    def summary_stats(self, *, starting_bankroll: float) -> PaperSummary:
+        """Aggregate stats for the ``paper status`` CLI."""
+        nav = self.compute_cost_basis_nav(starting_bankroll=starting_bankroll)
+        realized = nav - starting_bankroll
+        open_n = self._conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM paper_trades e
+             WHERE e.trade_kind = 'entry'
+               AND NOT EXISTS (
+                 SELECT 1 FROM paper_trades x
+                  WHERE x.parent_trade_id = e.trade_id
+               )
+            """,
+        ).fetchone()
+        closed_n = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM paper_trades WHERE trade_kind = 'exit'",
+        ).fetchone()
+        return PaperSummary(
+            starting_bankroll=starting_bankroll,
+            current_nav=nav,
+            total_return_pct=(realized / starting_bankroll * 100.0) if starting_bankroll else 0.0,
+            realized_pnl=realized,
+            open_positions=int(open_n["n"]),
+            closed_positions=int(closed_n["n"]),
+        )
