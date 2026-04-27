@@ -94,6 +94,31 @@ def _cached_market(
     )
 
 
+def _obscure_market(condition_id: str) -> CachedMarket:
+    """CachedMarket that passes _is_obscure_market (low liquidity AND volume)."""
+    return _cached_market(
+        condition_id=condition_id,
+        liquidity=_OBSCURE_LIQUIDITY,
+        volume=_OBSCURE_VOLUME,
+    )
+
+
+def _high_volume_market(condition_id: str) -> CachedMarket:
+    """CachedMarket above the obscurity caps (liquidity > 50k OR volume > 1M)."""
+    return _cached_market(
+        condition_id=condition_id,
+        liquidity=100_000.0,
+        volume=2_000_000.0,
+    )
+
+
+def _wallet_trades_for_markets(wallet: str, condition_ids: list[str]) -> list[WalletTrade]:
+    """One BUY trade per condition_id, distinct asset_ids per market."""
+    return [
+        _trade(wallet=wallet, condition_id=cid, asset_id=f"{cid}-asset") for cid in condition_ids
+    ]
+
+
 class StubFirstSeenRepo:
     """In-memory ``WalletFirstSeenRepo.list_recent`` stub."""
 
@@ -733,3 +758,148 @@ def test_compute_creation_cohesion_mixed_null_below_min_returns_0() -> None:
         WalletFirstSeen(address="0xd", first_activity_at=None, total_trades=0, cached_at=_NOW),
     ]
     assert detector._compute_creation_cohesion_score(group) == 0
+
+
+# ---------------------------------------------------------------------------
+# _iter_co_trade_groups — organic discovery via shared-obscure-market overlap
+# ---------------------------------------------------------------------------
+
+
+def test_co_trade_groups_happy_path() -> None:
+    """4 wallets each trading the same 3 obscure markets → 1 component of 4."""
+    markets = ["0xm1", "0xm2", "0xm3"]
+    wallets = ["0xa", "0xb", "0xc", "0xd"]
+    trades = StubTradesRepo(per_wallet={w: _wallet_trades_for_markets(w, markets) for w in wallets})
+    market_cache = StubMarketCache({m: _obscure_market(m) for m in markets})
+    detector = _make_detector(trades=trades, market_cache=market_cache)
+    recent = [_first_seen(w, first_at=_NOW + i * 86_400 * 30) for i, w in enumerate(wallets)]
+
+    groups = list(detector._iter_co_trade_groups(recent))
+
+    assert len(groups) == 1
+    assert sorted(w.address for w in groups[0]) == sorted(wallets)
+
+
+def test_co_trade_groups_below_threshold() -> None:
+    """4 wallets sharing 2 obscure markets — below default min_shared_markets=3."""
+    markets = ["0xm1", "0xm2"]
+    wallets = ["0xa", "0xb", "0xc", "0xd"]
+    trades = StubTradesRepo(per_wallet={w: _wallet_trades_for_markets(w, markets) for w in wallets})
+    market_cache = StubMarketCache({m: _obscure_market(m) for m in markets})
+    detector = _make_detector(trades=trades, market_cache=market_cache)
+    recent = [_first_seen(w, first_at=_NOW) for w in wallets]
+
+    assert list(detector._iter_co_trade_groups(recent)) == []
+
+
+def test_co_trade_groups_transitive_closure() -> None:
+    """A-B share 3, B-C share 3, A-C share 0 → ABC one component (transitive)."""
+    ab_markets = ["0xab1", "0xab2", "0xab3"]
+    bc_markets = ["0xbc1", "0xbc2", "0xbc3"]
+    trades = StubTradesRepo(
+        per_wallet={
+            "0xa": _wallet_trades_for_markets("0xa", ab_markets),
+            "0xb": _wallet_trades_for_markets("0xb", ab_markets + bc_markets),
+            "0xc": _wallet_trades_for_markets("0xc", bc_markets),
+        }
+    )
+    market_cache = StubMarketCache({m: _obscure_market(m) for m in ab_markets + bc_markets})
+    detector = _make_detector(trades=trades, market_cache=market_cache)
+    recent = [_first_seen(w, first_at=_NOW) for w in ["0xa", "0xb", "0xc"]]
+
+    groups = list(detector._iter_co_trade_groups(recent))
+
+    assert len(groups) == 1
+    assert sorted(w.address for w in groups[0]) == ["0xa", "0xb", "0xc"]
+
+
+def test_co_trade_groups_two_disjoint_clusters() -> None:
+    """6 wallets: ABC trade markets X, DEF trade markets Y → 2 components."""
+    x_markets = ["0xx1", "0xx2", "0xx3"]
+    y_markets = ["0xy1", "0xy2", "0xy3"]
+    trades = StubTradesRepo(
+        per_wallet={
+            "0xa": _wallet_trades_for_markets("0xa", x_markets),
+            "0xb": _wallet_trades_for_markets("0xb", x_markets),
+            "0xc": _wallet_trades_for_markets("0xc", x_markets),
+            "0xd": _wallet_trades_for_markets("0xd", y_markets),
+            "0xe": _wallet_trades_for_markets("0xe", y_markets),
+            "0xf": _wallet_trades_for_markets("0xf", y_markets),
+        }
+    )
+    market_cache = StubMarketCache({m: _obscure_market(m) for m in x_markets + y_markets})
+    detector = _make_detector(trades=trades, market_cache=market_cache)
+    recent = [_first_seen(w, first_at=_NOW) for w in ["0xa", "0xb", "0xc", "0xd", "0xe", "0xf"]]
+
+    groups = list(detector._iter_co_trade_groups(recent))
+
+    component_addrs = sorted(sorted(w.address for w in g) for g in groups)
+    assert component_addrs == [["0xa", "0xb", "0xc"], ["0xd", "0xe", "0xf"]]
+
+
+def test_co_trade_groups_skip_components_below_min_size() -> None:
+    """A-B share 5 markets but no third connected wallet → component size 2 < 3 → skipped."""
+    markets = ["0xm1", "0xm2", "0xm3", "0xm4", "0xm5"]
+    trades = StubTradesRepo(
+        per_wallet={
+            "0xa": _wallet_trades_for_markets("0xa", markets),
+            "0xb": _wallet_trades_for_markets("0xb", markets),
+        }
+    )
+    market_cache = StubMarketCache({m: _obscure_market(m) for m in markets})
+    detector = _make_detector(trades=trades, market_cache=market_cache)
+    recent = [_first_seen(w, first_at=_NOW) for w in ["0xa", "0xb"]]
+
+    assert list(detector._iter_co_trade_groups(recent)) == []
+
+
+def test_co_trade_groups_isolated_wallets_not_yielded() -> None:
+    """ABC connected via shared markets; D and E trade nothing → only ABC yielded."""
+    markets = ["0xm1", "0xm2", "0xm3"]
+    trades = StubTradesRepo(
+        per_wallet={
+            "0xa": _wallet_trades_for_markets("0xa", markets),
+            "0xb": _wallet_trades_for_markets("0xb", markets),
+            "0xc": _wallet_trades_for_markets("0xc", markets),
+        }
+    )
+    market_cache = StubMarketCache({m: _obscure_market(m) for m in markets})
+    detector = _make_detector(trades=trades, market_cache=market_cache)
+    recent = [_first_seen(w, first_at=_NOW) for w in ["0xa", "0xb", "0xc", "0xd", "0xe"]]
+
+    groups = list(detector._iter_co_trade_groups(recent))
+
+    assert len(groups) == 1
+    assert sorted(w.address for w in groups[0]) == ["0xa", "0xb", "0xc"]
+
+
+def test_co_trade_groups_excludes_non_obscure_markets() -> None:
+    """4 wallets sharing 5 high-volume (non-obscure) markets → 0 components."""
+    markets = ["0xm1", "0xm2", "0xm3", "0xm4", "0xm5"]
+    trades = StubTradesRepo(
+        per_wallet={w: _wallet_trades_for_markets(w, markets) for w in ["0xa", "0xb", "0xc", "0xd"]}
+    )
+    market_cache = StubMarketCache({m: _high_volume_market(m) for m in markets})
+    detector = _make_detector(trades=trades, market_cache=market_cache)
+    recent = [_first_seen(w, first_at=_NOW) for w in ["0xa", "0xb", "0xc", "0xd"]]
+
+    assert list(detector._iter_co_trade_groups(recent)) == []
+
+
+def test_co_trade_groups_size_cap_truncates() -> None:
+    """200 wallets sharing 3 obscure markets → 1 component truncated to 100."""
+    markets = ["0xm1", "0xm2", "0xm3"]
+    n = 200
+    addrs = [f"0x{i:04x}" for i in range(n)]
+    trades = StubTradesRepo(per_wallet={a: _wallet_trades_for_markets(a, markets) for a in addrs})
+    market_cache = StubMarketCache({m: _obscure_market(m) for m in markets})
+    cfg = ClusterConfig(max_co_trade_group_size=100)
+    detector = _make_detector(config=cfg, trades=trades, market_cache=market_cache)
+    recent = [_first_seen(a, first_at=_NOW) for a in addrs]
+
+    groups = list(detector._iter_co_trade_groups(recent))
+
+    assert len(groups) == 1
+    assert len(groups[0]) == 100
+    expected_kept = sorted(addrs)[:100]
+    assert sorted(w.address for w in groups[0]) == expected_kept

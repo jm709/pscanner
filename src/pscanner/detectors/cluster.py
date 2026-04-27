@@ -246,6 +246,126 @@ class ClusterDetector:
         if len(wave) >= self._config.min_cluster_size:
             yield wave
 
+    def _iter_co_trade_groups(
+        self,
+        recent: list[WalletFirstSeen],
+    ) -> Iterable[list[WalletFirstSeen]]:
+        """Yield candidate groups derived from shared-obscure-market overlap.
+
+        For each pair of wallets in ``recent``, count their shared obscure
+        markets. Wallets connected by edges of >= ``min_shared_markets``
+        shared markets form connected components; each component of size
+        in ``[min_cluster_size, max_co_trade_group_size]`` is yielded.
+
+        This path is independent of creation timestamps — it discovers
+        clusters that grew organically over time. Existing scoring
+        (B/C/D + the refactored Signal A) is applied per component.
+        """
+        if len(recent) < self._config.min_cluster_size:
+            return
+
+        obscure_markets = self._build_obscure_markets_index(recent)
+        adjacency = self._build_cotrade_adjacency(obscure_markets)
+        yield from self._yield_components(recent, adjacency)
+
+    def _build_obscure_markets_index(
+        self,
+        recent: list[WalletFirstSeen],
+    ) -> dict[str, set[ConditionId]]:
+        """Per-wallet set of obscure-market condition_ids.
+
+        Per-wallet ``recent_for_wallet`` failures are isolated — that
+        wallet's set is treated as empty (no edges incident on it). Other
+        wallets unaffected.
+        """
+        index: dict[str, set[ConditionId]] = {}
+        for wallet in recent:
+            try:
+                trades = self._trades.recent_for_wallet(
+                    wallet.address,
+                    limit=_RECENT_TRADE_LIMIT,
+                )
+            except Exception:
+                _LOG.warning(
+                    "cluster.cotrade_trades_failed",
+                    wallet=wallet.address,
+                    exc_info=True,
+                )
+                index[wallet.address] = set()
+                continue
+            obscure: set[ConditionId] = set()
+            for trade in trades:
+                cached = self._market_cache.get_by_condition_id(trade.condition_id)
+                if cached is None:
+                    continue
+                if not self._is_obscure_market(cached):
+                    continue
+                obscure.add(trade.condition_id)
+            index[wallet.address] = obscure
+        return index
+
+    def _build_cotrade_adjacency(
+        self,
+        obscure_markets: dict[str, set[ConditionId]],
+    ) -> dict[str, set[str]]:
+        """Build undirected adjacency: edge iff shared obscure markets >= threshold."""
+        adjacency: dict[str, set[str]] = {addr: set() for addr in obscure_markets}
+        addrs = sorted(adjacency)
+        threshold = self._config.min_shared_markets
+        for i, a in enumerate(addrs):
+            ma = obscure_markets[a]
+            if not ma:
+                continue
+            for b in addrs[i + 1 :]:
+                mb = obscure_markets[b]
+                if len(ma & mb) >= threshold:
+                    adjacency[a].add(b)
+                    adjacency[b].add(a)
+        return adjacency
+
+    def _yield_components(
+        self,
+        recent: list[WalletFirstSeen],
+        adjacency: dict[str, set[str]],
+    ) -> Iterable[list[WalletFirstSeen]]:
+        """BFS the adjacency graph and yield components within size bounds."""
+        by_address = {w.address: w for w in recent}
+        visited: set[str] = set()
+        for start in sorted(adjacency):
+            if start in visited:
+                continue
+            component_addrs = self._bfs_component(start, adjacency)
+            visited |= component_addrs
+            if len(component_addrs) < self._config.min_cluster_size:
+                continue
+            cap = self._config.max_co_trade_group_size
+            if len(component_addrs) > cap:
+                _LOG.warning(
+                    "cluster.cotrade_group_truncated",
+                    original_size=len(component_addrs),
+                    keep=cap,
+                )
+                kept = sorted(component_addrs)[:cap]
+                yield [by_address[a] for a in kept]
+            else:
+                yield [by_address[a] for a in sorted(component_addrs)]
+
+    @staticmethod
+    def _bfs_component(
+        start: str,
+        adjacency: dict[str, set[str]],
+    ) -> set[str]:
+        """Return the set of addresses reachable from ``start`` (inclusive)."""
+        component: set[str] = {start}
+        queue: list[str] = [start]
+        while queue:
+            current = queue.pop()
+            for neighbor in adjacency.get(current, set()):
+                if neighbor not in component:
+                    component.add(neighbor)
+                    queue.append(neighbor)
+        return component
+
     def _compute_creation_cohesion_score(self, group: list[WalletFirstSeen]) -> int:
         """Score creation-timestamp cohesion for a candidate group.
 
