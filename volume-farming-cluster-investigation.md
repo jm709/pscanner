@@ -193,11 +193,10 @@ is the primary artifact.
 
 ## Open follow-ups
 
-- **`ClusterDetector` Signal A limitation.** File an issue: detector gates on
-  24h creation clustering, missing organically-growing operations. Possible
-  fix: add a parallel scan path that uses Signal B (shared markets) as the
-  starting point, gathering wallets that co-traded ≥N obscure markets and
-  then checking other signals.
+- **`ClusterDetector` Signal A limitation.** ✅ Resolved 2026-04-27 — the
+  organic-discovery path landed in `feat/cluster-organic` and rediscovered
+  the Cavill cluster automatically (creation spread 86,496s = 24h 1m 36s,
+  just past the gate, found via co-occurrence path).
 - **Polymarket points-farming exploit.** This is real-world product
   intelligence; the operator is investing $1.5M+ to game whatever incentive
   Polymarket is running. Worth flagging upstream if there's a reporting
@@ -211,3 +210,109 @@ is the primary artifact.
   daemon track their ongoing activity and confirm whether the operation
   scales further or stops on a deadline. The 4 already-watchlisted seeds
   (`source=cluster.candidate`) are a small subset.
+
+---
+
+## Update 2026-04-28: A second-generation farming cluster ("Magic / long-shot")
+
+During a 2h paper-trading-expansion smoke run, the `MoveAttributionDetector`
+auto-watchlisted **24 cluster-candidate wallets** triggered by velocity
+alerts on tail markets — most prominently the Orlando Magic NBA Finals
+market (YES = $0.0095). 10 of those came from a single velocity burst on
+the Magic market.
+
+`scripts/expand_cluster.py` on the 10 Magic seeds produced **881
+candidates**, narrowed to **17 strict** by the same signature filter
+(sell_rate<20%, ≥5 markets, ≥10 trades). Investigation results:
+
+### Scale (17 strict candidates)
+
+| metric | value |
+|---|---:|
+| settled positions | 5,096 |
+| total invested | $1,128,478 |
+| total cashPnl | −$390,549 |
+| **ROI** | **−34.6%** |
+| win rate | 30.7% |
+| profitable wallets | 4 of 17 (+$1,269) |
+| unprofitable wallets | 13 of 17 (−$391,818) |
+
+### Strategy fingerprint (concrete: influenz.eth at −56.5%)
+
+Inspecting one representative strict candidate (`0xe8dd7741…`,
+"influenz.eth"):
+
+- 500 of 500 settled positions are buys of **YES tokens only** (no NO buys).
+- 479 of 500 entries at avg_price < $0.05 (i.e. buying outcomes the
+  market thought had <5% probability).
+- 14.6% of those tail bets resolved YES; 85.4% lost the entire entry.
+- Even winners only realized ~1.4× of invested capital (many are
+  intermediate sales, not full $1 redemptions). Aggregate −56.5% ROI.
+
+This is a **long-shot tail-buying strategy**, not a maker-rebate harvest
+(Cavill) and not a uniform dust spray (volume-farming Feb-Apr). The
+fingerprint name "near-certainty arbitrage" — initially used because the
+expansion script's `hi_price_rate` field showed 0.78 — was misleading.
+That field came from the seeds' burst trades on a near-certainty market;
+the strict candidates' actual full trade history is overwhelmingly tail
+buying.
+
+### Creation pattern
+
+Span: 50 days (Mar 8 → Apr 27 2026), accelerating heavily in last 4 days.
+
+| date | wallets created |
+|---|---:|
+| 2026-03-08 to 2026-03-12 | 3 |
+| 2026-04-20 to 2026-04-26 | 8 |
+| 2026-04-27 (single day) | 6 |
+
+Day-of-week skew: 8 of 17 (47%) created Monday; 0 created Tuesday.
+Anomalous vs uniform ~14%/day. The 10-wallet seed batch (separately
+created Apr 24-27) extends this to 27 wallets in 4 days, all converging
+on a small basket of hot retail markets (BTC dip, Iran ops, Iran
+diplomacy, Magic NBA).
+
+### ENS verification
+
+Real on-chain ENS reverse-resolution against api.ensideas.com: **0 of 17
+strict candidates have a real ENS record**. Polymarket allows display
+names that include `.eth` (like "influenz.eth") even without owning the
+ENS record. The 1-of-881 `.eth` count earlier was self-set Polymarket
+display names, not on-chain reverse records.
+
+### Comparison to prior clusters
+
+| operation | wallets | strategy | win rate | ROI |
+|---|---:|---|---:|---:|
+| Cavill (Feb 2026) | 9 | maker-rebate harvest, $500-999 chunks | not measured | not measured |
+| volume-farming (Feb-Apr) | 722 | dust-bet (sub-$10) all prices | 7.1% | −23.8% |
+| **Magic / long-shot (Mar-Apr)** | **17 strict + tail of ~700** | **YES at <$0.05 on tails** | **30.7%** | **−34.6%** |
+
+All three end-state losses fit the same airdrop-credit hypothesis: cost
+of generating volume for token-launch eligibility. This Magic generation
+is a fresh wave with a different sub-strategy.
+
+### Methodology refinement
+
+For future cluster investigations on freshly-spawned wallets, note:
+
+1. The local `wallet_trades` table won't have data for newly-watchlisted
+   wallets until `TradeCollector` polls them (~5 min). Pre-populate via
+   `DataClient.get_activity` if you want to run `expand_cluster.py`
+   immediately.
+2. The expansion script's `hi_price_rate` field measures TRADE prices in
+   the seed-overlap window, NOT the candidate's general behavior. To
+   distinguish "near-certainty" from "tail-buying" candidates, fetch
+   `/positions?user=X&closed=true` and look at `avg_price` distribution.
+3. **The "near-certainty arbitrage" thesis is empirically dead** for these
+   wallets. May still be a profitable strategy for someone else, but the
+   wallets running it via long-shot tail-buying lose money systematically.
+
+### Files
+
+- `/tmp/magic-cluster-expansion.json` — 881 candidates from the 10 seeds.
+- `/tmp/magic-cluster-sample-first-activity.json` — 127-wallet stratified
+  first-activity sample (60% created April 2026, 47% Mondays for strict).
+- `/tmp/magic-strict-investigation.json` — per-wallet PnL, ENS, creation
+  for the 17 strict candidates.
