@@ -549,7 +549,113 @@ relevant Evaluator's `size`.
   distinct `rule_variant`).
 - `paper status` per-source breakdown shows all four sources represented.
 
-## Out-of-scope follow-ups (not blocking)
+## Post-deployment observations (2026-04-27 / 28 smoke runs)
+
+After merging the spec to main, the daemon was run twice with paper
+trading enabled and all four evaluators on default settings: a 2h soak
+(2026-04-27) and a 6h soak (2026-04-28). Aggregate observations:
+
+### Activity volume
+
+| period | alerts | paper entries | exits |
+|---|---:|---:|---:|
+| 2h smoke | 372 | 230 | 0 |
+| 6h smoke | 603 | 395 | 0 |
+
+Per-source entry distribution from the 6h run is representative:
+
+| source | entries | share |
+|---|---:|---:|
+| velocity follow | 149 | 38% |
+| velocity fade | 149 | 38% |
+| mispricing | 71 | 18% |
+| smart_money | 13 | 3% |
+| move_attribution | 13 | 3% |
+
+Velocity dominates volume (76% combined), exactly as the alert-frequency
+research predicted. Smart_money's gate (`tracked_wallets.weighted_edge >
+0`) is selective enough that only the single qualified wallet
+`0x2005d16a84…` (87.9% historical WR, $7.6M leaderboard PnL) sources its
+trades; all 13 smart_money entries are from that one wallet's signal
+stream over 8h combined.
+
+### Resolution latency: 0 of 625 open positions resolved across 8h
+
+Across both runs (8h combined runtime), **zero markets that the paper
+trader bet on had resolved**. The aggregate state after 8h is 625 open
+positions, $0 realized PnL, no win-rate signal yet.
+
+This validates the spec's "constant sizing, drop the bankroll_exhausted
+gate" decision: with no PnL feedback in 8h, an adaptive sizing scheme
+would have kept booking at the starting bankroll regardless. Resolution
+data will start landing over the next days/weeks as bet markets close;
+useful per-rule signal probably needs 2-4 weeks of accumulated trades.
+
+### Velocity twin-trade pairing health: perfect
+
+In the 6h run, every high-severity velocity alert produced both a
+follow and a fade entry (149 + 149 = 298 entries from 149 alerts).
+No cache misses, no malformed bodies. The `MarketCacheRepo`
+opposing-outcome lookup is healthy at production scale.
+
+### Worker sink: validated
+
+| metric | 2h | 6h |
+|---|---:|---:|
+| `worker_sink.stats` events | 119 | 359 |
+| `worker_sink.queue_full` | 0 | 0 |
+| max queue depth observed | 25 | 17 |
+| blocking emit count | 0 | 0 |
+
+Default `velocity_worker_maxsize=4096` is massively over-provisioned
+for current load. Could be safely tightened to `512` or `1024` if
+memory pressure ever became a concern.
+
+### `paper_trader.market_cache_backfilled` is a real path used in production
+
+19 events in 2h, 25 in 6h. Mispricing alerts on markets that aren't in
+the local cache yet (Abraham Accords, Waymo, Russia-Ukraine ceasefire,
+etc.) trigger `_resolve_outcome`'s gamma fallback, which discovers the
+market slug from a recent trade and refreshes the cache row. This is the
+spec'd cache-miss path working as designed; without it, mispricing entries
+on fresh markets would be skipped.
+
+## New follow-up surfaced by the 6h run
+
+**`tick_stream.subscriber_queue_full` regression in long runs.** The 2h
+smoke had 0 of these warnings; the 6h smoke had 2,708, all concentrated
+in a single 1h 42m window (08:22-10:05 UTC) at ~28 drops/minute sustained.
+This is **not** a cold-start issue (it began 4.5h into the run) and **not**
+worker-sink backpressure (worker sink had max queue depth 17 throughout).
+
+The bottleneck is upstream of `WorkerSink`: between
+`BroadcastTickStream.publish` (called from `MarketTickCollector.snapshot_once`
+once per cadence per asset, in tight loops) and the velocity detector's
+synchronous consume-loop work in `evaluate()` — record-tick + window math
++ market-cache lookup. The `WorkerSink` decouples `await sink.emit(...)`
+(the DB-write hot path) from the consume loop, but the *non-emit*
+per-tick work is still synchronous; if many markets tick at once and
+several trip velocity's threshold simultaneously, the consumer can fall
+behind.
+
+Mitigations to consider, in increasing order of cost:
+
+1. **Bump `BroadcastTickStream` per-subscriber queue size** from 1024 to
+   4096+. Cheap; doesn't fix the root cause.
+2. **Pace `snapshot_once` publisher.** Insert `await asyncio.sleep(0)`
+   between per-asset `await self._tick_stream.publish(event)` calls so the
+   consumer gets interleaved scheduling. Already noted as a non-goal in
+   the original WorkerSink spec; would help here.
+3. **Decouple velocity's record from its evaluate.** Move the per-tick
+   record + window-math into a separate consumer task with its own queue,
+   leaving the tick-consume loop pure-CPU bookkeeping. Larger refactor.
+
+Not blocking. Velocity tick drops are isolated to that one detector and
+do not affect paper-trading or other evaluators. File as a separate
+follow-up if/when the regression compounds with more tick subscribers
+(e.g., depth-shock, spread-widening).
+
+## Other out-of-scope follow-ups (not blocking)
 
 - **Per-bucket sizing inside Evaluators.** Once we have a few weeks of
   resolution data, the per-detector `size` method can grow data-driven
@@ -564,3 +670,12 @@ relevant Evaluator's `size`.
   `(category, severity, change_pct_bucket) → winning_rule_variant` to
   refine velocity's `parse` (e.g., only fade in sports, only follow in
   thesis markets).
+- **`win_rate=0.0` ambiguity for unresolved buckets.** When
+  `resolved_count=0` for a source, `win_rate` reports `0.0%` —
+  indistinguishable from "all losses." Render as `-` instead of `0.0%`
+  in the CLI breakdown when no resolutions yet. Trivial polish.
+- **`paper_trades.source_wallet` aggregate panel.** The aggregate
+  per-wallet PnL panel in `paper status` shows a single "no wallet"
+  bucket aggregating all non-smart_money entries (382 of 395 in the 6h
+  run). Group these under "(no wallet)" or merge with the per-source
+  breakdown table.
