@@ -22,9 +22,9 @@ def _alert(
     severity: str = "high",
 ) -> Alert:
     return Alert(
-        detector=detector,  # type: ignore[arg-type]
+        detector=detector,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         alert_key="k1",
-        severity=severity,  # type: ignore[arg-type]
+        severity=severity,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         title="t",
         body=body,
         created_at=0,
@@ -40,7 +40,7 @@ def _seed_market(
 ) -> None:
     cache.upsert(
         CachedMarket(
-            market_id="mkt-1",  # type: ignore[arg-type]
+            market_id="mkt-1",  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
             event_id=None,
             title="Test market",
             liquidity_usd=100_000.0,
@@ -65,7 +65,7 @@ def _evaluator(
 ) -> tuple[VelocityEvaluator, MarketCacheRepo]:
     cfg = VelocityEvaluatorConfig(
         position_fraction=position_fraction,
-        min_severity=min_severity,  # type: ignore[arg-type]
+        min_severity=min_severity,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         allow_consolidation=allow_consolidation,
     )
     cache = MarketCacheRepo(tmp_db)
