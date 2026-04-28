@@ -12,6 +12,7 @@ SEVERITY_RANK: dict[Severity, int] = {"low": 0, "med": 1, "high": 2}
 DetectorName = Literal[
     "smart_money",
     "mispricing",
+    "monotone",
     "whales",
     "convergence",
     "velocity",
@@ -25,9 +26,7 @@ class Alert:
     """A detector output destined for SQLite + the terminal renderer.
 
     Attributes:
-        detector: Which detector produced the alert (``smart_money``,
-            ``mispricing``, ``whales``, ``convergence``, ``velocity``,
-            ``cluster``, ``move_attribution``).
+        detector: The :class:`DetectorName` that produced this alert.
         alert_key: Idempotency key — the primary key in the ``alerts`` table.
             Detectors are responsible for choosing a key that collapses
             duplicates within their natural cadence (e.g. a daily snapshot).

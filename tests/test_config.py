@@ -108,3 +108,14 @@ def test_paper_trading_config_no_longer_has_position_fraction() -> None:
     assert not hasattr(cfg, "min_weighted_edge"), (
         "min_weighted_edge must move to evaluators.smart_money.min_weighted_edge"
     )
+
+
+def test_config_default_monotone_section() -> None:
+    """Monotone defaults match the documented values."""
+    cfg = Config()
+    assert cfg.monotone.enabled is True
+    assert cfg.monotone.scan_interval_seconds == 300
+    assert cfg.monotone.min_violation == 0.02
+    assert cfg.monotone.min_event_liquidity_usd == 10000.0
+    assert cfg.monotone.min_market_liquidity_usd == 100.0
+    assert cfg.monotone.max_market_count == 12

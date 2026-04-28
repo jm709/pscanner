@@ -88,6 +88,32 @@ class MispricingConfig(_Section):
     max_market_count: int = 8
 
 
+class MonotoneConfig(_Section):
+    """Thresholds for the monotone-arbitrage detector.
+
+    Within an event, sort markets along an extracted axis (date deadline
+    or single-direction threshold) and alert when adjacent pairs violate
+    ``P(strict) <= P(loose)``. Markets where axis extraction fails are
+    dropped (not reasons to skip the whole event).
+
+    ``min_violation`` is the minimum gap ``P(strict) - P(loose)`` that
+    will produce an alert. ``min_market_liquidity_usd`` filters illiquid
+    legs whose snapshot prices are likely stale; markets below the floor
+    are dropped from the comparison just like extraction failures.
+
+    ``max_market_count`` skips events with more than this many markets;
+    high-count layouts are typically multi-checkbox where extraction is
+    unreliable.
+    """
+
+    enabled: bool = True
+    scan_interval_seconds: int = 300
+    min_violation: float = 0.02
+    min_event_liquidity_usd: float = 10000.0
+    min_market_liquidity_usd: float = 100.0
+    max_market_count: int = 12
+
+
 class ConvergenceConfig(_Section):
     """Thresholds + window settings for the convergence detector.
 
@@ -392,6 +418,7 @@ class Config(BaseModel):
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
     smart_money: SmartMoneyConfig = Field(default_factory=SmartMoneyConfig)
     mispricing: MispricingConfig = Field(default_factory=MispricingConfig)
+    monotone: MonotoneConfig = Field(default_factory=MonotoneConfig)
     whales: WhalesConfig = Field(default_factory=WhalesConfig)
     convergence: ConvergenceConfig = Field(default_factory=ConvergenceConfig)
     ratelimit: RatelimitConfig = Field(default_factory=RatelimitConfig)
