@@ -2,20 +2,26 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Iterable
 from datetime import date
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
+from pscanner.alerts.sink import AlertSink
+from pscanner.config import MonotoneConfig
 from pscanner.detectors.monotone import (
     AxisSelection,
+    MonotoneDetector,
     MonotoneMarket,
     extract_date_axis,
     extract_threshold_axis,
     find_violations,
     select_axis,
 )
-from pscanner.poly.models import Market
+from pscanner.poly.models import Event, Market
+from pscanner.store.repo import AlertsRepo
 
 
 def test_extract_date_axis_iso() -> None:
@@ -325,3 +331,190 @@ def test_find_violations_includes_borderline_gap_after_rounding() -> None:
     selection = _selection_for_test(("m_a", 1.0, 0.30), ("m_b", 2.0, 0.28))
     [v] = find_violations(selection, min_violation=0.02)
     assert v.gap == pytest.approx(0.02)
+
+
+# ---------------------------------------------------------------------------
+# MonotoneDetector integration tests
+# ---------------------------------------------------------------------------
+
+
+def _event(
+    *,
+    event_id: str = "e1",
+    title: str = "Event",
+    liquidity: float | None = 50000.0,
+    markets: Iterable[Market] = (),
+    tags: list[str] | None = None,
+) -> Event:
+    payload: dict[str, Any] = {
+        "id": event_id,
+        "title": title,
+        "slug": f"slug-{event_id}",
+        "liquidity": liquidity,
+        "markets": [m.model_dump(by_alias=True) for m in markets],
+    }
+    if tags is not None:
+        payload["tags"] = tags
+    return Event.model_validate(payload)
+
+
+def _async_iter(events: Iterable[Event]) -> AsyncIterator[Event]:
+    async def _gen() -> AsyncIterator[Event]:
+        for e in events:
+            yield e
+
+    return _gen()
+
+
+def _make_detector(
+    events: Iterable[Event],
+    *,
+    min_violation: float = 0.02,
+    min_event_liquidity_usd: float = 10000.0,
+    min_market_liquidity_usd: float = 100.0,
+    max_market_count: int = 12,
+) -> tuple[MonotoneDetector, AsyncMock]:
+    gamma = AsyncMock()
+    gamma.iter_events = lambda **_kwargs: _async_iter(list(events))
+    config = MonotoneConfig(
+        min_violation=min_violation,
+        min_event_liquidity_usd=min_event_liquidity_usd,
+        min_market_liquidity_usd=min_market_liquidity_usd,
+        max_market_count=max_market_count,
+    )
+    detector = MonotoneDetector(
+        config=config,
+        gamma_client=gamma,
+    )
+    return detector, gamma
+
+
+async def _drain_one_scan(detector: MonotoneDetector, sink: AlertSink) -> None:
+    """Run one scan iteration via the ``_scan`` entry-point."""
+    await detector._scan(sink)
+
+
+def _liquid_market(
+    market_id: str,
+    yes_price: float,
+    group_item_title: str,
+    *,
+    liquidity: float = 5000.0,
+) -> Market:
+    payload: dict[str, Any] = {
+        "id": market_id,
+        "conditionId": f"0x{market_id}",
+        "question": f"{market_id}?",
+        "slug": f"slug-{market_id}",
+        "outcomes": ["Yes", "No"],
+        "outcomePrices": [yes_price, 1.0 - yes_price],
+        "groupItemTitle": group_item_title,
+        "liquidity": liquidity,
+        "enableOrderBook": True,
+    }
+    return Market.model_validate(payload)
+
+
+async def test_scan_emits_alert_for_date_violation(tmp_db: Any) -> None:
+    """Bannon-style ``by April 30 / by June 30`` with strict richer than loose."""
+    markets = [
+        _liquid_market("m_apr", yes_price=0.40, group_item_title="April 30, 2026"),
+        _liquid_market("m_jun", yes_price=0.30, group_item_title="June 30, 2026"),
+    ]
+    event = _event(event_id="ev1", title="Bannon exonerated", markets=markets)
+    detector, _ = _make_detector([event])
+    repo = AlertsRepo(tmp_db)
+    sink = AlertSink(repo)
+    await _drain_one_scan(detector, sink)
+    rows = repo.recent(limit=10)
+    assert len(rows) == 1
+    body = rows[0].body
+    assert body["axis_kind"] == "date"
+    assert body["strict_condition_id"] == "0xm_apr"
+    assert body["loose_condition_id"] == "0xm_jun"
+    assert body["gap"] == pytest.approx(0.10)
+
+
+async def test_scan_no_alert_for_monotone_event(tmp_db: Any) -> None:
+    markets = [
+        _liquid_market("m_apr", yes_price=0.10, group_item_title="April 30, 2026"),
+        _liquid_market("m_jun", yes_price=0.30, group_item_title="June 30, 2026"),
+    ]
+    event = _event(event_id="ev1", markets=markets)
+    detector, _ = _make_detector([event])
+    repo = AlertsRepo(tmp_db)
+    sink = AlertSink(repo)
+    await _drain_one_scan(detector, sink)
+    assert repo.recent(limit=10) == []
+
+
+async def test_scan_skips_event_below_liquidity_floor(tmp_db: Any) -> None:
+    markets = [
+        _liquid_market("m_apr", yes_price=0.40, group_item_title="April 30, 2026"),
+        _liquid_market("m_jun", yes_price=0.30, group_item_title="June 30, 2026"),
+    ]
+    event = _event(event_id="ev1", liquidity=500.0, markets=markets)  # below 10k
+    detector, _ = _make_detector([event])
+    repo = AlertsRepo(tmp_db)
+    sink = AlertSink(repo)
+    await _drain_one_scan(detector, sink)
+    assert repo.recent(limit=10) == []
+
+
+async def test_scan_drops_low_liquidity_markets(tmp_db: Any) -> None:
+    """Markets below ``min_market_liquidity_usd`` are dropped from comparison."""
+    markets = [
+        _liquid_market("m_apr", yes_price=0.40, group_item_title="April 30, 2026"),
+        _liquid_market("m_jun", yes_price=0.30, group_item_title="June 30, 2026", liquidity=5.0),
+    ]
+    event = _event(event_id="ev1", markets=markets)
+    detector, _ = _make_detector([event])
+    repo = AlertsRepo(tmp_db)
+    sink = AlertSink(repo)
+    await _drain_one_scan(detector, sink)
+    # m_jun dropped → only one market left → no comparison possible.
+    assert repo.recent(limit=10) == []
+
+
+async def test_scan_severity_high_above_ten_cents(tmp_db: Any) -> None:
+    markets = [
+        _liquid_market("m_apr", yes_price=0.50, group_item_title="April 30, 2026"),
+        _liquid_market("m_jun", yes_price=0.30, group_item_title="June 30, 2026"),
+    ]
+    event = _event(event_id="ev1", markets=markets)
+    detector, _ = _make_detector([event])
+    repo = AlertsRepo(tmp_db)
+    sink = AlertSink(repo)
+    await _drain_one_scan(detector, sink)
+    [row] = repo.recent(limit=10)
+    assert row.severity == "high"
+
+
+async def test_scan_alert_key_collapses_repeated_violations(tmp_db: Any) -> None:
+    """Same pair, two scans → one persisted alert (key dedupe via AlertsRepo)."""
+    markets = [
+        _liquid_market("m_apr", yes_price=0.40, group_item_title="April 30, 2026"),
+        _liquid_market("m_jun", yes_price=0.30, group_item_title="June 30, 2026"),
+    ]
+    event = _event(event_id="ev1", markets=markets)
+    detector, _ = _make_detector([event])
+    repo = AlertsRepo(tmp_db)
+    sink = AlertSink(repo)
+    await _drain_one_scan(detector, sink)
+    await _drain_one_scan(detector, sink)
+    rows = repo.recent(limit=10)
+    assert len(rows) == 1
+
+
+async def test_scan_no_alert_when_axis_extraction_fails(tmp_db: Any) -> None:
+    """Two markets with non-axis labels yield no axis selection → no alert."""
+    markets = [
+        _liquid_market("m_a", yes_price=0.40, group_item_title="Doesn't IPO"),
+        _liquid_market("m_b", yes_price=0.30, group_item_title="Other outcome"),
+    ]
+    event = _event(event_id="ev1", markets=markets)
+    detector, _ = _make_detector([event])
+    repo = AlertsRepo(tmp_db)
+    sink = AlertSink(repo)
+    await _drain_one_scan(detector, sink)
+    assert repo.recent(limit=10) == []

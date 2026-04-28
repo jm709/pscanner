@@ -14,11 +14,20 @@ dropped from the comparison (not reasons to skip the whole event).
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
-from datetime import date
-from typing import Literal
+from datetime import UTC, date, datetime
+from typing import Any, Literal
 
-from pscanner.poly.models import Market
+import structlog
+
+from pscanner.alerts.models import Alert, Severity
+from pscanner.alerts.sink import AlertSink
+from pscanner.config import MonotoneConfig
+from pscanner.detectors.polling import PollingDetector
+from pscanner.poly.gamma import GammaClient
+from pscanner.poly.models import Event, Market
+from pscanner.util.clock import Clock
 
 _ISO_DATE_PATTERN = re.compile(r"^(?P<y>\d{4})-(?P<m>\d{2})-(?P<d>\d{2})\b")
 _MONTH_NAMES: dict[str, int] = {
@@ -385,3 +394,169 @@ def find_violations(
         if gap >= min_violation:
             violations.append(MonotoneViolation(strict=strict, loose=loose, gap=gap))
     return violations
+
+
+# ---------------------------------------------------------------------------
+# Detector
+# ---------------------------------------------------------------------------
+
+_LOG = structlog.get_logger(__name__)
+
+_HIGH_SEVERITY_GAP = 0.10
+_MED_SEVERITY_GAP = 0.05
+_MIN_VALID_MARKETS = 2
+
+
+class MonotoneDetector(PollingDetector):
+    """Detector that flags adjacent-axis monotonicity violations.
+
+    Iterates the gamma ``/events`` catalogue (active, open) and, per event,
+    extracts a date or threshold axis from each market's ``groupItemTitle``.
+    Markets where extraction fails or whose liquidity falls below the
+    configured floor are dropped — they don't disqualify the event. With
+    at least two markets remaining on a consistent axis, the detector
+    flags adjacent pairs whose YES prices violate ``P(strict) <= P(loose)``.
+    """
+
+    name: str = "monotone"
+
+    def __init__(
+        self,
+        *,
+        config: MonotoneConfig,
+        gamma_client: GammaClient,
+        clock: Clock | None = None,
+    ) -> None:
+        """Build a detector bound to a config and gamma client."""
+        super().__init__(clock=clock)
+        self._config = config
+        self._gamma = gamma_client
+
+    def _interval_seconds(self) -> float:
+        """Return the configured scan cadence."""
+        return self._config.scan_interval_seconds
+
+    async def _scan(self, sink: AlertSink) -> None:
+        """Run a single pass over the active-event catalogue.
+
+        The ``year_hint`` for date-axis extraction is computed once per scan
+        so a pass that crosses a year boundary stays internally consistent.
+        """
+        year_hint = datetime.now(tz=UTC).year
+        events = self._gamma.iter_events(active=True, closed=False)
+        events_scanned = 0
+        async for event in events:
+            events_scanned += 1
+            await self.evaluate_event(event, sink, year_hint=year_hint)
+        _LOG.info("monotone.scan_complete", events_scanned=events_scanned)
+
+    async def evaluate_event(
+        self,
+        event: Event,
+        sink: AlertSink,
+        *,
+        year_hint: int,
+    ) -> None:
+        """Evaluate a single event and emit one alert per adjacent violation.
+
+        Args:
+            event: Event to evaluate.
+            sink: Sink to publish alerts to.
+            year_hint: Year passed to date-axis extraction for labels that
+                omit it; supplied by the caller so a single ``_scan`` pass
+                stays internally consistent.
+        """
+        if not self._is_eligible(event):
+            return
+        markets = self._filter_liquid_markets(event)
+        if len(markets) < _MIN_VALID_MARKETS:
+            return
+        selection = select_axis(markets, year_hint=year_hint)
+        if selection is None:
+            return
+        violations = find_violations(selection, min_violation=self._config.min_violation)
+        for violation in violations:
+            await sink.emit(self._build_alert(event, selection, violation))
+
+    def _is_eligible(self, event: Event) -> bool:
+        """Cheap pre-filters that don't depend on axis extraction."""
+        market_count = len(event.markets)
+        if market_count < _MIN_VALID_MARKETS or market_count > self._config.max_market_count:
+            return False
+        return not (
+            event.liquidity is None or event.liquidity < self._config.min_event_liquidity_usd
+        )
+
+    def _filter_liquid_markets(self, event: Event) -> list[Market]:
+        """Drop markets that can't participate in a monotone comparison.
+
+        Drops markets with the order book disabled, with no ``condition_id``
+        (the alert pair-key would otherwise contain the literal string
+        ``"None"``), or below ``min_market_liquidity_usd`` when the floor
+        is non-zero.
+        """
+        floor = self._config.min_market_liquidity_usd
+        kept: list[Market] = []
+        for market in event.markets:
+            if not market.enable_order_book:
+                continue
+            if market.condition_id is None:
+                continue
+            if floor > 0 and (market.liquidity is None or market.liquidity < floor):
+                continue
+            kept.append(market)
+        return kept
+
+    def _build_alert(
+        self,
+        event: Event,
+        selection: AxisSelection,
+        violation: MonotoneViolation,
+    ) -> Alert:
+        """Construct the Alert payload for a monotone violation."""
+        body: dict[str, Any] = {
+            "event_id": event.id,
+            "event_title": event.title,
+            "axis_kind": selection.kind,
+            "axis_direction": selection.direction,
+            "strict_condition_id": violation.strict.market.condition_id,
+            "loose_condition_id": violation.loose.market.condition_id,
+            "strict_yes_price": violation.strict.yes_price,
+            "loose_yes_price": violation.loose.yes_price,
+            "gap": violation.gap,
+            "markets": [
+                {
+                    "id": m.market.id,
+                    "condition_id": m.market.condition_id,
+                    "yes_price": m.yes_price,
+                    "axis_value": m.sort_key,
+                    "label": m.market.group_item_title,
+                }
+                for m in selection.markets
+            ],
+        }
+        return Alert(
+            detector="monotone",
+            alert_key=(
+                f"monotone:{event.id}:"
+                f"{violation.strict.market.condition_id}:"
+                f"{violation.loose.market.condition_id}"
+            ),
+            severity=_severity_for(violation.gap),
+            title=(
+                f"{event.title} — strict {violation.strict.yes_price:.3f} "
+                f"> loose {violation.loose.yes_price:.3f} "
+                f"(gap {violation.gap:.3f})"
+            ),
+            body=body,
+            created_at=int(time.time()),
+        )
+
+
+def _severity_for(gap: float) -> Severity:
+    """Map a violation gap to a triage bucket."""
+    if gap > _HIGH_SEVERITY_GAP:
+        return "high"
+    if gap > _MED_SEVERITY_GAP:
+        return "med"
+    return "low"
