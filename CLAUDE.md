@@ -1,7 +1,8 @@
 # pscanner — Claude Code notes
 
 Polymarket data-collection daemon. Python 3.13 + uv + ruff + ty + pytest.
-~5K LOC, 17 SQLite tables, 6 detectors, 7 collectors. 503 tests.
+~6K LOC, 18 SQLite tables, 7 detectors, 7 collectors, 4 paper-trading
+evaluators. 677 tests.
 
 ## Quick verify
 `uv run ruff check . && uv run ruff format --check . && uv run ty check && uv run pytest -q`
@@ -21,6 +22,10 @@ Polymarket data-collection daemon. Python 3.13 + uv + ruff + ty + pytest.
 - NEVER `monkeypatch.setattr(asyncio, "sleep", AsyncMock())` — deadlocks the suite (sibling detector loops become CPU spinners). Use `FakeClock` from `pscanner.util.clock` instead; inject via `clock=` ctor kwarg, drive with `await fake_clock.advance(seconds)`.
 - Shared fixtures in `tests/conftest.py`: `tmp_db` (in-memory SQLite with schema applied), `fake_clock`.
 - Detector mocks: prefer real `AlertsRepo` against `tmp_db` over MagicMock when testing dedupe / persistence behavior.
+- **Structlog log assertions need `capture_logs`, NOT `caplog`.** `cli.py` configures structlog via `PrintLoggerFactory`, so stdlib `caplog` never sees structured events. Use `from structlog.testing import capture_logs; with capture_logs() as logs: ...; assert any(l["event"] == "..." for l in logs)`.
+- `tmp_db` has `row_factory = sqlite3.Row`; rows compare via `tuple(r)`, not against raw tuples.
+- **SQLite `UNIQUE` indexes treat NULLs as distinct.** The `paper_trades` unique-on-entry index uses `COALESCE(rule_variant, '')` so non-twin sources (`rule_variant=NULL`) keep per-key uniqueness while velocity twin trades (follow/fade) coexist. Don't strip the COALESCE.
+- Many test files use the `# type: ignore[arg-type]  # ty:ignore[invalid-argument-type]` doubled annotation when passing string literals where `Literal` types are expected — `ty` doesn't honor mypy ignores so both are needed.
 
 ## Codebase conventions
 - **Detectors**: 3 lifecycle patterns. Polling → inherit `PollingDetector`. Trade-callback → inherit `TradeDrivenDetector` (callback pattern, `run()` parks). Stream-driven → take `tick_stream: TickStream` and `async for` it. Hybrid (whales, cluster) → compose patterns by hand.
@@ -30,6 +35,13 @@ Polymarket data-collection daemon. Python 3.13 + uv + ruff + ty + pytest.
 - **Categories** (smart-money / convergence / mispricing): single source of truth in `pscanner.categories.DEFAULT_TAXONOMY`. Don't hardcode `"sports"`/`"esports"` strings in detectors.
 - **Velocity alerts** are deduped by `condition_id` (not asset_id) so YES/NO twin alerts on a binary market collapse. Falls back to asset_id when market_cache lookup fails.
 - **`wallet_first_seen`** is populated unconditionally by `TradeCollector._ensure_first_seen` on every poll cycle (TTL-gated 24h). Cluster detector + whales-detector age filter both depend on this.
+- **Cluster detection has two paths.** `ClusterDetector.discovery_scan` runs both `_iter_candidate_groups` (creation-window partition, ≤24h spread) and `_iter_co_trade_groups` (shared-obscure-markets graph, ≥3 markets in common). Both routed through `_consider_group` with a SHA256-of-addresses dedupe. Signal A (`_compute_creation_cohesion_score`) reads actual timestamps so co-occurrence-found clusters that span weeks score 0 on cohesion but can still pass via B+C+D.
+- **Alert sink layering.** Three types implement `IAlertSink` (single method `async emit(alert) -> bool`): `AlertSink` (synchronous, with `subscribe()` for sync callbacks like `PaperTrader.handle_alert_sync`), and `WorkerSink` (per-detector queue-deferred, drains alerts to a wrapped `AlertSink` via a background task). Tick-driven detectors (currently velocity) get a `WorkerSink` from the scheduler; polling detectors get the raw `AlertSink`. `WorkerSink.emit` always returns `True` (enqueue-acknowledged) — losing the dedupe bool is fine because the only callers using it (`cluster.py:164,549`) are polling-driven and stay on `AlertSink`.
+- **Mispricing alerts carry `target_*` body fields** (`target_condition_id`, `target_side`, `target_current_price`, `target_fair_price`) computed via proportional rebalancing (`fair[i] = current[i] / sum(current)`). Picks the leg with largest deviation; flips current/fair via `1 - x` when over-priced YES → trade NO. `MispricingEvaluator.parse` reads these directly.
+- **Paper-trading evaluators**: `pscanner.strategies.evaluators` has 4 `SignalEvaluator` Protocol implementations (smart_money, move_attribution, velocity, mispricing). Each owns its parse/quality/sizing. `PaperTrader` is a thin orchestrator: `evaluate(alert)` walks the list and runs the first acceptor's pipeline. Adding a new signal = one new class + one config block + one scheduler entry.
+- **Constant sizing**: paper trades size off `starting_bankroll_usd` (constant), NOT running NAV. The `bankroll_exhausted` gate is removed by design — research config trades infinite paper bankroll for max data collection. NAV is still recorded on `paper_trades.nav_after_usd` for analysis (can be negative).
+- **Velocity twin trades**: every alert spawns 2 ParsedSignals (`rule_variant="follow"` + `"fade"`) by walking `MarketCacheRepo.get_by_condition_id().outcomes` to find the opposing-side outcome name. Cache miss → returns `[]` (skip both). Each side sized at half the normal fraction (default 0.0025 per side, 0.5% pair total).
+- **Severity ranking**: `SEVERITY_RANK = {"low": 0, "med": 1, "high": 2}` lives in `pscanner.alerts.models`. Evaluator gates use strict `[]` lookup on the configured `min_severity` (config-validated Literal) and lenient `.get(severity, -1)` on alert-provided values.
 
 ## Build orchestration (when shipping multi-issue waves)
 - Use `git worktree add /home/macph/projects/pscanner-worktrees/<name> -b <branch>` for parallel sub-agents (per global standards).
@@ -39,12 +51,17 @@ Polymarket data-collection daemon. Python 3.13 + uv + ruff + ty + pytest.
 ## CLI surface
 - `pscanner run` (daemon) / `pscanner run --once` (single pass) / `pscanner status` (recent alerts)
 - `pscanner watch <addr> [--reason TEXT]` / `pscanner unwatch <addr>` / `pscanner watchlist`
+- `pscanner paper status` — aggregate NAV + per-wallet PnL + per-source breakdown table (one row per `(triggering_alert_detector, rule_variant)`).
 - DB: `./data/pscanner.sqlite3`. Drop the file for a clean smoke run.
 - Smoke verification idiom: `rm -f data/pscanner.sqlite3 && timeout NNNN uv run pscanner run > /tmp/smoke.log 2>&1; echo exit=$?`
+- **`scripts/expand_cluster.py`**: cluster expansion via fingerprint matching. Reads seeds' trades from local `wallet_trades`; if seeds are freshly watchlisted (no local data yet) pre-populate via `DataClient.get_activity` first. The `hi_price_rate` field in the output is sampled from the seed-overlap window only — for true behavioral fingerprint, fetch `/positions?user=X&closed=true` and inspect `avg_price` distribution.
 
 ## Known wallet clusters
 
-### Cavill cluster (manually discovered 2026-04-25; auto-confirmed by detector with `discovery_lookback_days=365`, score=7, tag=`mixed`)
+Primary investigation log: `volume-farming-cluster-investigation.md` covers the
+two non-Cavill operations with full methodology + reproducible queries.
+
+### Cavill cluster (manually discovered 2026-04-25; auto-confirmed by detector with `discovery_lookback_days=365`, score=5 via co-occurrence path, tag=`mixed`)
 
 9-wallet coordinated operation, all created **Feb 20-21 2026** (7 of 9 within a 38-minute window on Feb 20). Bimodal trade sizing ($500-999 chunks just below $1K + sub-$100 dust), 35-40% SELL rate, 57% of trades at price ≥0.95 (BUY-NO spread harvest), $0 net exposure across all 9 wallets. Behavior: market-making / Polymarket maker-rebate farming on niche long-tail markets (Henry Cavill James Bond, Cabello as Venezuelan leader, Ferran Torres top La Liga scorer, Houston Dynamo MLS Cup, Mohammad Khatami, Manchester United 2nd place EPL). Useful as a "fastest-reactor-to-mispricings" signal, NOT as an "informed insider" signal.
 
@@ -60,6 +77,8 @@ Polymarket data-collection daemon. Python 3.13 + uv + ruff + ty + pytest.
 0x5266edffc8f4737c2b9d0fa959ecae2c7b55c8cb
 ```
 
+Cavill is rediscoverable post DB reset because the seed wallets' `first_activity_at` spread (86,496s = 24h 1m 36s) is just past the 24h creation-window gate, so the new co-occurrence path (T6 of `feat/cluster-organic`) finds it via shared obscure markets, scores 5 (Signal A=0, B+C+D=5), tags as `mixed`. Detection happens within 1-2 minutes of cluster scan after the daemon comes up.
+
 Re-add to watchlist after a DB reset:
 ```bash
 for a in 0x5cbd326a7f9dfac9855b9a23caee48fc097eabb0 0x53daff4663382b86808feb77e4fcaffd94e57cc8 \
@@ -71,6 +90,14 @@ for a in 0x5cbd326a7f9dfac9855b9a23caee48fc097eabb0 0x53daff4663382b86808feb77e4
 done
 ```
 
+### Volume-farming cluster (722+ wallets, Feb-Apr 2026)
+Discovered 2026-04-27 during paper-trading data exploration. Sub-$10 dust trades, 9% sell rate, gradually accumulated Feb-Apr 2026 (96% in April), 7.1% WR, **−23.8% ROI** on $6.35M. Almost certainly Polymarket points/airdrop farming. Cluster detector misses them via Signal A (creation spread > 24h gate) but the new co-occurrence path catches their shape if seeded. Full investigation in `volume-farming-cluster-investigation.md`.
+
+### Magic / long-shot cluster (17 strict + ~700 fresh, Mar-Apr 2026)
+Surfaced 2026-04-28 during expanded-paper-trading smoke. 50-day creation span, 47% Mondays, 6 wallets created in the burst day. **Buy YES at sub-$0.05 on tail outcomes**, hold to resolution. 14.6% WR, **−34.6% ROI** on $1.1M. Different fingerprint from volume-farming (mid-range $25 trade size vs sub-$10 dust). Same airdrop-farming end state. Full investigation in `volume-farming-cluster-investigation.md` (Update 2026-04-28 section).
+
 ## Open follow-ups (no issues filed)
 - Cluster detector default `discovery_lookback_days = 30` is too short to catch older clusters — bump to 90+ if testing against historical data.
 - Cluster detector silently returns when its candidate set is empty — no INFO-level "scan ran, found 0 candidates" log. Causes confusing "no alerts, no errors, no anything" symptom.
+- **`tick_stream.subscriber_queue_full` regression in long runs.** A 6h smoke surfaced 2,708 drops over a 1h 42m mid-run window (~28/min sustained). `WorkerSink` decoupled the alert-emit hot path but velocity's per-tick consume work (record + window math + cache lookup) is still synchronous. Mitigations sketched in `docs/superpowers/specs/2026-04-27-paper-trading-expansion-design.md` post-deployment-observations section. Not blocking.
+- **`paper status` rendering polish.** When `resolved_count=0`, `win_rate` shows `0.0%` (indistinguishable from "all losses"). Render as `-` instead. Also: the per-wallet PnL panel groups all non-smart_money entries under an unlabeled `(no wallet)` row; should be labeled or merged with the per-source breakdown.
