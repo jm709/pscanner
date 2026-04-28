@@ -9,8 +9,10 @@ import pytest
 
 from pscanner.detectors.monotone import (
     AxisSelection,
+    MonotoneMarket,
     extract_date_axis,
     extract_threshold_axis,
+    find_violations,
     select_axis,
 )
 from pscanner.poly.models import Market
@@ -250,3 +252,76 @@ def test_axis_selection_rejects_inconsistent_kind_and_direction() -> None:
         AxisSelection(kind="date", direction="higher_is_stricter", markets=())  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="direction"):
         AxisSelection(kind="threshold", direction=None, markets=())
+
+
+# ---------------------------------------------------------------------------
+# find_violations tests
+# ---------------------------------------------------------------------------
+
+
+def _selection_for_test(*pairs: tuple[str, float, float]) -> AxisSelection:
+    """Build an AxisSelection from (market_id, sort_key, yes_price) tuples.
+
+    The pairs are expected pre-sorted strict-first.
+    """
+    monotone_markets = tuple(
+        MonotoneMarket(
+            market=_market(market_id=mid, yes_price=price),
+            sort_key=key,
+            yes_price=price,
+        )
+        for (mid, key, price) in pairs
+    )
+    return AxisSelection(kind="date", direction=None, markets=monotone_markets)
+
+
+def test_find_violations_none_when_monotone() -> None:
+    """Non-decreasing prices in loose-direction → no violations."""
+    selection = _selection_for_test(("m_apr", 1.0, 0.10), ("m_jun", 2.0, 0.30))
+    assert find_violations(selection, min_violation=0.02) == []
+
+
+def test_find_violations_flags_strict_richer_than_loose() -> None:
+    """Strict leg priced higher than loose leg → violation."""
+    selection = _selection_for_test(("m_apr", 1.0, 0.40), ("m_jun", 2.0, 0.30))
+    [v] = find_violations(selection, min_violation=0.02)
+    assert v.strict.market.id == "m_apr"
+    assert v.loose.market.id == "m_jun"
+    assert v.gap == pytest.approx(0.10)
+
+
+def test_find_violations_skips_when_below_tolerance() -> None:
+    """Gap smaller than ``min_violation`` is ignored."""
+    selection = _selection_for_test(("m_apr", 1.0, 0.31), ("m_jun", 2.0, 0.30))
+    assert find_violations(selection, min_violation=0.02) == []
+
+
+def test_find_violations_emits_one_per_adjacent_pair() -> None:
+    """Three markets, two adjacent violations, two records."""
+    selection = _selection_for_test(
+        ("m1", 1.0, 0.40),
+        ("m2", 2.0, 0.30),
+        ("m3", 3.0, 0.10),
+    )
+    violations = find_violations(selection, min_violation=0.02)
+    assert [(v.strict.market.id, v.loose.market.id) for v in violations] == [
+        ("m1", "m2"),
+        ("m2", "m3"),
+    ]
+
+
+def test_find_violations_handles_equal_prices() -> None:
+    """Equal prices are not a violation."""
+    selection = _selection_for_test(("m_apr", 1.0, 0.30), ("m_jun", 2.0, 0.30))
+    assert find_violations(selection, min_violation=0.02) == []
+
+
+def test_find_violations_includes_borderline_gap_after_rounding() -> None:
+    """A true 2-cent gap survives float subtraction noise.
+
+    ``0.30 - 0.28`` in IEEE-754 produces ``0.019999999999999997`` — without
+    rounding, ``gap >= 0.02`` would silently exclude this real violation.
+    """
+    selection = _selection_for_test(("m_a", 1.0, 0.30), ("m_b", 2.0, 0.28))
+    [v] = find_violations(selection, min_violation=0.02)
+    assert v.gap == pytest.approx(0.02)

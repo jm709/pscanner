@@ -266,6 +266,15 @@ def _yes_price(market: Market) -> float | None:
     return market.outcome_prices[0]
 
 
+_GAP_ROUND_DIGITS = 6
+"""Decimal precision for ``MonotoneViolation.gap``.
+
+Polymarket prices have at most 4 decimal places; rounding to 6 absorbs
+the IEEE-754 noise from subtraction without losing any meaningful
+precision. This makes the ``gap >= min_violation`` boundary
+deterministic regardless of which specific prices were subtracted.
+"""
+
 # Minimum number of markets required to form a meaningful monotone axis.
 _MIN_AXIS_MARKETS = 2
 
@@ -337,3 +346,42 @@ def select_axis(markets: list[Market], *, year_hint: int) -> AxisSelection | Non
             without an explicit year.
     """
     return _try_date_axis(markets, year_hint) or _try_threshold_axis(markets)
+
+
+@dataclass(frozen=True, slots=True)
+class MonotoneViolation:
+    """One adjacent-pair violation of the monotone constraint.
+
+    ``strict`` is the leg that should be cheaper (earlier deadline or
+    stricter threshold); ``loose`` is the leg that should be richer.
+    ``gap`` is ``round(strict.yes_price - loose.yes_price, 6)``, ensuring the
+    boundary is deterministic across float-subtraction noise.
+    """
+
+    strict: MonotoneMarket
+    loose: MonotoneMarket
+    gap: float
+
+
+def find_violations(
+    selection: AxisSelection,
+    *,
+    min_violation: float,
+) -> list[MonotoneViolation]:
+    """Find adjacent-pair monotonicity violations in a sorted selection.
+
+    Args:
+        selection: Axis-sorted markets (strict-first order).
+        min_violation: Minimum ``gap`` value that counts as a violation.
+
+    Returns:
+        One :class:`MonotoneViolation` per adjacent pair where the strict
+        leg's YES price exceeds the loose leg's by at least ``min_violation``.
+    """
+    violations: list[MonotoneViolation] = []
+    pairs = zip(selection.markets, selection.markets[1:], strict=False)
+    for strict, loose in pairs:
+        gap = round(strict.yes_price - loose.yes_price, _GAP_ROUND_DIGITS)
+        if gap >= min_violation:
+            violations.append(MonotoneViolation(strict=strict, loose=loose, gap=gap))
+    return violations
