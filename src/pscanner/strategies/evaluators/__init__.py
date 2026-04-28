@@ -5,6 +5,7 @@ PaperTrader walks a list of evaluators on each alert; the first one whose
 """
 
 from pscanner.strategies.evaluators.mispricing import MispricingEvaluator
+from pscanner.strategies.evaluators.monotone import MonotoneEvaluator
 from pscanner.strategies.evaluators.move_attribution import MoveAttributionEvaluator
 from pscanner.strategies.evaluators.protocol import (
     ParsedSignal,
@@ -15,6 +16,7 @@ from pscanner.strategies.evaluators.velocity import VelocityEvaluator
 
 __all__ = [
     "MispricingEvaluator",
+    "MonotoneEvaluator",
     "MoveAttributionEvaluator",
     "ParsedSignal",
     "SignalEvaluator",

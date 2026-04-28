@@ -361,8 +361,21 @@ class MispricingEvaluatorConfig(_Section):
     min_edge_dollars: float = 0.05
 
 
+class MonotoneEvaluatorConfig(_Section):
+    """Monotone-arbitrage evaluator tunables.
+
+    Each alert spawns two ParsedSignals (strict_no + loose_yes) at the
+    per-side ``position_fraction`` (default 0.5%, pair total 1%). Constant
+    size off ``starting_bankroll_usd``, not running NAV.
+    """
+
+    enabled: bool = True
+    position_fraction: float = 0.005
+    min_edge_dollars: float = 0.02
+
+
 class EvaluatorsConfig(_Section):
-    """Container for the four per-source evaluator configs.
+    """Container for the five per-source evaluator configs.
 
     Disabling a source via its ``enabled`` flag prevents that Evaluator
     from being constructed at scheduler boot — no detector code path
@@ -375,6 +388,7 @@ class EvaluatorsConfig(_Section):
     )
     velocity: VelocityEvaluatorConfig = Field(default_factory=VelocityEvaluatorConfig)
     mispricing: MispricingEvaluatorConfig = Field(default_factory=MispricingEvaluatorConfig)
+    monotone: MonotoneEvaluatorConfig = Field(default_factory=MonotoneEvaluatorConfig)
 
 
 class PaperTradingConfig(_Section):
