@@ -45,6 +45,7 @@ from pscanner.config import Config
 from pscanner.detectors.cluster import ClusterDetector
 from pscanner.detectors.convergence import ConvergenceDetector
 from pscanner.detectors.mispricing import MispricingDetector
+from pscanner.detectors.monotone import MonotoneDetector
 from pscanner.detectors.move_attribution import MoveAttributionDetector
 from pscanner.detectors.smart_money import SmartMoneyDetector
 from pscanner.detectors.trade_driven import TradeDrivenDetector
@@ -78,6 +79,7 @@ from pscanner.store.repo import (
 )
 from pscanner.strategies.evaluators import (
     MispricingEvaluator,
+    MonotoneEvaluator,
     MoveAttributionEvaluator,
     SignalEvaluator,
     SmartMoneyEvaluator,
@@ -318,6 +320,12 @@ class Scanner:
                 sum_history_repo=self._sum_history_repo,
                 clock=self._clock,
             )
+        if self._config.monotone.enabled:
+            detectors["monotone"] = MonotoneDetector(
+                config=self._config.monotone,
+                gamma_client=self._clients.gamma_client,
+                clock=self._clock,
+            )
         if self._config.whales.enabled:
             detectors["whales"] = WhalesDetector(
                 config=self._config.whales,
@@ -352,25 +360,30 @@ class Scanner:
                 data_client=self._clients.data_client,
                 watchlist_repo=self._watchlist_repo,
             )
-        if self._config.paper_trading.enabled:
-            paper_trades_repo = PaperTradesRepo(self._db)
-            detectors["paper_trader"] = PaperTrader(
-                config=self._config.paper_trading,
-                evaluators=self._build_paper_evaluators(),
-                market_cache=self._market_cache_repo,
-                paper_trades=paper_trades_repo,
-                market_ticks=self._ticks_repo,
-                data_client=self._clients.data_client,
-                gamma_client=self._clients.gamma_client,
-            )
-            detectors["paper_resolver"] = PaperResolver(
-                config=self._config.paper_trading,
-                market_cache=self._market_cache_repo,
-                paper_trades=paper_trades_repo,
-                clock=self._clock,
-            )
+        self._maybe_attach_paper_trading(detectors)
         self._maybe_attach_velocity_detector(detectors)
         return detectors
+
+    def _maybe_attach_paper_trading(self, detectors: dict[str, Any]) -> None:
+        """Attach paper-trader and paper-resolver when paper trading is enabled."""
+        if not self._config.paper_trading.enabled:
+            return
+        paper_trades_repo = PaperTradesRepo(self._db)
+        detectors["paper_trader"] = PaperTrader(
+            config=self._config.paper_trading,
+            evaluators=self._build_paper_evaluators(),
+            market_cache=self._market_cache_repo,
+            paper_trades=paper_trades_repo,
+            market_ticks=self._ticks_repo,
+            data_client=self._clients.data_client,
+            gamma_client=self._clients.gamma_client,
+        )
+        detectors["paper_resolver"] = PaperResolver(
+            config=self._config.paper_trading,
+            market_cache=self._market_cache_repo,
+            paper_trades=paper_trades_repo,
+            clock=self._clock,
+        )
 
     def _build_paper_evaluators(self) -> list[SignalEvaluator]:
         """Construct enabled evaluators in fixed order.
@@ -378,7 +391,7 @@ class Scanner:
         Each evaluator is gated by its ``enabled`` flag in
         ``paper_trading.evaluators.<source>``; disabled sources are simply
         not in the list. Order is fixed: smart_money, move_attribution,
-        mispricing, velocity. Order matters because PaperTrader.evaluate
+        mispricing, monotone, velocity. Order matters because PaperTrader.evaluate
         returns on first acceptance — though there's no overlap today
         (each evaluator accepts a unique detector name).
         """
@@ -398,6 +411,10 @@ class Scanner:
         if cfg.mispricing.enabled:
             evaluators.append(
                 MispricingEvaluator(config=cfg.mispricing),
+            )
+        if cfg.monotone.enabled:
+            evaluators.append(
+                MonotoneEvaluator(config=cfg.monotone),
             )
         if cfg.velocity.enabled:
             evaluators.append(

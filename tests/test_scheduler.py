@@ -33,7 +33,9 @@ from pscanner.config import (
     EventsConfig,
     MarketsConfig,
     MispricingConfig,
+    MonotoneConfig,
     MoveAttributionConfig,
+    PaperTradingConfig,
     PositionsConfig,
     RatelimitConfig,
     ScannerConfig,
@@ -56,6 +58,7 @@ from pscanner.store.repo import (
     PaperTradesRepo,
     TrackedWalletsRepo,
 )
+from pscanner.strategies.evaluators import MonotoneEvaluator
 from pscanner.strategies.paper_resolver import PaperResolver
 from pscanner.util.clock import FakeClock
 
@@ -103,6 +106,7 @@ def _make_config(
     *,
     enable_smart: bool = True,
     enable_misprice: bool = True,
+    enable_monotone: bool = True,
     enable_whales: bool = True,
     enable_convergence: bool = True,
     enable_positions: bool = True,
@@ -113,11 +117,13 @@ def _make_config(
     enable_velocity: bool = True,
     enable_cluster: bool = True,
     enable_move_attribution: bool = True,
+    enable_paper_trading: bool = False,
 ) -> Config:
     return Config(
         scanner=ScannerConfig(),
         smart_money=SmartMoneyConfig(enabled=enable_smart),
         mispricing=MispricingConfig(enabled=enable_misprice),
+        monotone=MonotoneConfig(enabled=enable_monotone),
         whales=WhalesConfig(enabled=enable_whales),
         convergence=ConvergenceConfig(enabled=enable_convergence),
         ratelimit=RatelimitConfig(),
@@ -129,6 +135,7 @@ def _make_config(
         velocity=VelocityConfig(enabled=enable_velocity),
         cluster=ClusterConfig(enabled=enable_cluster),
         move_attribution=MoveAttributionConfig(enabled=enable_move_attribution),
+        paper_trading=PaperTradingConfig(enabled=enable_paper_trading),
     )
 
 
@@ -1015,3 +1022,55 @@ async def test_scanner_wires_paper_trader_to_alert_sink_when_enabled(
         assert nav == 1010.0  # 1000 + (20 shares x $1.0 - $10 cost)
     finally:
         resolver_conn.close()
+
+
+@pytest.mark.asyncio
+async def test_scanner_wires_monotone_detector_when_enabled(db_path: Path) -> None:
+    """When ``monotone.enabled`` is True, the detector is in ``_detectors``."""
+    config = _make_config(enable_monotone=True)
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    try:
+        assert "monotone" in scanner._detectors
+    finally:
+        await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_scanner_skips_monotone_detector_when_disabled(db_path: Path) -> None:
+    """When ``monotone.enabled`` is False, the detector is not constructed."""
+    config = _make_config(enable_monotone=False)
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    try:
+        assert "monotone" not in scanner._detectors
+    finally:
+        await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_scanner_wires_monotone_evaluator_when_paper_enabled(db_path: Path) -> None:
+    """Monotone evaluator appended when paper_trading + monotone evaluator enabled."""
+    config = _make_config(
+        enable_smart=False,
+        enable_misprice=False,
+        enable_monotone=True,
+        enable_whales=False,
+        enable_convergence=False,
+        enable_positions=False,
+        enable_activity=False,
+        enable_markets=False,
+        enable_events=False,
+        enable_ticks=False,
+        enable_velocity=False,
+        enable_cluster=False,
+        enable_move_attribution=False,
+        enable_paper_trading=True,
+    )
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    try:
+        evaluators = scanner._build_paper_evaluators()
+        assert any(isinstance(e, MonotoneEvaluator) for e in evaluators)
+    finally:
+        await scanner.aclose()

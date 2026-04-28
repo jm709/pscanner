@@ -32,6 +32,14 @@ max_market_count = 8
 # `pscanner.categories.DEFAULT_TAXONOMY` via the `mispricing_skip` flag and
 # is not configurable here.
 
+[monotone]
+enabled = true
+scan_interval_seconds = 300
+min_violation = 0.02
+min_event_liquidity_usd = 10000
+min_market_liquidity_usd = 100
+max_market_count = 12
+
 [whales]
 enabled = true
 new_account_max_age_days = 30
@@ -110,3 +118,39 @@ min_direction_correlation_count = 3
 discovery_score_threshold = 5
 active_window_seconds = 300
 active_min_members = 2
+
+[move_attribution]
+enabled = true
+
+[paper_trading]
+enabled = true
+starting_bankroll_usd = 1000.0
+min_position_cost_usd = 0.50
+resolver_scan_interval_seconds = 300.0
+
+[paper_trading.evaluators.smart_money]
+enabled = true
+position_fraction = 0.01
+min_weighted_edge = 0.0
+
+[paper_trading.evaluators.move_attribution]
+enabled = true
+position_fraction = 0.01
+min_severity = "med"
+min_wallets = 3
+
+[paper_trading.evaluators.velocity]
+enabled = true
+position_fraction = 0.0025
+min_severity = "high"
+allow_consolidation = false
+
+[paper_trading.evaluators.mispricing]
+enabled = true
+position_fraction = 0.01
+min_edge_dollars = 0.05
+
+[paper_trading.evaluators.monotone]
+enabled = true
+position_fraction = 0.005
+min_edge_dollars = 0.02
