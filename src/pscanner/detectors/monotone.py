@@ -14,8 +14,11 @@ dropped from the comparison (not reasons to skip the whole event).
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import date
 from typing import Literal
+
+from pscanner.poly.models import Market
 
 _ISO_DATE_PATTERN = re.compile(r"^(?P<y>\d{4})-(?P<m>\d{2})-(?P<d>\d{2})\b")
 _MONTH_NAMES: dict[str, int] = {
@@ -146,6 +149,7 @@ _LOWER_PATTERN = re.compile(
 _RANGE_BUCKET_PATTERN = re.compile(
     r"^\$?[\d,.]+\s*[KMBT]?\s*[-–]\s*\$?[\d,.]+",  # noqa: RUF001 - en-dash is intentional
 )
+
 _SUFFIX_MULTIPLIERS: dict[str, float] = {
     "": 1.0,
     "k": 1_000.0,
@@ -213,3 +217,123 @@ def _parse_number(match: re.Match[str]) -> float | None:
         return None
     suffix = match.group("suffix").lower()
     return base * _SUFFIX_MULTIPLIERS[suffix]
+
+
+@dataclass(frozen=True, slots=True)
+class MonotoneMarket:
+    """One market that survived axis extraction.
+
+    ``sort_key`` is the raw axis value:
+
+    * Date axis: ``date.toordinal()`` — smaller = earlier = stricter.
+    * Threshold axis: the numeric threshold value. For
+      ``higher_is_stricter`` selections the markets list is sorted
+      *descending* (largest key first = strictest); for
+      ``lower_is_stricter`` it is sorted *ascending* (smallest key
+      first = strictest). Don't compare sort_keys across markets
+      without knowing the axis direction.
+
+    ``yes_price`` is the YES-leg price as published in the snapshot.
+    """
+
+    market: Market
+    sort_key: float
+    yes_price: float
+
+
+@dataclass(frozen=True, slots=True)
+class AxisSelection:
+    """A monotone-eligible event view with markets sorted strict-first."""
+
+    kind: Literal["date", "threshold"]
+    direction: ThresholdDirection | None
+    markets: tuple[MonotoneMarket, ...]
+
+    def __post_init__(self) -> None:
+        """Enforce the kind/direction invariant set by the constructors."""
+        if self.kind == "date" and self.direction is not None:
+            msg = f"date-axis AxisSelection must have direction=None, got {self.direction!r}"
+            raise ValueError(msg)
+        if self.kind == "threshold" and self.direction is None:
+            msg = "threshold-axis AxisSelection requires a direction"
+            raise ValueError(msg)
+
+
+def _yes_price(market: Market) -> float | None:
+    """Return market's YES price (``outcome_prices[0]``) or None if missing."""
+    if not market.outcome_prices:
+        return None
+    return market.outcome_prices[0]
+
+
+# Minimum number of markets required to form a meaningful monotone axis.
+_MIN_AXIS_MARKETS = 2
+
+
+def _try_date_axis(markets: list[Market], year_hint: int) -> AxisSelection | None:
+    """Attempt to build a date-axis selection from the market list.
+
+    Returns an :class:`AxisSelection` with ``kind="date"`` when at least two
+    markets yield parseable dates, else ``None``.
+    """
+    extracted: list[MonotoneMarket] = []
+    for market in markets:
+        price = _yes_price(market)
+        if price is None:
+            continue
+        parsed = extract_date_axis(market.group_item_title, year_hint=year_hint)
+        if parsed is None:
+            continue
+        extracted.append(
+            MonotoneMarket(market=market, sort_key=parsed.toordinal(), yes_price=price),
+        )
+    if len(extracted) < _MIN_AXIS_MARKETS:
+        return None
+    ordered = tuple(sorted(extracted, key=lambda m: m.sort_key))
+    return AxisSelection(kind="date", direction=None, markets=ordered)
+
+
+def _try_threshold_axis(markets: list[Market]) -> AxisSelection | None:
+    """Attempt to build a single-direction threshold-axis selection.
+
+    Returns an :class:`AxisSelection` with ``kind="threshold"`` when at least
+    two markets share the same direction, else ``None``.
+    """
+    buckets: dict[ThresholdDirection, list[MonotoneMarket]] = {
+        "higher_is_stricter": [],
+        "lower_is_stricter": [],
+    }
+    for market in markets:
+        price = _yes_price(market)
+        if price is None:
+            continue
+        result = extract_threshold_axis(market.group_item_title)
+        if result is None:
+            continue
+        value, direction = result
+        buckets[direction].append(
+            MonotoneMarket(market=market, sort_key=value, yes_price=price),
+        )
+    # higher_is_stricter is checked first; on a tie at the min-axis-markets
+    # threshold it wins by virtue of dict insertion order.
+    for direction, group in buckets.items():
+        if len(group) >= _MIN_AXIS_MARKETS:
+            reverse = direction == "higher_is_stricter"
+            ordered = tuple(sorted(group, key=lambda m: m.sort_key, reverse=reverse))
+            return AxisSelection(kind="threshold", direction=direction, markets=ordered)
+    return None
+
+
+def select_axis(markets: list[Market], *, year_hint: int) -> AxisSelection | None:
+    """Pick an event-wide axis (date or single-direction threshold).
+
+    Tries date first. Markets where extraction fails are dropped, not
+    reasons to skip the whole event. Returns ``None`` when fewer than two
+    markets remain on a consistent axis.
+
+    Args:
+        markets: All markets in the event.
+        year_hint: Year passed to :func:`extract_date_axis` for labels
+            without an explicit year.
+    """
+    return _try_date_axis(markets, year_hint) or _try_threshold_axis(markets)

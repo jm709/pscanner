@@ -3,8 +3,17 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Any
 
-from pscanner.detectors.monotone import extract_date_axis, extract_threshold_axis
+import pytest
+
+from pscanner.detectors.monotone import (
+    AxisSelection,
+    extract_date_axis,
+    extract_threshold_axis,
+    select_axis,
+)
+from pscanner.poly.models import Market
 
 
 def test_extract_date_axis_iso() -> None:
@@ -125,3 +134,119 @@ def test_extract_threshold_returns_none_for_malformed_number_double_decimal() ->
 def test_extract_threshold_returns_none_for_malformed_number_only_separators() -> None:
     """``Above ,,,`` matches the regex but is not a valid float — return ``None``."""
     assert extract_threshold_axis("Above ,,,") is None
+
+
+# ---------------------------------------------------------------------------
+# select_axis tests
+# ---------------------------------------------------------------------------
+
+
+def _market(
+    *,
+    market_id: str,
+    yes_price: float,
+    group_item_title: str | None = None,
+) -> Market:
+    payload: dict[str, Any] = {
+        "id": market_id,
+        "conditionId": f"0x{market_id}",
+        "question": f"Will it happen for {market_id}?",
+        "slug": f"slug-{market_id}",
+        "outcomes": ["Yes", "No"],
+        "outcomePrices": [yes_price, 1.0 - yes_price],
+        "groupItemTitle": group_item_title,
+    }
+    return Market.model_validate(payload)
+
+
+def test_select_axis_date_sorted_strict_first() -> None:
+    markets = [
+        _market(market_id="m_jun", yes_price=0.70, group_item_title="June 30, 2026"),
+        _market(market_id="m_apr", yes_price=0.07, group_item_title="April 30, 2026"),
+    ]
+    selection = select_axis(markets, year_hint=2026)
+    assert selection is not None
+    assert selection.kind == "date"
+    assert [m.market.id for m in selection.markets] == ["m_apr", "m_jun"]
+    assert selection.markets[0].sort_key < selection.markets[1].sort_key
+
+
+def test_select_axis_threshold_higher_strict_first() -> None:
+    """For ``higher_is_stricter`` axis, the largest value sorts FIRST."""
+    markets = [
+        _market(market_id="m_low", yes_price=0.40, group_item_title="Above $500B"),
+        _market(market_id="m_high", yes_price=0.20, group_item_title="Above $1.5T"),
+    ]
+    selection = select_axis(markets, year_hint=2026)
+    assert selection is not None
+    assert selection.kind == "threshold"
+    assert selection.direction == "higher_is_stricter"
+    assert [m.market.id for m in selection.markets] == ["m_high", "m_low"]
+
+
+def test_select_axis_threshold_lower_strict_first() -> None:
+    """For ``lower_is_stricter`` axis, the smallest value sorts FIRST."""
+    markets = [
+        _market(market_id="m_2", yes_price=0.05, group_item_title="Less than 2 seconds"),
+        _market(market_id="m_10", yes_price=0.20, group_item_title="Less than 10 seconds"),
+    ]
+    selection = select_axis(markets, year_hint=2026)
+    assert selection is not None
+    assert selection.direction == "lower_is_stricter"
+    assert [m.market.id for m in selection.markets] == ["m_2", "m_10"]
+
+
+def test_select_axis_drops_unparseable_markets_when_others_succeed() -> None:
+    """A non-axis market in a mostly-axis event is dropped, not a skip-trigger."""
+    markets = [
+        _market(market_id="m_jun", yes_price=0.70, group_item_title="June 30, 2026"),
+        _market(market_id="m_other", yes_price=0.15, group_item_title="Doesn't IPO"),
+        _market(market_id="m_apr", yes_price=0.07, group_item_title="April 30, 2026"),
+    ]
+    selection = select_axis(markets, year_hint=2026)
+    assert selection is not None
+    assert {m.market.id for m in selection.markets} == {"m_apr", "m_jun"}
+
+
+def test_select_axis_returns_none_when_directions_mixed() -> None:
+    """Mixed-direction threshold events have no clean axis."""
+    markets = [
+        _market(market_id="m_above", yes_price=0.30, group_item_title="Above 5"),
+        _market(market_id="m_below", yes_price=0.40, group_item_title="Below 3"),
+    ]
+    assert select_axis(markets, year_hint=2026) is None
+
+
+def test_select_axis_returns_none_when_fewer_than_two_match() -> None:
+    """A single matchable market can't yield a comparison."""
+    markets = [
+        _market(market_id="m_apr", yes_price=0.07, group_item_title="April 30, 2026"),
+        _market(market_id="m_other", yes_price=0.15, group_item_title="Doesn't IPO"),
+    ]
+    assert select_axis(markets, year_hint=2026) is None
+
+
+def test_select_axis_skips_market_without_yes_price() -> None:
+    """Empty ``outcome_prices`` is unusable; market is dropped."""
+    markets = [
+        _market(market_id="m_jun", yes_price=0.70, group_item_title="June 30, 2026"),
+        _market(market_id="m_apr", yes_price=0.07, group_item_title="April 30, 2026"),
+    ]
+    # Force one market to have no prices.
+    markets[0] = Market.model_validate(
+        {**markets[0].model_dump(by_alias=True), "outcomePrices": []},
+    )
+    assert select_axis(markets, year_hint=2026) is None
+
+
+def test_select_axis_returns_none_for_empty_market_list() -> None:
+    """An event with zero markets is trivially monotone-ineligible."""
+    assert select_axis([], year_hint=2026) is None
+
+
+def test_axis_selection_rejects_inconsistent_kind_and_direction() -> None:
+    """The dataclass rejects ``kind=date`` with a direction or ``kind=threshold`` without."""
+    with pytest.raises(ValueError, match="direction"):
+        AxisSelection(kind="date", direction="higher_is_stricter", markets=())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="direction"):
+        AxisSelection(kind="threshold", direction=None, markets=())
