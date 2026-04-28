@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
+from typing import Literal
 
 _ISO_DATE_PATTERN = re.compile(r"^(?P<y>\d{4})-(?P<m>\d{2})-(?P<d>\d{2})\b")
 _MONTH_NAMES: dict[str, int] = {
@@ -109,3 +110,106 @@ def extract_date_axis(label: str | None, *, year_hint: int | None = None) -> dat
     if not text:
         return None
     return _parse_iso_date(text) or _parse_month_day_date(text, year_hint)
+
+
+ThresholdDirection = Literal["higher_is_stricter", "lower_is_stricter"]
+
+_HIGHER_KEYWORDS = (
+    # Two-char operators must precede single-char to ensure correct alternation match.
+    r">=",
+    r">",
+    r"≥",
+    r"above",
+    r"over",
+    r"at\s+least",
+    r"more\s+than",
+)
+_LOWER_KEYWORDS = (
+    # Two-char operators must precede single-char to ensure correct alternation match.
+    r"<=",
+    r"<",
+    r"≤",
+    r"below",
+    r"under",
+    r"at\s+most",
+    r"less\s+than",
+)
+_HIGHER_PATTERN = re.compile(
+    r"^(?:" + r"|".join(_HIGHER_KEYWORDS) + r")\s*\$?(?P<num>[\d,.]+)\s*(?P<suffix>[KMBT]?)",
+    re.IGNORECASE,
+)
+_LOWER_PATTERN = re.compile(
+    r"^(?:" + r"|".join(_LOWER_KEYWORDS) + r")\s*\$?(?P<num>[\d,.]+)\s*(?P<suffix>[KMBT]?)",
+    re.IGNORECASE,
+)
+# Range bucket: ``$1T-$1.25T``, ``$500B - $750B``. Reject — mutex, not nested.
+_RANGE_BUCKET_PATTERN = re.compile(
+    r"^\$?[\d,.]+\s*[KMBT]?\s*[-–]\s*\$?[\d,.]+",  # noqa: RUF001 - en-dash is intentional
+)
+_SUFFIX_MULTIPLIERS: dict[str, float] = {
+    "": 1.0,
+    "k": 1_000.0,
+    "m": 1_000_000.0,
+    "b": 1_000_000_000.0,
+    "t": 1_000_000_000_000.0,
+}
+
+
+def extract_threshold_axis(label: str | None) -> tuple[float, ThresholdDirection] | None:
+    """Extract a numeric threshold + direction from a market label.
+
+    Recognised forms:
+
+    * ``Above|Over|At least|More than|>=|>|≥`` <number> → ``higher_is_stricter``
+    * ``Below|Under|At most|Less than|<=|<|≤`` <number> → ``lower_is_stricter``
+
+    Range buckets (``$1T-$1.25T``), bare numbers, and ``exactly N`` are not
+    recognised — those are mutex partitions, not nested events.
+
+    Numeric suffixes ``K``, ``M``, ``B``, ``T`` are honoured (case-insensitive).
+
+    Trailing text after the number and optional suffix is ignored
+    (e.g. ``"Less than 2 seconds"`` parses to ``(2.0, "lower_is_stricter")``).
+
+    Args:
+        label: Candidate string (typically ``groupItemTitle``).
+
+    Returns:
+        ``(value, direction)`` tuple, or ``None`` when no monotone-eligible
+        threshold is recognised.
+    """
+    if not label:
+        return None
+    text = label.strip()
+    if not text:
+        return None
+    if _RANGE_BUCKET_PATTERN.match(text):
+        return None
+    higher_match = _HIGHER_PATTERN.match(text)
+    if higher_match is not None:
+        value = _parse_number(higher_match)
+        if value is not None:
+            return (value, "higher_is_stricter")
+    else:
+        lower_match = _LOWER_PATTERN.match(text)
+        if lower_match is not None:
+            value = _parse_number(lower_match)
+            if value is not None:
+                return (value, "lower_is_stricter")
+    return None
+
+
+def _parse_number(match: re.Match[str]) -> float | None:
+    """Combine a regex-matched number and KMBT suffix into a float.
+
+    Returns ``None`` when the captured digit/comma/dot run isn't a valid
+    Python float (e.g. ``"1.2.3"``, ``",,,"``); the regex is broad enough
+    to admit those patterns but ``float()`` rejects them.
+    """
+    raw = match.group("num").replace(",", "")
+    try:
+        base = float(raw)
+    except ValueError:
+        return None
+    suffix = match.group("suffix").lower()
+    return base * _SUFFIX_MULTIPLIERS[suffix]
