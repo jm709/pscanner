@@ -41,9 +41,13 @@ class CorpusMarketsRepo:
         """Bind the repo to an already-initialised connection."""
         self._conn = conn
 
-    def insert_pending(self, market: CorpusMarket) -> None:
-        """Insert a market in ``pending`` state. Idempotent (INSERT OR IGNORE)."""
-        self._conn.execute(
+    def insert_pending(self, market: CorpusMarket) -> int:
+        """Insert a market in ``pending`` state. Idempotent (INSERT OR IGNORE).
+
+        Returns:
+            1 if a new row was inserted, 0 if the market was already present.
+        """
+        cur = self._conn.execute(
             """
             INSERT OR IGNORE INTO corpus_markets (
               condition_id, event_slug, category, closed_at, total_volume_usd,
@@ -60,6 +64,7 @@ class CorpusMarketsRepo:
             ),
         )
         self._conn.commit()
+        return cur.rowcount or 0
 
     def next_pending(self, *, limit: int) -> list[CorpusMarket]:
         """Return up to ``limit`` markets needing work, largest-volume-first.
