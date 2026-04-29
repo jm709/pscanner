@@ -309,3 +309,214 @@ class CorpusTradesRepo:
                 notional_usd=row["notional_usd"],
                 ts=row["ts"],
             )
+
+
+@dataclass(frozen=True)
+class MarketResolution:
+    """Resolved outcome for a closed market."""
+
+    condition_id: str
+    winning_outcome_index: int
+    outcome_yes_won: int  # 1 if YES won, 0 if NO won
+    resolved_at: int
+    source: str
+
+
+class MarketResolutionsRepo:
+    """Upserts and lookups against ``market_resolutions``."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        """Bind the repo to an already-initialised connection."""
+        self._conn = conn
+
+    def upsert(self, resolution: MarketResolution, *, recorded_at: int) -> None:
+        """Insert or replace a resolution row for ``resolution.condition_id``."""
+        self._conn.execute(
+            """
+            INSERT INTO market_resolutions (
+              condition_id, winning_outcome_index, outcome_yes_won,
+              resolved_at, source, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(condition_id) DO UPDATE SET
+              winning_outcome_index = excluded.winning_outcome_index,
+              outcome_yes_won = excluded.outcome_yes_won,
+              resolved_at = excluded.resolved_at,
+              source = excluded.source,
+              recorded_at = excluded.recorded_at
+            """,
+            (
+                resolution.condition_id,
+                resolution.winning_outcome_index,
+                resolution.outcome_yes_won,
+                resolution.resolved_at,
+                resolution.source,
+                recorded_at,
+            ),
+        )
+        self._conn.commit()
+
+    def get(self, condition_id: str) -> MarketResolution | None:
+        """Return the resolution for ``condition_id`` or ``None`` if missing."""
+        row = self._conn.execute(
+            """
+            SELECT condition_id, winning_outcome_index, outcome_yes_won,
+                   resolved_at, source
+            FROM market_resolutions WHERE condition_id = ?
+            """,
+            (condition_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return MarketResolution(
+            condition_id=row["condition_id"],
+            winning_outcome_index=row["winning_outcome_index"],
+            outcome_yes_won=row["outcome_yes_won"],
+            resolved_at=row["resolved_at"],
+            source=row["source"],
+        )
+
+    def missing_for(self, condition_ids: Iterable[str]) -> list[str]:
+        """Return the subset of ``condition_ids`` without a resolution row."""
+        ids = list(condition_ids)
+        if not ids:
+            return []
+        placeholders = ",".join("?" * len(ids))
+        rows = self._conn.execute(
+            f"""
+            SELECT condition_id FROM market_resolutions
+            WHERE condition_id IN ({placeholders})
+            """,  # noqa: S608 — placeholders are fixed in count to len(ids)
+            ids,
+        ).fetchall()
+        present = {row["condition_id"] for row in rows}
+        return [cid for cid in ids if cid not in present]
+
+
+@dataclass(frozen=True)
+class TrainingExample:
+    """One materialized row in the training_examples table.
+
+    The full feature set computed at the trade's timestamp from prior
+    trades only. ``label_won`` is the binary target.
+    """
+
+    tx_hash: str
+    asset_id: str
+    wallet_address: str
+    condition_id: str
+    trade_ts: int
+    built_at: int
+    prior_trades_count: int
+    prior_buys_count: int
+    prior_resolved_buys: int
+    prior_wins: int
+    prior_losses: int
+    win_rate: float | None
+    avg_implied_prob_paid: float | None
+    realized_edge_pp: float | None
+    prior_realized_pnl_usd: float
+    avg_bet_size_usd: float | None
+    median_bet_size_usd: float | None
+    wallet_age_days: float
+    seconds_since_last_trade: int | None
+    prior_trades_30d: int
+    top_category: str | None
+    category_diversity: int
+    bet_size_usd: float
+    bet_size_rel_to_avg: float | None
+    side: str
+    implied_prob_at_buy: float
+    market_category: str
+    market_volume_so_far_usd: float
+    market_unique_traders_so_far: int
+    market_age_seconds: int
+    time_to_resolution_seconds: int | None
+    last_trade_price: float | None
+    price_volatility_recent: float | None
+    label_won: int
+
+
+class TrainingExamplesRepo:
+    """Inserts, truncate, and uniqueness lookups against ``training_examples``."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        """Bind the repo to an already-initialised connection."""
+        self._conn = conn
+
+    def insert_or_ignore(self, examples: Iterable[TrainingExample]) -> int:
+        """Insert examples; rows hitting the unique constraint silently skip."""
+        rows = [_example_to_row(ex) for ex in examples]
+        if not rows:
+            return 0
+        cur = self._conn.executemany(
+            """
+            INSERT OR IGNORE INTO training_examples (
+              tx_hash, asset_id, wallet_address, condition_id, trade_ts, built_at,
+              prior_trades_count, prior_buys_count, prior_resolved_buys,
+              prior_wins, prior_losses, win_rate, avg_implied_prob_paid,
+              realized_edge_pp, prior_realized_pnl_usd,
+              avg_bet_size_usd, median_bet_size_usd, wallet_age_days,
+              seconds_since_last_trade, prior_trades_30d, top_category,
+              category_diversity, bet_size_usd, bet_size_rel_to_avg, side,
+              implied_prob_at_buy, market_category, market_volume_so_far_usd,
+              market_unique_traders_so_far, market_age_seconds,
+              time_to_resolution_seconds, last_trade_price, price_volatility_recent,
+              label_won
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        self._conn.commit()
+        return cur.rowcount or 0
+
+    def truncate(self) -> None:
+        """Delete every row in ``training_examples``."""
+        self._conn.execute("DELETE FROM training_examples")
+        self._conn.commit()
+
+    def existing_keys(self) -> set[tuple[str, str, str]]:
+        """Return the set of (tx_hash, asset_id, wallet_address) seen so far."""
+        rows = self._conn.execute(
+            "SELECT tx_hash, asset_id, wallet_address FROM training_examples"
+        ).fetchall()
+        return {(row["tx_hash"], row["asset_id"], row["wallet_address"]) for row in rows}
+
+
+def _example_to_row(ex: TrainingExample) -> tuple[object, ...]:
+    return (
+        ex.tx_hash,
+        ex.asset_id,
+        ex.wallet_address,
+        ex.condition_id,
+        ex.trade_ts,
+        ex.built_at,
+        ex.prior_trades_count,
+        ex.prior_buys_count,
+        ex.prior_resolved_buys,
+        ex.prior_wins,
+        ex.prior_losses,
+        ex.win_rate,
+        ex.avg_implied_prob_paid,
+        ex.realized_edge_pp,
+        ex.prior_realized_pnl_usd,
+        ex.avg_bet_size_usd,
+        ex.median_bet_size_usd,
+        ex.wallet_age_days,
+        ex.seconds_since_last_trade,
+        ex.prior_trades_30d,
+        ex.top_category,
+        ex.category_diversity,
+        ex.bet_size_usd,
+        ex.bet_size_rel_to_avg,
+        ex.side,
+        ex.implied_prob_at_buy,
+        ex.market_category,
+        ex.market_volume_so_far_usd,
+        ex.market_unique_traders_so_far,
+        ex.market_age_seconds,
+        ex.time_to_resolution_seconds,
+        ex.last_trade_price,
+        ex.price_volatility_recent,
+        ex.label_won,
+    )
