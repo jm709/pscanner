@@ -13,7 +13,9 @@ No DB handles, no network, no clocks. All non-determinism enters via
 
 from __future__ import annotations
 
+import statistics
 from dataclasses import dataclass, field, replace
+from typing import Protocol
 
 
 @dataclass(frozen=True)
@@ -177,4 +179,142 @@ def apply_trade_to_market(state: MarketState, trade: Trade) -> MarketState:
         unique_traders_so_far=new_traders,
         last_trade_price=trade.price,
         recent_prices=(*state.recent_prices, trade.price)[-20:],
+    )
+
+
+@dataclass(frozen=True)
+class FeatureRow:
+    """All features computed for a single trade.
+
+    Mirrors the columns of ``training_examples`` (sans identity columns
+    and ``built_at``).
+    """
+
+    prior_trades_count: int
+    prior_buys_count: int
+    prior_resolved_buys: int
+    prior_wins: int
+    prior_losses: int
+    win_rate: float | None
+    avg_implied_prob_paid: float | None
+    realized_edge_pp: float | None
+    prior_realized_pnl_usd: float
+    avg_bet_size_usd: float | None
+    median_bet_size_usd: float | None
+    wallet_age_days: float
+    seconds_since_last_trade: int | None
+    prior_trades_30d: int
+    top_category: str | None
+    category_diversity: int
+    bet_size_usd: float
+    bet_size_rel_to_avg: float | None
+    side: str
+    implied_prob_at_buy: float
+    market_category: str
+    market_volume_so_far_usd: float
+    market_unique_traders_so_far: int
+    market_age_seconds: int
+    time_to_resolution_seconds: int | None
+    last_trade_price: float | None
+    price_volatility_recent: float | None
+
+
+class HistoryProvider(Protocol):
+    """Looks up wallet/market state at a point in time.
+
+    Two implementations: ``StreamingHistoryProvider`` (corpus, walks
+    ``corpus_trades`` chronologically) and ``LiveHistoryProvider`` (v2,
+    fed by live trade stream). Both must return state computed strictly
+    from events with ``ts < as_of_ts``.
+    """
+
+    def wallet_state(self, wallet_address: str, as_of_ts: int) -> WalletState:
+        """Return wallet state strictly before ``as_of_ts``."""
+        ...
+
+    def market_state(self, condition_id: str, as_of_ts: int) -> MarketState:
+        """Return market state strictly before ``as_of_ts``."""
+        ...
+
+    def market_metadata(self, condition_id: str) -> MarketMetadata:
+        """Return static market metadata (not time-varying)."""
+        ...
+
+
+_SECONDS_PER_DAY = 86_400
+_MIN_PRICES_FOR_VOLATILITY = 2
+
+
+def compute_features(trade: Trade, history: HistoryProvider) -> FeatureRow:
+    """Compute the full feature row for a trade, point-in-time correct.
+
+    Pure function: takes only ``trade`` and ``history``. All
+    non-determinism enters via the provider.
+    """
+    wallet = history.wallet_state(trade.wallet_address, as_of_ts=trade.ts)
+    market = history.market_state(trade.condition_id, as_of_ts=trade.ts)
+    meta = history.market_metadata(trade.condition_id)
+
+    win_rate = (
+        wallet.prior_wins / wallet.prior_resolved_buys if wallet.prior_resolved_buys > 0 else None
+    )
+    avg_prob = (
+        wallet.cumulative_buy_price_sum / wallet.cumulative_buy_count
+        if wallet.cumulative_buy_count > 0
+        else None
+    )
+    edge = win_rate - avg_prob if win_rate is not None and avg_prob is not None else None
+    avg_bet = sum(wallet.bet_sizes) / len(wallet.bet_sizes) if wallet.bet_sizes else None
+    median_bet = statistics.median(wallet.bet_sizes) if wallet.bet_sizes else None
+    rel_to_avg = trade.notional_usd / avg_bet if avg_bet is not None and avg_bet > 0 else None
+    seconds_since_last = (
+        trade.ts - wallet.last_trade_ts if wallet.last_trade_ts is not None else None
+    )
+    wallet_age_days = max(0.0, (trade.ts - wallet.first_seen_ts) / _SECONDS_PER_DAY)
+    cutoff = trade.ts - 30 * _SECONDS_PER_DAY
+    recent_30d = sum(1 for ts in wallet.recent_30d_trades if ts >= cutoff)
+    top_cat = (
+        max(wallet.category_counts.items(), key=lambda kv: kv[1])[0]
+        if wallet.category_counts
+        else None
+    )
+    diversity = len(wallet.category_counts)
+
+    implied_prob = trade.price
+
+    volatility = (
+        statistics.pstdev(market.recent_prices)
+        if len(market.recent_prices) >= _MIN_PRICES_FOR_VOLATILITY
+        else None
+    )
+    time_to_resolution = meta.closed_at - trade.ts
+
+    return FeatureRow(
+        prior_trades_count=wallet.prior_trades_count,
+        prior_buys_count=wallet.prior_buys_count,
+        prior_resolved_buys=wallet.prior_resolved_buys,
+        prior_wins=wallet.prior_wins,
+        prior_losses=wallet.prior_losses,
+        win_rate=win_rate,
+        avg_implied_prob_paid=avg_prob,
+        realized_edge_pp=edge,
+        prior_realized_pnl_usd=wallet.realized_pnl_usd,
+        avg_bet_size_usd=avg_bet,
+        median_bet_size_usd=median_bet,
+        wallet_age_days=wallet_age_days,
+        seconds_since_last_trade=seconds_since_last,
+        prior_trades_30d=recent_30d,
+        top_category=top_cat,
+        category_diversity=diversity,
+        bet_size_usd=trade.notional_usd,
+        bet_size_rel_to_avg=rel_to_avg,
+        side=trade.outcome_side,
+        implied_prob_at_buy=implied_prob,
+        market_category=meta.category,
+        market_volume_so_far_usd=market.volume_so_far_usd,
+        market_unique_traders_so_far=len(market.unique_traders_so_far),
+        market_age_seconds=trade.ts - market.market_age_start_ts,
+        time_to_resolution_seconds=time_to_resolution,
+        last_trade_price=market.last_trade_price,
+        price_volatility_recent=volatility,
     )
