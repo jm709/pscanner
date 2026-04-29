@@ -13,6 +13,7 @@ No DB handles, no network, no clocks. All non-determinism enters via
 
 from __future__ import annotations
 
+import heapq
 import statistics
 from dataclasses import dataclass, field, replace
 from typing import Protocol
@@ -318,3 +319,139 @@ def compute_features(trade: Trade, history: HistoryProvider) -> FeatureRow:
         last_trade_price=market.last_trade_price,
         price_volatility_recent=volatility,
     )
+
+
+@dataclass(frozen=True)
+class _UnresolvedBuy:
+    """A BUY fill waiting for its market's resolution to be registered."""
+
+    seq: int
+    condition_id: str
+    notional_usd: float
+    size: float
+    side_yes: bool
+
+
+@dataclass
+class _WalletAccumulator:
+    """Mutable wrapper around WalletState for streaming updates."""
+
+    state: WalletState
+    # Heap of (resolution_ts, seq, _UnresolvedBuy) — only entries whose
+    # resolution is already known.
+    heap: list[tuple[int, int, _UnresolvedBuy]]
+    # Buys whose market has not yet had register_resolution() called.
+    unscheduled: list[_UnresolvedBuy]
+
+
+class StreamingHistoryProvider:
+    """In-memory provider that walks events chronologically.
+
+    Used inside ``build-features``: the orchestrator calls
+    ``wallet_state(...)`` and ``market_state(...)`` BEFORE folding each
+    trade in via ``observe(...)``. Resolutions are registered up-front
+    or after-the-fact via ``register_resolution(...)`` and applied lazily
+    when the next ``wallet_state`` query crosses their ``resolution_ts``.
+    """
+
+    def __init__(self, metadata: dict[str, MarketMetadata]) -> None:
+        """Create an empty provider seeded with per-market metadata."""
+        self._metadata = metadata
+        self._wallets: dict[str, _WalletAccumulator] = {}
+        self._markets: dict[str, MarketState] = {}
+        self._resolutions: dict[str, tuple[int, int]] = {}  # cond_id -> (resolved_at, yes_won)
+        self._seq = 0
+
+    def market_metadata(self, condition_id: str) -> MarketMetadata:
+        """Return static metadata for ``condition_id``; raises KeyError if unknown."""
+        return self._metadata[condition_id]
+
+    def register_resolution(
+        self,
+        *,
+        condition_id: str,
+        resolved_at: int,
+        outcome_yes_won: int,
+    ) -> None:
+        """Record a market's resolution.
+
+        Any unscheduled buys on this market across all wallets are moved
+        onto each wallet's resolution heap so they drain at the correct ts.
+        """
+        self._resolutions[condition_id] = (resolved_at, outcome_yes_won)
+        for accum in self._wallets.values():
+            remaining: list[_UnresolvedBuy] = []
+            for buy in accum.unscheduled:
+                if buy.condition_id == condition_id:
+                    heapq.heappush(accum.heap, (resolved_at, buy.seq, buy))
+                else:
+                    remaining.append(buy)
+            accum.unscheduled = remaining
+
+    def observe(self, trade: Trade) -> None:
+        """Fold a trade into running wallet + market state."""
+        accum = self._wallets.get(trade.wallet_address)
+        if accum is None:
+            accum = _WalletAccumulator(
+                state=empty_wallet_state(first_seen_ts=trade.ts),
+                heap=[],
+                unscheduled=[],
+            )
+            self._wallets[trade.wallet_address] = accum
+
+        if trade.bs == "BUY":
+            accum.state = apply_buy_to_state(accum.state, trade)
+            self._seq += 1
+            buy = _UnresolvedBuy(
+                seq=self._seq,
+                condition_id=trade.condition_id,
+                notional_usd=trade.notional_usd,
+                size=trade.size,
+                side_yes=trade.outcome_side == "YES",
+            )
+            resolution = self._resolutions.get(trade.condition_id)
+            if resolution is not None:
+                resolved_at, _ = resolution
+                heapq.heappush(accum.heap, (resolved_at, buy.seq, buy))
+            else:
+                accum.unscheduled.append(buy)
+        elif trade.bs == "SELL":
+            accum.state = apply_sell_to_state(accum.state, trade)
+
+        market = self._markets.get(trade.condition_id)
+        if market is None:
+            market = empty_market_state(market_age_start_ts=trade.ts)
+        self._markets[trade.condition_id] = apply_trade_to_market(market, trade)
+
+    def wallet_state(self, wallet_address: str, as_of_ts: int) -> WalletState:
+        """Return the wallet's state at ``as_of_ts``, draining ready resolutions."""
+        accum = self._wallets.get(wallet_address)
+        if accum is None:
+            return empty_wallet_state(first_seen_ts=as_of_ts)
+        while accum.heap and accum.heap[0][0] < as_of_ts:
+            _, _, buy = heapq.heappop(accum.heap)
+            resolution = self._resolutions.get(buy.condition_id)
+            if resolution is None:
+                continue
+            _, yes_won = resolution
+            won = (yes_won == 1) if buy.side_yes else (yes_won == 0)
+            payout = buy.size if won else 0.0
+            accum.state = apply_resolution_to_state(
+                accum.state,
+                won=won,
+                notional_usd=buy.notional_usd,
+                payout_usd=payout,
+            )
+        return accum.state
+
+    def market_state(self, condition_id: str, as_of_ts: int) -> MarketState:
+        """Return per-market running state.
+
+        ``as_of_ts`` is unused — caller must query before observing the
+        next event for the same market.
+        """
+        del as_of_ts
+        return self._markets.get(
+            condition_id,
+            empty_market_state(market_age_start_ts=0),
+        )
