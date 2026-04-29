@@ -12,6 +12,7 @@ Conventions:
 - ``AssetId``: CLOB token id (78-digit decimal string).
 - ``EventId``: gamma's numeric event id (e.g. ``"16167"``).
 - ``EventSlug``: gamma's URL slug (e.g. ``"trump-2024-election"``).
+- ``WalletAddress``: 0x-prefixed Ethereum wallet address.
 """
 
 from __future__ import annotations
@@ -23,3 +24,4 @@ ConditionId = NewType("ConditionId", str)
 AssetId = NewType("AssetId", str)
 EventId = NewType("EventId", str)
 EventSlug = NewType("EventSlug", str)
+WalletAddress = NewType("WalletAddress", str)
