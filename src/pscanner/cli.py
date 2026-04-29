@@ -33,6 +33,7 @@ from rich.table import Table
 
 from pscanner.alerts.models import Alert
 from pscanner.config import Config
+from pscanner.corpus.cli import run_corpus_command
 from pscanner.scheduler import Scanner
 from pscanner.store.db import init_db
 from pscanner.store.repo import (
@@ -63,6 +64,8 @@ def main(argv: list[str] | None = None) -> int:
     """
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.command == "corpus":
+        return asyncio.run(run_corpus_command(args.corpus_argv))
     config_path = _resolve_config_path(args)
     if not _config_path_is_acceptable(config_path):
         sys.stderr.write(f"{_PROG}: config file not found: {config_path}\n")
@@ -149,6 +152,16 @@ def _build_parser() -> argparse.ArgumentParser:
     paper = sub.add_parser("paper", help="paper-trading commands")
     paper_sub = paper.add_subparsers(dest="paper_cmd", required=True)
     paper_sub.add_parser("status", help="summarise paper-trading bankroll and PnL")
+
+    corpus = sub.add_parser(
+        "corpus",
+        help="historical trade corpus subcommands",
+    )
+    corpus.add_argument(
+        "corpus_argv",
+        nargs=argparse.REMAINDER,
+        help="forwarded to `pscanner corpus --help`",
+    )
     return parser
 
 
