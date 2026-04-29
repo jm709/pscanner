@@ -1,0 +1,79 @@
+"""Tests for ``pscanner.corpus.db`` schema bootstrap."""
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+from pscanner.corpus.db import _SCHEMA_STATEMENTS, init_corpus_db
+
+_EXPECTED_TABLES = {
+    "corpus_markets",
+    "corpus_trades",
+    "market_resolutions",
+    "training_examples",
+    "corpus_state",
+}
+
+
+def test_init_corpus_db_creates_all_tables() -> None:
+    conn = init_corpus_db(Path(":memory:"))
+    try:
+        rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        names = {row["name"] for row in rows}
+        assert _EXPECTED_TABLES.issubset(names)
+    finally:
+        conn.close()
+
+
+def test_init_corpus_db_is_idempotent() -> None:
+    conn1 = init_corpus_db(Path(":memory:"))
+    conn1.close()
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        for _ in range(2):
+            for stmt in _SCHEMA_STATEMENTS:
+                conn.execute(stmt)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_init_corpus_db_sets_row_factory() -> None:
+    conn = init_corpus_db(Path(":memory:"))
+    try:
+        assert conn.row_factory is sqlite3.Row
+    finally:
+        conn.close()
+
+
+def test_corpus_trades_unique_key() -> None:
+    conn = init_corpus_db(Path(":memory:"))
+    try:
+        conn.execute(
+            """
+            INSERT INTO corpus_trades
+              (tx_hash, asset_id, wallet_address, condition_id,
+               outcome_side, bs, price, size, notional_usd, ts)
+            VALUES ('0xtx', 'asset1', '0xw', 'cond1',
+                    'YES', 'BUY', 0.5, 100.0, 50.0, 1000)
+            """
+        )
+        conn.commit()
+        try:
+            conn.execute(
+                """
+                INSERT INTO corpus_trades
+                  (tx_hash, asset_id, wallet_address, condition_id,
+                   outcome_side, bs, price, size, notional_usd, ts)
+                VALUES ('0xtx', 'asset1', '0xw', 'cond1',
+                        'YES', 'BUY', 0.5, 100.0, 50.0, 1000)
+                """
+            )
+            conn.commit()
+            raise AssertionError("expected UNIQUE constraint failure")
+        except sqlite3.IntegrityError:
+            pass
+    finally:
+        conn.close()
