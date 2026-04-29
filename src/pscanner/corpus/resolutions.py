@@ -1,0 +1,76 @@
+"""Market-resolution lookup for the corpus pipeline.
+
+Translates a gamma ``Market`` into a ``MarketResolution`` (which side won)
+and writes to ``market_resolutions``. Skips disputed/voided markets where
+no outcome price equals 1.0.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from typing import Final
+
+import structlog
+
+from pscanner.corpus.repos import MarketResolution, MarketResolutionsRepo
+from pscanner.poly.gamma import GammaClient
+from pscanner.poly.models import Market
+
+_log = structlog.get_logger(__name__)
+_RESOLVED_PRICE: Final[float] = 1.0
+
+
+def determine_outcome_yes_won(market: Market) -> int | None:
+    """Return 1 if YES (index 0) won, 0 if NO (index 1) won, else None.
+
+    Returns None if outcome_prices is empty or no price is exactly 1.0
+    (disputed/voided markets).
+    """
+    if not market.outcome_prices:
+        return None
+    for idx, price in enumerate(market.outcome_prices):
+        if price == _RESOLVED_PRICE:
+            return 1 if idx == 0 else 0
+    return None
+
+
+async def record_resolutions(
+    *,
+    gamma: GammaClient,
+    repo: MarketResolutionsRepo,
+    targets: Iterable[tuple[str, str, int]],
+    now_ts: int,
+) -> int:
+    """Fetch resolutions for the given (condition_id, slug, resolved_at) tuples.
+
+    Args:
+        gamma: Gamma client with ``get_market_by_slug``.
+        repo: ``MarketResolutionsRepo`` to upsert into.
+        targets: Iterable of ``(condition_id, market_slug, resolved_at_hint)``.
+        now_ts: Unix seconds, recorded as ``recorded_at`` on each row.
+
+    Returns:
+        Count of resolutions actually written (excludes skipped/disputed).
+    """
+    written = 0
+    for condition_id, slug, resolved_at in targets:
+        market = await gamma.get_market_by_slug(slug)
+        if market is None:
+            _log.warning("corpus.resolution_market_not_found", condition_id=condition_id, slug=slug)
+            continue
+        yes_won = determine_outcome_yes_won(market)
+        if yes_won is None:
+            _log.warning("corpus.resolution_disputed", condition_id=condition_id, slug=slug)
+            continue
+        repo.upsert(
+            MarketResolution(
+                condition_id=condition_id,
+                winning_outcome_index=0 if yes_won == 1 else 1,
+                outcome_yes_won=yes_won,
+                resolved_at=resolved_at,
+                source="gamma",
+            ),
+            recorded_at=now_ts,
+        )
+        written += 1
+    return written
