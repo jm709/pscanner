@@ -8,7 +8,9 @@ take a ``sqlite3.Connection`` injected at construction.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+from typing import Final
 
 
 @dataclass(frozen=True)
@@ -203,3 +205,107 @@ class CorpusStateRepo:
             (key, value, updated_at),
         )
         self._conn.commit()
+
+
+_NOTIONAL_FLOOR_USD: Final[float] = 10.0
+
+
+@dataclass(frozen=True)
+class CorpusTrade:
+    """One BUY or SELL fill captured by the market-walker.
+
+    Wallet addresses are normalized to lowercase at insert time. ``bs`` is
+    ``BUY`` or ``SELL``; ``outcome_side`` is ``YES`` or ``NO``. ``price``
+    is the implied probability paid (already normalized so YES@0.7 and
+    NO@0.3 are equivalent buys of the same outcome).
+    """
+
+    tx_hash: str
+    asset_id: str
+    wallet_address: str
+    condition_id: str
+    outcome_side: str
+    bs: str
+    price: float
+    size: float
+    notional_usd: float
+    ts: int
+
+
+class CorpusTradesRepo:
+    """Append-only writes + chronological streaming reads on ``corpus_trades``.
+
+    The notional floor (``$10``) is applied at insert time — sub-floor
+    trades never land. The unique constraint
+    ``(tx_hash, asset_id, wallet_address)`` makes ``insert_batch``
+    idempotent.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        """Bind the repo to an already-initialised connection."""
+        self._conn = conn
+
+    def insert_batch(self, trades: Iterable[CorpusTrade]) -> int:
+        """Insert trades, skipping duplicates and sub-floor notionals.
+
+        Returns the number of rows actually inserted.
+        """
+        rows = []
+        for t in trades:
+            if t.notional_usd < _NOTIONAL_FLOOR_USD:
+                continue
+            rows.append(
+                (
+                    t.tx_hash,
+                    t.asset_id,
+                    t.wallet_address.lower(),
+                    t.condition_id,
+                    t.outcome_side,
+                    t.bs,
+                    t.price,
+                    t.size,
+                    t.notional_usd,
+                    t.ts,
+                )
+            )
+        if not rows:
+            return 0
+        cur = self._conn.executemany(
+            """
+            INSERT OR IGNORE INTO corpus_trades (
+              tx_hash, asset_id, wallet_address, condition_id,
+              outcome_side, bs, price, size, notional_usd, ts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        self._conn.commit()
+        return cur.rowcount or 0
+
+    def iter_chronological(self) -> Iterator[CorpusTrade]:
+        """Yield every trade in (ts, tx_hash, asset_id) order.
+
+        Tie-breaking on ``(tx_hash, asset_id)`` makes the iteration
+        order deterministic for the streaming feature pipeline.
+        """
+        cursor = self._conn.execute(
+            """
+            SELECT tx_hash, asset_id, wallet_address, condition_id,
+                   outcome_side, bs, price, size, notional_usd, ts
+            FROM corpus_trades
+            ORDER BY ts, tx_hash, asset_id
+            """
+        )
+        for row in cursor:
+            yield CorpusTrade(
+                tx_hash=row["tx_hash"],
+                asset_id=row["asset_id"],
+                wallet_address=row["wallet_address"],
+                condition_id=row["condition_id"],
+                outcome_side=row["outcome_side"],
+                bs=row["bs"],
+                price=row["price"],
+                size=row["size"],
+                notional_usd=row["notional_usd"],
+                ts=row["ts"],
+            )
