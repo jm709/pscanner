@@ -37,3 +37,40 @@ def realized_edge_metric(
     if int(take.sum()) < n_min:
         return -1.0
     return float((y_true[take] - implied_prob[take]).mean())
+
+
+def per_decile_edge_breakdown(
+    y_true: np.ndarray,
+    y_pred_proba: np.ndarray,
+    implied_prob: np.ndarray,
+) -> dict[str, dict[str, float]]:
+    """Stratify realized edge over taken bets by implied-prob decile.
+
+    Diagnostic only — not the optimization target. Reveals whether
+    edge is concentrated in cheap-side bets (longshot finder) or
+    distributed across the implied-prob range (mispricing detector).
+
+    Args:
+        y_true: 1D array of binary labels.
+        y_pred_proba: 1D array of model probabilities.
+        implied_prob: 1D array of implied probabilities at trade time.
+
+    Returns:
+        Mapping from decile label (e.g. ``"0.0-0.1"``) to
+        ``{"n": <count>, "mean_edge": <mean_realized_edge>}``. Deciles
+        with zero taken bets are omitted.
+    """
+    take = y_pred_proba > implied_prob
+    out: dict[str, dict[str, float]] = {}
+    for decile in range(10):
+        lo = decile / 10
+        hi = (decile + 1) / 10
+        in_decile = (implied_prob >= lo) & (implied_prob < hi)
+        mask = take & in_decile
+        n = int(mask.sum())
+        if n == 0:
+            continue
+        mean_edge = float((y_true[mask] - implied_prob[mask]).mean())
+        label = f"{lo:.1f}-{hi:.1f}"
+        out[label] = {"n": float(n), "mean_edge": mean_edge}
+    return out
