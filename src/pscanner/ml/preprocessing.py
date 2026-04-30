@@ -20,6 +20,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 
 _NONE_TOKEN = "__none__"  # noqa: S105 -- explicit null sentinel level, not a credential
@@ -181,3 +182,26 @@ def load_dataset(db_path: Path) -> pl.DataFrame:
     finally:
         conn.close()
     return pl.DataFrame(rows, schema=cols, orient="row")
+
+
+def build_feature_matrix(
+    df: pl.DataFrame,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Extract ``(X, y, implied_prob)`` numpy arrays from a preprocessed split.
+
+    Drops carrier columns and the ``label_won`` column from ``X``. The
+    feature column ordering is the surviving column order on ``df``.
+    Polars nulls become ``np.nan`` in float columns -- XGBoost's
+    missing-direction rule handles them at split time.
+
+    Args:
+        df: A preprocessed Polars DataFrame (post-drop, post-encoding).
+
+    Returns:
+        ``(X, y, implied_prob)`` tuple.
+    """
+    feature_cols = [c for c in df.columns if c not in (*CARRIER_COLS, "label_won")]
+    x_matrix = df.select(feature_cols).to_numpy()
+    y = df["label_won"].to_numpy()
+    implied = df["implied_prob_at_buy"].to_numpy()
+    return x_matrix, y, implied

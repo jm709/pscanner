@@ -7,6 +7,7 @@ import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 
 from pscanner.corpus.db import init_corpus_db
@@ -16,6 +17,7 @@ from pscanner.ml.preprocessing import (
     LEAKAGE_COLS,
     OneHotEncoder,
     Split,
+    build_feature_matrix,
     drop_leakage_cols,
     load_dataset,
     temporal_split,
@@ -236,3 +238,37 @@ def test_load_dataset_joins_resolved_at(
     assert "label_won" in out.columns
     # Inner join: every row has a resolved_at.
     assert out["resolved_at"].null_count() == 0
+
+
+def test_build_feature_matrix_extracts_arrays() -> None:
+    df = pl.DataFrame(
+        {
+            "condition_id": ["a", "b"],
+            "trade_ts": [1, 2],
+            "resolved_at": [10, 20],
+            "implied_prob_at_buy": [0.4, 0.7],
+            "feature_a": [1.0, 2.0],
+            "feature_b": [3.0, 4.0],
+            "label_won": [1, 0],
+        }
+    )
+    X, y, implied = build_feature_matrix(df)  # noqa: N806 -- ML matrix convention
+    assert X.shape == (2, 3)  # implied_prob_at_buy, feature_a, feature_b
+    assert y.tolist() == [1, 0]
+    assert implied.tolist() == [0.4, 0.7]
+
+
+def test_build_feature_matrix_preserves_nan() -> None:
+    df = pl.DataFrame(
+        {
+            "condition_id": ["a"],
+            "trade_ts": [1],
+            "resolved_at": [10],
+            "implied_prob_at_buy": [0.5],
+            "win_rate": [None],
+            "label_won": [1],
+        }
+    )
+    X, _, _ = build_feature_matrix(df)  # noqa: N806 -- ML matrix convention
+    # Polars null -> numpy nan.
+    assert np.isnan(X[0, 1])
