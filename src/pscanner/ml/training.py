@@ -20,7 +20,9 @@ import xgboost as xgb
 
 from pscanner.ml.metrics import per_decile_edge_breakdown, realized_edge_metric
 from pscanner.ml.preprocessing import (
+    CARRIER_COLS,
     CATEGORICAL_COLS,
+    LEAKAGE_COLS,
     OneHotEncoder,
     build_feature_matrix,
     drop_leakage_cols,
@@ -175,7 +177,12 @@ def _dump_artifacts(
 ) -> None:
     """Write model, preprocessor, and metrics to ``output_dir``."""
     booster.save_model(str(output_dir / "model.json"))
-    (output_dir / "preprocessor.json").write_text(json.dumps(encoder.to_json(), indent=2))
+    preprocessor = {
+        "leakage_cols": list(LEAKAGE_COLS),
+        "carrier_cols": list(CARRIER_COLS),
+        "encoder": encoder.to_json(),
+    }
+    (output_dir / "preprocessor.json").write_text(json.dumps(preprocessor, indent=2))
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
 
 
@@ -201,6 +208,7 @@ def run_study(
         seed: Master RNG seed.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+    np.random.seed(seed)
 
     df = drop_leakage_cols(df)
     splits = temporal_split(df)

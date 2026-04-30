@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import numpy as np
 
+_LAST_DECILE = 9
+
 
 def realized_edge_metric(
     y_true: np.ndarray,
@@ -65,7 +67,10 @@ def per_decile_edge_breakdown(
     for decile in range(10):
         lo = decile / 10
         hi = (decile + 1) / 10
-        in_decile = (implied_prob >= lo) & (implied_prob < hi)
+        if decile < _LAST_DECILE:
+            in_decile = (implied_prob >= lo) & (implied_prob < hi)
+        else:
+            in_decile = (implied_prob >= lo) & (implied_prob <= hi)
         mask = take & in_decile
         n = int(mask.sum())
         if n == 0:

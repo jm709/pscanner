@@ -167,3 +167,56 @@ def test_run_study_writes_all_artifacts(
     rates = metrics["split_label_won_rate"]
     assert {"train", "val", "test"} == set(rates.keys())
     assert metrics["seed"] == 42
+    preprocessor = json.loads((output_dir / "preprocessor.json").read_text())
+    assert "leakage_cols" in preprocessor
+    assert "carrier_cols" in preprocessor
+    assert "encoder" in preprocessor
+    assert "tx_hash" in preprocessor["leakage_cols"]
+    assert "condition_id" in preprocessor["carrier_cols"]
+    assert "side" in preprocessor["encoder"]["levels"]
+
+
+def test_run_study_n_jobs_2_completes_without_lock_errors(
+    tmp_path: Path,
+    make_synthetic_examples: Callable[..., pl.DataFrame],
+) -> None:
+    df = make_synthetic_examples(n_markets=20, rows_per_market=15, seed=3)
+    output_dir = tmp_path / "run_parallel"
+    run_study(
+        df=df,
+        output_dir=output_dir,
+        n_trials=2,
+        n_jobs=2,
+        n_min=5,
+        seed=42,
+    )
+    assert (output_dir / "study.db").exists()
+    assert (output_dir / "metrics.json").exists()
+
+
+def test_run_study_is_deterministic_under_same_seed(
+    tmp_path: Path,
+    make_synthetic_examples: Callable[..., pl.DataFrame],
+) -> None:
+    df = make_synthetic_examples(n_markets=20, rows_per_market=15, seed=3)
+
+    def run_once(name: str) -> dict[str, object]:
+        out = tmp_path / name
+        run_study(
+            df=df,
+            output_dir=out,
+            n_trials=3,
+            n_jobs=1,  # n_jobs=1 for strict determinism
+            n_min=5,
+            seed=42,
+        )
+        return json.loads((out / "metrics.json").read_text())
+
+    a = run_once("a")
+    b = run_once("b")
+    assert a["best_params"] == b["best_params"]
+    assert a["best_iteration"] == b["best_iteration"]
+    assert a["best_val_edge"] == b["best_val_edge"]
+    assert a["test_edge"] == b["test_edge"]
+    assert a["test_accuracy"] == b["test_accuracy"]
+    assert a["test_logloss"] == b["test_logloss"]
