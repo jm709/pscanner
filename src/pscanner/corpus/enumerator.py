@@ -15,6 +15,11 @@ from pscanner.poly.models import Event
 _log = structlog.get_logger(__name__)
 VOLUME_GATE_USD: Final[float] = 1_000_000.0
 _HTTP_SERVER_ERROR_FLOOR: Final[int] = 500
+# Polymarket's gamma `/events` uses 422 to signal a deep-offset overflow
+# (mirroring the documented 400 cap on `/trades`). Some deployments
+# return 500 instead. Both terminate enumeration cleanly with whatever
+# pages succeeded.
+_DEEP_OFFSET_STATUS: Final[int] = 422
 
 
 def _qualifying_markets(event: Event, now_ts: int) -> list[CorpusMarket]:
@@ -78,7 +83,7 @@ async def enumerate_closed_markets(
                 inserted += repo.insert_pending(corpus)
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code
-        if status < _HTTP_SERVER_ERROR_FLOOR:
+        if status != _DEEP_OFFSET_STATUS and status < _HTTP_SERVER_ERROR_FLOOR:
             raise
         _log.warning(
             "corpus.enumerate_pagination_capped",

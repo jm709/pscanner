@@ -138,22 +138,35 @@ async def test_enumerate_treats_5xx_as_end_of_catalog(
     assert row is not None
 
 
-async def _events_then_4xx(events: list[Event]) -> AsyncIterator[Event]:
+async def _events_then_status(events: list[Event], status: int) -> AsyncIterator[Event]:
     for ev in events:
         yield ev
     request = httpx.Request("GET", "https://gamma-api.polymarket.com/events")
-    response = httpx.Response(404, request=request)
-    raise httpx.HTTPStatusError("not found", request=request, response=response)
+    response = httpx.Response(status, request=request)
+    raise httpx.HTTPStatusError(f"status {status}", request=request, response=response)
 
 
 @pytest.mark.asyncio
-async def test_enumerate_propagates_4xx(tmp_corpus_db: sqlite3.Connection) -> None:
-    """4xx errors from gamma should not be swallowed — they signal a real
-    client problem and must surface to the caller.
+async def test_enumerate_treats_422_as_end_of_catalog(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """Polymarket returns 422 past a deep ``/events`` offset on some
+    deployments. Same handling as 5xx — log and stop the walk cleanly.
     """
     repo = CorpusMarketsRepo(tmp_corpus_db)
     events = [_event("e1", [_market("c1", VOLUME_GATE_USD + 1)])]
     stub = MagicMock()
-    stub.iter_events = lambda **_kw: _events_then_4xx(events)
+    stub.iter_events = lambda **_kw: _events_then_status(events, status=422)
+    inserted = await enumerate_closed_markets(gamma=stub, repo=repo, now_ts=1_000, since_ts=None)
+    assert inserted == 1
+
+
+@pytest.mark.asyncio
+async def test_enumerate_propagates_real_4xx(tmp_corpus_db: sqlite3.Connection) -> None:
+    """A 404 (or other non-422 4xx) is a real client error — must propagate."""
+    repo = CorpusMarketsRepo(tmp_corpus_db)
+    events = [_event("e1", [_market("c1", VOLUME_GATE_USD + 1)])]
+    stub = MagicMock()
+    stub.iter_events = lambda **_kw: _events_then_status(events, status=404)
     with pytest.raises(httpx.HTTPStatusError):
         await enumerate_closed_markets(gamma=stub, repo=repo, now_ts=1_000, since_ts=None)
