@@ -99,3 +99,54 @@ class OneHotEncoder:
     def from_json(cls, payload: dict[str, dict[str, list[str]]]) -> OneHotEncoder:
         """Rebuild an encoder from ``to_json`` output."""
         return cls(levels={k: tuple(v) for k, v in payload["levels"].items()})
+
+
+@dataclass(frozen=True)
+class Split:
+    """Three-way temporal split of a training-examples DataFrame."""
+
+    train: pl.DataFrame
+    val: pl.DataFrame
+    test: pl.DataFrame
+
+
+def temporal_split(
+    df: pl.DataFrame,
+    train_frac: float = 0.6,
+    val_frac: float = 0.2,
+) -> Split:
+    """Split rows into train/val/test by ``resolved_at`` market percentiles.
+
+    Each ``condition_id`` lands in exactly one split; trades for a market
+    cannot leak across splits. The split key is the market's
+    ``resolved_at``, sorted ascending. Tie-break on ``condition_id``
+    lexically for a stable order.
+
+    Args:
+        df: Polars DataFrame with at least ``condition_id`` and
+            ``resolved_at`` columns.
+        train_frac: Fraction of distinct markets in train.
+        val_frac: Fraction of distinct markets in val. ``test_frac`` is
+            ``1 - train_frac - val_frac``.
+
+    Returns:
+        A ``Split`` with three disjoint DataFrames.
+    """
+    markets = (
+        df.select(["condition_id", "resolved_at"])
+        .unique()
+        .sort(["resolved_at", "condition_id"])
+    )
+    n = markets.height
+    n_train = round(train_frac * n)
+    n_val = round(val_frac * n)
+    train_ids = set(markets["condition_id"].slice(0, n_train).to_list())
+    val_ids = set(markets["condition_id"].slice(n_train, n_val).to_list())
+    test_ids = set(
+        markets["condition_id"].slice(n_train + n_val, n - n_train - n_val).to_list()
+    )
+    return Split(
+        train=df.filter(pl.col("condition_id").is_in(train_ids)),
+        val=df.filter(pl.col("condition_id").is_in(val_ids)),
+        test=df.filter(pl.col("condition_id").is_in(test_ids)),
+    )

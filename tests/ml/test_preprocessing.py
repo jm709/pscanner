@@ -12,7 +12,9 @@ from pscanner.ml.preprocessing import (
     CATEGORICAL_COLS,
     LEAKAGE_COLS,
     OneHotEncoder,
+    Split,
     drop_leakage_cols,
+    temporal_split,
 )
 
 
@@ -125,3 +127,51 @@ def test_one_hot_encoder_round_trips_through_json() -> None:
     parsed = json.loads(rendered)
     enc2 = OneHotEncoder.from_json(parsed)
     assert enc2.levels == enc.levels
+
+
+def test_temporal_split_partitions_by_resolved_at_percentiles(
+    make_synthetic_examples: Callable[..., pl.DataFrame],
+) -> None:
+    df = make_synthetic_examples(n_markets=30, rows_per_market=10)
+    split = temporal_split(df, train_frac=0.6, val_frac=0.2)
+    assert isinstance(split, Split)
+    # All rows must be assigned exactly once.
+    total = split.train.height + split.val.height + split.test.height
+    assert total == df.height
+
+
+def test_temporal_split_no_market_in_two_splits(
+    make_synthetic_examples: Callable[..., pl.DataFrame],
+) -> None:
+    df = make_synthetic_examples(n_markets=30, rows_per_market=10)
+    split = temporal_split(df, train_frac=0.6, val_frac=0.2)
+    train_markets = set(split.train["condition_id"].unique().to_list())
+    val_markets = set(split.val["condition_id"].unique().to_list())
+    test_markets = set(split.test["condition_id"].unique().to_list())
+    assert train_markets.isdisjoint(val_markets)
+    assert train_markets.isdisjoint(test_markets)
+    assert val_markets.isdisjoint(test_markets)
+
+
+def test_temporal_split_train_precedes_val_precedes_test(
+    make_synthetic_examples: Callable[..., pl.DataFrame],
+) -> None:
+    df = make_synthetic_examples(n_markets=30, rows_per_market=10)
+    split = temporal_split(df, train_frac=0.6, val_frac=0.2)
+    train_max = split.train["resolved_at"].max()
+    val_min = split.val["resolved_at"].min()
+    val_max = split.val["resolved_at"].max()
+    test_min = split.test["resolved_at"].min()
+    assert train_max <= val_min
+    assert val_max <= test_min
+
+
+def test_temporal_split_60_20_20_proportion(
+    make_synthetic_examples: Callable[..., pl.DataFrame],
+) -> None:
+    df = make_synthetic_examples(n_markets=30, rows_per_market=10)
+    split = temporal_split(df, train_frac=0.6, val_frac=0.2)
+    # 30 markets at 60/20/20 -> 18 / 6 / 6 markets.
+    assert split.train["condition_id"].n_unique() == 18
+    assert split.val["condition_id"].n_unique() == 6
+    assert split.test["condition_id"].n_unique() == 6
