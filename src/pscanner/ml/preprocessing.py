@@ -15,8 +15,10 @@ Exposes:
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 
 import polars as pl
 
@@ -150,3 +152,32 @@ def temporal_split(
         val=df.filter(pl.col("condition_id").is_in(val_ids)),
         test=df.filter(pl.col("condition_id").is_in(test_ids)),
     )
+
+
+def load_dataset(db_path: Path) -> pl.DataFrame:
+    """Load ``training_examples`` joined with ``market_resolutions.resolved_at``.
+
+    Inner join is correct: ``build-features`` only emits rows for
+    markets with a resolutions entry, so the join is row-preserving.
+
+    Args:
+        db_path: Path to the corpus SQLite file.
+
+    Returns:
+        A Polars DataFrame with all 34 ``training_examples`` columns
+        plus ``resolved_at``.
+    """
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cur = conn.execute(
+            """
+            SELECT te.*, mr.resolved_at
+            FROM training_examples te
+            JOIN market_resolutions mr USING (condition_id)
+            """
+        )
+        cols = [desc[0] for desc in cur.description]
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+    return pl.DataFrame(rows, schema=cols, orient="row")

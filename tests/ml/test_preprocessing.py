@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Callable
+from pathlib import Path
 
 import polars as pl
 
+from pscanner.corpus.db import init_corpus_db
 from pscanner.ml.preprocessing import (
     CARRIER_COLS,
     CATEGORICAL_COLS,
@@ -14,6 +17,7 @@ from pscanner.ml.preprocessing import (
     OneHotEncoder,
     Split,
     drop_leakage_cols,
+    load_dataset,
     temporal_split,
 )
 
@@ -175,3 +179,60 @@ def test_temporal_split_60_20_20_proportion(
     assert split.train["condition_id"].n_unique() == 18
     assert split.val["condition_id"].n_unique() == 6
     assert split.test["condition_id"].n_unique() == 6
+
+
+def _seed_db_from_synthetic(
+    conn: sqlite3.Connection,
+    df: pl.DataFrame,
+) -> None:
+    # Populate corpus_markets, market_resolutions, training_examples
+    # from a synthetic Polars frame so load_dataset has matching rows.
+    markets = df.select(["condition_id", "resolved_at"]).unique()
+    for row in markets.iter_rows(named=True):
+        conn.execute(
+            """
+            INSERT INTO corpus_markets (
+              condition_id, event_slug, category, closed_at,
+              total_volume_usd, market_slug, backfill_state, enumerated_at
+            ) VALUES (?, '', 'sports', ?, 1000.0, '', 'complete', ?)
+            """,
+            (row["condition_id"], int(row["resolved_at"]), int(row["resolved_at"]) - 1),
+        )
+        conn.execute(
+            """
+            INSERT INTO market_resolutions (
+              condition_id, winning_outcome_index, outcome_yes_won,
+              resolved_at, source, recorded_at
+            ) VALUES (?, 0, 1, ?, 'gamma', ?)
+            """,
+            (row["condition_id"], int(row["resolved_at"]), int(row["resolved_at"])),
+        )
+    # Drop resolved_at from the example rows (it lives on market_resolutions).
+    examples = df.drop("resolved_at")
+    for row in examples.iter_rows(named=True):
+        cols = ", ".join(row.keys())
+        placeholders = ", ".join(["?"] * len(row))
+        conn.execute(
+            f"INSERT INTO training_examples ({cols}) VALUES ({placeholders})",  # noqa: S608 -- column names are statically derived from synthetic frame
+            tuple(row.values()),
+        )
+    conn.commit()
+
+
+def test_load_dataset_joins_resolved_at(
+    tmp_path: Path,
+    make_synthetic_examples: Callable[..., pl.DataFrame],
+) -> None:
+    db_path = tmp_path / "corpus.sqlite3"
+    conn = init_corpus_db(db_path)
+    try:
+        synthetic = make_synthetic_examples(n_markets=4, rows_per_market=3)
+        _seed_db_from_synthetic(conn, synthetic)
+    finally:
+        conn.close()
+    out = load_dataset(db_path)
+    assert out.height == 12
+    assert "resolved_at" in out.columns
+    assert "label_won" in out.columns
+    # Inner join: every row has a resolved_at.
+    assert out["resolved_at"].null_count() == 0
