@@ -52,6 +52,19 @@ def test_determine_outcome_empty_prices_returns_none() -> None:
     assert determine_outcome_yes_won(m) is None
 
 
+def test_determine_outcome_yes_won_with_legacy_decimal_price() -> None:
+    """Old Polymarket markets store the winning price as ~0.9999... rather
+    than crisp 1.0. The threshold-based check handles both formats.
+    """
+    m = _market("c1", [0.9999996501077740101437594120537861, 0.0])
+    assert determine_outcome_yes_won(m) == 1
+
+
+def test_determine_outcome_no_won_with_legacy_decimal_price() -> None:
+    m = _market("c1", [0.0000003498922259898562405879462138714832, 0.999999650107774])
+    assert determine_outcome_yes_won(m) == 0
+
+
 @pytest.mark.asyncio
 async def test_record_resolutions_writes_resolved_markets(
     tmp_corpus_db: sqlite3.Connection,

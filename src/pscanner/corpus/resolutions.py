@@ -2,7 +2,7 @@
 
 Translates a gamma ``Market`` into a ``MarketResolution`` (which side won)
 and writes to ``market_resolutions``. Skips disputed/voided markets where
-no outcome price equals 1.0.
+neither outcome price is at or above the resolved-threshold.
 """
 
 from __future__ import annotations
@@ -17,19 +17,24 @@ from pscanner.poly.gamma import GammaClient
 from pscanner.poly.models import Market
 
 _log = structlog.get_logger(__name__)
-_RESOLVED_PRICE: Final[float] = 1.0
+# Older Polymarket markets store the winning outcome's price as a long
+# decimal close to 1.0 (e.g. "0.9999996501077740101437594120537861")
+# rather than the crisp "1.0" used on newer markets. Accept any price at
+# or above this threshold as "this side won". Truly disputed/voided
+# markets have both prices below the threshold.
+_RESOLVED_THRESHOLD: Final[float] = 0.99
 
 
 def determine_outcome_yes_won(market: Market) -> int | None:
     """Return 1 if YES (index 0) won, 0 if NO (index 1) won, else None.
 
-    Returns None if outcome_prices is empty or no price is exactly 1.0
-    (disputed/voided markets).
+    Returns None if ``outcome_prices`` is empty or no price is at or
+    above ``_RESOLVED_THRESHOLD`` (disputed/voided markets).
     """
     if not market.outcome_prices:
         return None
     for idx, price in enumerate(market.outcome_prices):
-        if price == _RESOLVED_PRICE:
+        if price >= _RESOLVED_THRESHOLD:
             return 1 if idx == 0 else 0
     return None
 
