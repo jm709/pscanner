@@ -66,11 +66,7 @@ class OneHotEncoder:
         levels: dict[str, tuple[str, ...]] = {}
         for col in columns:
             uniq = (
-                df.select(pl.col(col).fill_null(_NONE_TOKEN))
-                .to_series()
-                .unique()
-                .sort()
-                .to_list()
+                df.select(pl.col(col).fill_null(_NONE_TOKEN)).to_series().unique().sort().to_list()
             )
             levels[col] = tuple(str(v) for v in uniq)
         return cls(levels=levels)
@@ -136,18 +132,14 @@ def temporal_split(
         A ``Split`` with three disjoint DataFrames.
     """
     markets = (
-        df.select(["condition_id", "resolved_at"])
-        .unique()
-        .sort(["resolved_at", "condition_id"])
+        df.select(["condition_id", "resolved_at"]).unique().sort(["resolved_at", "condition_id"])
     )
     n = markets.height
     n_train = round(train_frac * n)
     n_val = round(val_frac * n)
     train_ids = set(markets["condition_id"].slice(0, n_train).to_list())
     val_ids = set(markets["condition_id"].slice(n_train, n_val).to_list())
-    test_ids = set(
-        markets["condition_id"].slice(n_train + n_val, n - n_train - n_val).to_list()
-    )
+    test_ids = set(markets["condition_id"].slice(n_train + n_val, n - n_train - n_val).to_list())
     return Split(
         train=df.filter(pl.col("condition_id").is_in(train_ids)),
         val=df.filter(pl.col("condition_id").is_in(val_ids)),

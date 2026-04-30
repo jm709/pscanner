@@ -92,9 +92,7 @@ def _make_synthetic_examples(
                     ),
                     "side": side,
                     "implied_prob_at_buy": implied_prob,
-                    "market_category": str(
-                        rng.choice(["sports", "esports", "thesis", "unknown"])
-                    ),
+                    "market_category": str(rng.choice(["sports", "esports", "thesis", "unknown"])),
                     "market_volume_so_far_usd": float(rng.uniform(1000, 1e6)),
                     "market_unique_traders_so_far": int(rng.integers(1, 500)),
                     "market_age_seconds": int(rng.integers(60, _DAY_SECONDS * 30)),

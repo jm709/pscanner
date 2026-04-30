@@ -164,10 +164,10 @@ def test_temporal_split_train_precedes_val_precedes_test(
 ) -> None:
     df = make_synthetic_examples(n_markets=30, rows_per_market=10)
     split = temporal_split(df, train_frac=0.6, val_frac=0.2)
-    train_max = split.train["resolved_at"].max()
-    val_min = split.val["resolved_at"].min()
-    val_max = split.val["resolved_at"].max()
-    test_min = split.test["resolved_at"].min()
+    train_max = int(split.train["resolved_at"].max())  # ty: ignore[invalid-argument-type]
+    val_min = int(split.val["resolved_at"].min())  # ty: ignore[invalid-argument-type]
+    val_max = int(split.val["resolved_at"].max())  # ty: ignore[invalid-argument-type]
+    test_min = int(split.test["resolved_at"].min())  # ty: ignore[invalid-argument-type]
     assert train_max <= val_min
     assert val_max <= test_min
 
