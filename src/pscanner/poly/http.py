@@ -28,6 +28,15 @@ _LOG = structlog.get_logger(__name__)
 _USER_AGENT = "pscanner/0.1"
 _STATUS_TOO_MANY_REQUESTS = 429
 _RETRYABLE_STATUS = frozenset({_STATUS_TOO_MANY_REQUESTS, 502, 503, 504})
+# Transport-level errors we treat as transient. Connection drops, read/write
+# timeouts, and protocol errors mid-response all benefit from exponential
+# backoff. ``UnsupportedProtocol`` and ``ProxyError`` are configuration bugs
+# and intentionally excluded.
+_RETRYABLE_TRANSPORT_EXC: tuple[type[BaseException], ...] = (
+    httpx.TimeoutException,  # ReadTimeout, ConnectTimeout, WriteTimeout, PoolTimeout
+    httpx.NetworkError,  # ConnectError, ReadError, WriteError, CloseError
+    httpx.RemoteProtocolError,  # connection broken before response ended
+)
 _MAX_ATTEMPTS = 5
 _BACKOFF_MIN_SECONDS = 1.0
 _BACKOFF_MAX_SECONDS = 30.0
@@ -111,8 +120,10 @@ def _retry_after_seconds(response: httpx.Response) -> float | None:
 
 
 def _is_retryable(exc: BaseException) -> bool:
-    """Predicate for tenacity: retry only on our retryable-status sentinel."""
-    return isinstance(exc, _RetryableStatusError)
+    """Predicate for tenacity: retry on retryable status or transient transport error."""
+    if isinstance(exc, _RetryableStatusError):
+        return True
+    return isinstance(exc, _RETRYABLE_TRANSPORT_EXC)
 
 
 class PolyHttpClient:

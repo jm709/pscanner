@@ -255,3 +255,53 @@ async def test_429_with_unparseable_retry_after_still_retries(
         await client.aclose()
     assert result == {"ok": True}
     assert route.call_count == 2
+
+
+@respx.mock
+async def test_read_timeout_retries_then_succeeds(client: PolyHttpClient) -> None:
+    """Transient ``httpx.ReadTimeout`` is retried, not propagated."""
+    route = respx.get(f"{_BASE}/v1/slow").mock(
+        side_effect=[
+            httpx.ReadTimeout("upstream stalled"),
+            httpx.Response(200, json={"ok": True}),
+        ],
+    )
+    try:
+        result = await client.get("/v1/slow")
+    finally:
+        await client.aclose()
+    assert result == {"ok": True}
+    assert route.call_count == 2
+
+
+@respx.mock
+async def test_persistent_read_timeout_raises_after_max_attempts(
+    client: PolyHttpClient,
+) -> None:
+    """Sustained ``ReadTimeout`` exhausts retries and raises."""
+    route = respx.get(f"{_BASE}/v1/dead").mock(
+        side_effect=httpx.ReadTimeout("upstream gone"),
+    )
+    try:
+        with pytest.raises(httpx.ReadTimeout):
+            await client.get("/v1/dead")
+    finally:
+        await client.aclose()
+    assert route.call_count == 5
+
+
+@respx.mock
+async def test_connect_error_retries_then_succeeds(client: PolyHttpClient) -> None:
+    """Transient ``httpx.ConnectError`` is retried (e.g. mid-failover)."""
+    route = respx.get(f"{_BASE}/v1/reset").mock(
+        side_effect=[
+            httpx.ConnectError("connection refused"),
+            httpx.Response(200, json={"ok": True}),
+        ],
+    )
+    try:
+        result = await client.get("/v1/reset")
+    finally:
+        await client.aclose()
+    assert result == {"ok": True}
+    assert route.call_count == 2
