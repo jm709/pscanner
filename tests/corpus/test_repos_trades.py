@@ -98,3 +98,31 @@ def test_iter_chronological_breaks_ties_deterministically(
     seen_first = [t.tx_hash for t in repo.iter_chronological()]
     seen_second = [t.tx_hash for t in repo.iter_chronological()]
     assert seen_first == seen_second
+
+
+def test_iter_chronological_chunk_boundary_no_dup_or_skip(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """Pagination across chunk boundaries must not drop or duplicate rows."""
+    repo = CorpusTradesRepo(tmp_corpus_db)
+    rows = [_trade(tx_hash=f"0x{i:04x}", ts=1_000 + i) for i in range(25)]
+    repo.insert_batch(rows)
+    seen = [t.tx_hash for t in repo.iter_chronological(chunk_size=7)]
+    assert seen == [f"0x{i:04x}" for i in range(25)]
+
+
+def test_iter_chronological_chunk_boundary_handles_ties(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """When a chunk ends mid-tie, the next chunk must continue past the tie."""
+    repo = CorpusTradesRepo(tmp_corpus_db)
+    repo.insert_batch(
+        [
+            _trade(tx_hash="0xa", asset_id="a", ts=1),
+            _trade(tx_hash="0xa", asset_id="b", ts=1),
+            _trade(tx_hash="0xa", asset_id="c", ts=1),
+            _trade(tx_hash="0xa", asset_id="d", ts=1),
+        ]
+    )
+    pairs = [(t.tx_hash, t.asset_id) for t in repo.iter_chronological(chunk_size=2)]
+    assert pairs == [("0xa", "a"), ("0xa", "b"), ("0xa", "c"), ("0xa", "d")]

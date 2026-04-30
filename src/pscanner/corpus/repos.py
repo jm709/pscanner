@@ -304,33 +304,66 @@ class CorpusTradesRepo:
         self._conn.commit()
         return cur.rowcount or 0
 
-    def iter_chronological(self) -> Iterator[CorpusTrade]:
+    def iter_chronological(self, *, chunk_size: int = 50_000) -> Iterator[CorpusTrade]:
         """Yield every trade in (ts, tx_hash, asset_id) order.
+
+        Pages via keyset pagination on ``(ts, tx_hash, asset_id)`` so no
+        long-lived read cursor is held across yields. This matters in
+        WAL mode: an open read transaction pins the WAL snapshot and
+        prevents the checkpointer from reclaiming pages, which causes
+        unbounded WAL growth when callers (e.g. ``build_features``)
+        write to other tables on the same connection during iteration.
+        Materialising one chunk at a time with ``fetchall`` releases
+        the read txn between chunks.
 
         Tie-breaking on ``(tx_hash, asset_id)`` makes the iteration
         order deterministic for the streaming feature pipeline.
+
+        Args:
+            chunk_size: Rows per page. Default 50,000 (~5MB resident).
         """
-        cursor = self._conn.execute(
-            """
-            SELECT tx_hash, asset_id, wallet_address, condition_id,
-                   outcome_side, bs, price, size, notional_usd, ts
-            FROM corpus_trades
-            ORDER BY ts, tx_hash, asset_id
-            """
-        )
-        for row in cursor:
-            yield CorpusTrade(
-                tx_hash=row["tx_hash"],
-                asset_id=row["asset_id"],
-                wallet_address=row["wallet_address"],
-                condition_id=row["condition_id"],
-                outcome_side=row["outcome_side"],
-                bs=row["bs"],
-                price=row["price"],
-                size=row["size"],
-                notional_usd=row["notional_usd"],
-                ts=row["ts"],
-            )
+        last: tuple[int, str, str] | None = None
+        while True:
+            if last is None:
+                rows = self._conn.execute(
+                    """
+                    SELECT tx_hash, asset_id, wallet_address, condition_id,
+                           outcome_side, bs, price, size, notional_usd, ts
+                    FROM corpus_trades
+                    ORDER BY ts, tx_hash, asset_id
+                    LIMIT ?
+                    """,
+                    (chunk_size,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    """
+                    SELECT tx_hash, asset_id, wallet_address, condition_id,
+                           outcome_side, bs, price, size, notional_usd, ts
+                    FROM corpus_trades
+                    WHERE (ts, tx_hash, asset_id) > (?, ?, ?)
+                    ORDER BY ts, tx_hash, asset_id
+                    LIMIT ?
+                    """,
+                    (last[0], last[1], last[2], chunk_size),
+                ).fetchall()
+            if not rows:
+                return
+            for row in rows:
+                yield CorpusTrade(
+                    tx_hash=row["tx_hash"],
+                    asset_id=row["asset_id"],
+                    wallet_address=row["wallet_address"],
+                    condition_id=row["condition_id"],
+                    outcome_side=row["outcome_side"],
+                    bs=row["bs"],
+                    price=row["price"],
+                    size=row["size"],
+                    notional_usd=row["notional_usd"],
+                    ts=row["ts"],
+                )
+            tail = rows[-1]
+            last = (tail["ts"], tail["tx_hash"], tail["asset_id"])
 
 
 @dataclass(frozen=True)
