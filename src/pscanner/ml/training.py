@@ -8,13 +8,26 @@ calibrated against ``implied_prob_at_buy``.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
+from pathlib import Path
 
 import numpy as np
 import optuna
+import polars as pl
+import structlog
 import xgboost as xgb
 
 from pscanner.ml.metrics import per_decile_edge_breakdown, realized_edge_metric
+from pscanner.ml.preprocessing import (
+    CATEGORICAL_COLS,
+    OneHotEncoder,
+    build_feature_matrix,
+    drop_leakage_cols,
+    temporal_split,
+)
+
+_log = structlog.get_logger(__name__)
 
 _NUM_BOOST_ROUND = 2000
 _EARLY_STOPPING_ROUNDS = 50
@@ -152,3 +165,129 @@ def evaluate_on_test(
         "logloss": logloss,
         "per_decile": decile,
     }
+
+
+def _dump_artifacts(
+    output_dir: Path,
+    booster: xgb.Booster,
+    encoder: OneHotEncoder,
+    metrics: dict[str, object],
+) -> None:
+    """Write model, preprocessor, and metrics to ``output_dir``."""
+    booster.save_model(str(output_dir / "model.json"))
+    (output_dir / "preprocessor.json").write_text(json.dumps(encoder.to_json(), indent=2))
+    (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+
+
+def run_study(
+    df: pl.DataFrame,
+    output_dir: Path,
+    n_trials: int,
+    n_jobs: int,
+    n_min: int,
+    seed: int,
+) -> None:
+    """End-to-end study: preprocess, run Optuna, refit, evaluate, dump.
+
+    Mutates ``output_dir`` (created if missing). Writes ``model.json``,
+    ``preprocessor.json``, ``study.db``, ``metrics.json``.
+
+    Args:
+        df: Output of ``load_dataset``.
+        output_dir: Per-run artifact directory.
+        n_trials: Optuna trial budget.
+        n_jobs: Parallel trials. Must be >=1.
+        n_min: Edge-metric anti-overfit guard threshold.
+        seed: Master RNG seed.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    df = drop_leakage_cols(df)
+    splits = temporal_split(df)
+    encoder = OneHotEncoder.fit(splits.train, columns=CATEGORICAL_COLS)
+    train_df = encoder.transform(splits.train)
+    val_df = encoder.transform(splits.val)
+    test_df = encoder.transform(splits.test)
+
+    x_train, y_train, _ = build_feature_matrix(train_df)
+    x_val, y_val, implied_val = build_feature_matrix(val_df)
+    x_test, y_test, implied_test = build_feature_matrix(test_df)
+
+    rates = {
+        "train": float(y_train.mean()),
+        "val": float(y_val.mean()),
+        "test": float(y_test.mean()),
+    }
+    _log.info("ml.split_label_won_rate", **rates)
+
+    storage_url = f"sqlite:///{output_dir / 'study.db'}"
+    storage = optuna.storages.RDBStorage(url=storage_url)
+    # Silence optuna's per-trial chatter on stderr while the test suite
+    # is running with filterwarnings=error.
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    try:
+        study = optuna.create_study(
+            direction="maximize",
+            sampler=optuna.samplers.TPESampler(seed=seed),
+            pruner=optuna.pruners.MedianPruner(),
+            storage=storage,
+            study_name="copy_trade_gate",
+        )
+        study.optimize(
+            lambda t: run_single_trial(
+                trial=t,
+                X_train=x_train,
+                y_train=y_train,
+                X_val=x_val,
+                y_val=y_val,
+                implied_prob_val=implied_val,
+                n_min=n_min,
+                seed=seed,
+            ),
+            n_trials=n_trials,
+            n_jobs=n_jobs,
+        )
+
+        best_iteration = int(study.best_trial.user_attrs["best_iteration"])
+        best_params = dict(study.best_params)
+        best_value = float(study.best_value)
+    finally:
+        # Release SQLAlchemy connection pool so the SQLite file isn't
+        # left open across pytest teardown (would trip filterwarnings=error
+        # via ResourceWarning -> PytestUnraisableExceptionWarning).
+        storage.remove_session()
+        storage.engine.dispose()
+
+    booster = fit_winning_model(
+        best_params=best_params,
+        best_iteration=best_iteration,
+        X_train=x_train,
+        y_train=y_train,
+        seed=seed,
+    )
+    test_metrics = evaluate_on_test(
+        booster=booster,
+        X_test=x_test,
+        y_test=y_test,
+        implied_prob_test=implied_test,
+        n_min=n_min,
+    )
+
+    metrics = {
+        "best_params": best_params,
+        "best_iteration": best_iteration,
+        "best_val_edge": best_value,
+        "test_edge": test_metrics["edge"],
+        "test_accuracy": test_metrics["accuracy"],
+        "test_logloss": test_metrics["logloss"],
+        "test_per_decile": test_metrics["per_decile"],
+        "split_label_won_rate": rates,
+        "seed": seed,
+    }
+    _dump_artifacts(output_dir, booster, encoder, metrics)
+    _log.info(
+        "ml.study_complete",
+        best_val_edge=metrics["best_val_edge"],
+        test_edge=metrics["test_edge"],
+        n_trials=n_trials,
+    )

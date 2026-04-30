@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
+from pathlib import Path
+
 import numpy as np
 import optuna
+import polars as pl
 
-from pscanner.ml.training import evaluate_on_test, fit_winning_model, run_single_trial
+from pscanner.ml.training import (
+    evaluate_on_test,
+    fit_winning_model,
+    run_single_trial,
+    run_study,
+)
 
 
 def _toy_problem(
@@ -125,3 +135,35 @@ def test_evaluate_on_test_returns_metric_dict() -> None:
     assert "logloss" in result
     assert "per_decile" in result
     assert isinstance(result["per_decile"], dict)
+
+
+def test_run_study_writes_all_artifacts(
+    tmp_path: Path,
+    make_synthetic_examples: Callable[..., pl.DataFrame],
+) -> None:
+    df = make_synthetic_examples(n_markets=20, rows_per_market=15, seed=3)
+    output_dir = tmp_path / "run"
+    run_study(
+        df=df,
+        output_dir=output_dir,
+        n_trials=3,
+        n_jobs=1,
+        n_min=5,
+        seed=42,
+    )
+    assert (output_dir / "model.json").exists()
+    assert (output_dir / "preprocessor.json").exists()
+    assert (output_dir / "study.db").exists()
+    assert (output_dir / "metrics.json").exists()
+    metrics = json.loads((output_dir / "metrics.json").read_text())
+    assert "best_params" in metrics
+    assert "best_iteration" in metrics
+    assert "best_val_edge" in metrics
+    assert "test_edge" in metrics
+    assert "test_accuracy" in metrics
+    assert "test_logloss" in metrics
+    assert "test_per_decile" in metrics
+    assert "split_label_won_rate" in metrics
+    rates = metrics["split_label_won_rate"]
+    assert {"train", "val", "test"} == set(rates.keys())
+    assert metrics["seed"] == 42
