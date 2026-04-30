@@ -81,7 +81,7 @@ def test_market_state_tracks_price_history() -> None:
     provider.observe(_trade(tx_hash="0xb", ts=2_000, price=0.5, wallet_address="0xv"))
     market = provider.market_state("cond1", as_of_ts=3_000)
     assert market.last_trade_price == pytest.approx(0.5)
-    assert len(market.unique_traders_so_far) == 2
+    assert market.unique_traders_count == 2
     assert market.volume_so_far_usd > 0
 
 

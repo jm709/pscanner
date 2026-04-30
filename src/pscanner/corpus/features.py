@@ -65,11 +65,19 @@ class WalletState:
 
 @dataclass(frozen=True)
 class MarketState:
-    """Running per-market aggregate at some point in time."""
+    """Running per-market aggregate at some point in time.
+
+    ``unique_traders_count`` is the number of distinct wallet addresses
+    that have traded the market so far. The set itself is held in the
+    streaming provider's mutable bookkeeping (``StreamingHistoryProvider``)
+    so per-market state stays O(1) per fold; storing the set in the
+    immutable state would require an O(N) tuple/frozenset rebuild on
+    every trade for large markets.
+    """
 
     market_age_start_ts: int
     volume_so_far_usd: float
-    unique_traders_so_far: tuple[str, ...]
+    unique_traders_count: int
     last_trade_price: float | None
     recent_prices: tuple[float, ...]
 
@@ -108,7 +116,7 @@ def empty_market_state(*, market_age_start_ts: int) -> MarketState:
     return MarketState(
         market_age_start_ts=market_age_start_ts,
         volume_so_far_usd=0.0,
-        unique_traders_so_far=(),
+        unique_traders_count=0,
         last_trade_price=None,
         recent_prices=(),
     )
@@ -183,17 +191,17 @@ def apply_resolution_to_state(
     )
 
 
-def apply_trade_to_market(state: MarketState, trade: Trade) -> MarketState:
-    """Apply a fill to market state (per-market running aggregates)."""
-    new_traders: tuple[str, ...]
-    if trade.wallet_address in state.unique_traders_so_far:
-        new_traders = state.unique_traders_so_far
-    else:
-        new_traders = (*state.unique_traders_so_far, trade.wallet_address)
+def apply_trade_to_market(state: MarketState, trade: Trade, *, is_new_trader: bool) -> MarketState:
+    """Apply a fill to market state (per-market running aggregates).
+
+    ``is_new_trader`` is computed by the caller against its own membership
+    set — keeping the set out of the immutable state lets per-market
+    folds stay O(1) instead of O(N) on the trader count.
+    """
     return replace(
         state,
         volume_so_far_usd=state.volume_so_far_usd + trade.notional_usd,
-        unique_traders_so_far=new_traders,
+        unique_traders_count=state.unique_traders_count + (1 if is_new_trader else 0),
         last_trade_price=trade.price,
         recent_prices=(*state.recent_prices, trade.price)[-20:],
     )
@@ -329,7 +337,7 @@ def compute_features(trade: Trade, history: HistoryProvider) -> FeatureRow:
         implied_prob_at_buy=implied_prob,
         market_category=meta.category,
         market_volume_so_far_usd=market.volume_so_far_usd,
-        market_unique_traders_so_far=len(market.unique_traders_so_far),
+        market_unique_traders_so_far=market.unique_traders_count,
         market_age_seconds=trade.ts - market.market_age_start_ts,
         time_to_resolution_seconds=time_to_resolution,
         last_trade_price=market.last_trade_price,
@@ -375,6 +383,7 @@ class StreamingHistoryProvider:
         self._metadata = metadata
         self._wallets: dict[str, _WalletAccumulator] = {}
         self._markets: dict[str, MarketState] = {}
+        self._market_traders: dict[str, set[str]] = {}
         self._resolutions: dict[str, tuple[int, int]] = {}  # cond_id -> (resolved_at, yes_won)
         self._seq = 0
 
@@ -437,7 +446,13 @@ class StreamingHistoryProvider:
         market = self._markets.get(trade.condition_id)
         if market is None:
             market = empty_market_state(market_age_start_ts=trade.ts)
-        self._markets[trade.condition_id] = apply_trade_to_market(market, trade)
+        traders = self._market_traders.setdefault(trade.condition_id, set())
+        is_new_trader = trade.wallet_address not in traders
+        if is_new_trader:
+            traders.add(trade.wallet_address)
+        self._markets[trade.condition_id] = apply_trade_to_market(
+            market, trade, is_new_trader=is_new_trader
+        )
 
     def wallet_state(self, wallet_address: str, as_of_ts: int) -> WalletState:
         """Return the wallet's state at ``as_of_ts``, draining ready resolutions."""
