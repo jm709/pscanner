@@ -21,6 +21,7 @@ def _insert_market(repo: CorpusMarketsRepo, condition_id: str, **kwargs: object)
         closed_at=int(kwargs.get("closed_at", 1_000)),  # type: ignore[arg-type]
         total_volume_usd=float(kwargs.get("total_volume_usd", 50_000.0)),  # type: ignore[arg-type]
         enumerated_at=int(kwargs.get("enumerated_at", 500)),  # type: ignore[arg-type]
+        market_slug=str(kwargs.get("market_slug", "slug-" + condition_id)),  # type: ignore[arg-type]
     )
     repo.insert_pending(base)
 
@@ -152,3 +153,74 @@ def test_state_repo_get_int(tmp_corpus_db: sqlite3.Connection) -> None:
     repo.set("last_gamma_sweep_ts", "1700000000", updated_at=1_700_000_001)
     assert repo.get_int("last_gamma_sweep_ts") == 1_700_000_000
     assert repo.get_int("missing") is None
+
+
+def test_insert_pending_backfills_market_slug_on_existing_row(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """A re-enumeration after the schema migration should populate
+    market_slug on rows that pre-date it (where market_slug was NULL).
+    """
+    repo = CorpusMarketsRepo(tmp_corpus_db)
+    # Simulate a row inserted before the migration: market_slug NULL.
+    tmp_corpus_db.execute(
+        """
+        INSERT INTO corpus_markets (
+          condition_id, event_slug, category, closed_at, total_volume_usd,
+          backfill_state, enumerated_at
+        ) VALUES ('cond1', 'evt', 'crypto', 1000, 50000.0, 'complete', 500)
+        """
+    )
+    tmp_corpus_db.commit()
+    # Now re-enumerate the same market with a slug.
+    inserted = repo.insert_pending(
+        CorpusMarket(
+            condition_id="cond1",
+            event_slug="evt",
+            category="crypto",
+            closed_at=1000,
+            total_volume_usd=50000.0,
+            market_slug="cond1-slug",
+            enumerated_at=500,
+        )
+    )
+    assert inserted == 0  # row was already present, INSERT OR IGNORE no-op
+    # But market_slug should now be populated on the existing row.
+    row = tmp_corpus_db.execute(
+        "SELECT market_slug, backfill_state FROM corpus_markets WHERE condition_id = 'cond1'"
+    ).fetchone()
+    assert row["market_slug"] == "cond1-slug"
+    assert row["backfill_state"] == "complete"  # state preserved
+
+
+def test_insert_pending_backfill_does_not_overwrite_existing_slug(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """If market_slug is already set, re-enumeration must not stomp it."""
+    repo = CorpusMarketsRepo(tmp_corpus_db)
+    repo.insert_pending(
+        CorpusMarket(
+            condition_id="cond1",
+            event_slug="evt",
+            category="crypto",
+            closed_at=1000,
+            total_volume_usd=50000.0,
+            market_slug="original-slug",
+            enumerated_at=500,
+        )
+    )
+    repo.insert_pending(
+        CorpusMarket(
+            condition_id="cond1",
+            event_slug="evt",
+            category="crypto",
+            closed_at=1000,
+            total_volume_usd=50000.0,
+            market_slug="different-slug",
+            enumerated_at=500,
+        )
+    )
+    row = tmp_corpus_db.execute(
+        "SELECT market_slug FROM corpus_markets WHERE condition_id = 'cond1'"
+    ).fetchone()
+    assert row["market_slug"] == "original-slug"

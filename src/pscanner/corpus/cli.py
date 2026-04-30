@@ -150,18 +150,17 @@ async def _cmd_refresh(args: argparse.Namespace) -> int:
             res_repo = MarketResolutionsRepo(conn)
             rows = conn.execute(
                 """
-                SELECT m.condition_id, m.event_slug, m.closed_at
+                SELECT m.condition_id, m.market_slug, m.closed_at
                 FROM corpus_markets m
                 LEFT JOIN market_resolutions r USING (condition_id)
                 WHERE r.condition_id IS NULL AND m.backfill_state = 'complete'
+                  AND m.market_slug IS NOT NULL AND m.market_slug != ''
                 """
             ).fetchall()
             await record_resolutions(
                 gamma=gamma,
                 repo=res_repo,
-                targets=[
-                    (r["condition_id"], r["event_slug"] + "-slug", r["closed_at"]) for r in rows
-                ],
+                targets=[(r["condition_id"], r["market_slug"], r["closed_at"]) for r in rows],
                 now_ts=int(time.time()),
             )
             state.set("last_gamma_sweep_ts", str(int(time.time())), updated_at=int(time.time()))

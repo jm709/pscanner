@@ -41,6 +41,7 @@ def _seed_market(repo: CorpusMarketsRepo, condition_id: str) -> None:
             closed_at=2_000,
             total_volume_usd=50_000.0,
             enumerated_at=500,
+            market_slug="slug-" + condition_id,
         )
     )
 

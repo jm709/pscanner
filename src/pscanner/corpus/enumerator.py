@@ -39,6 +39,7 @@ def _qualifying_markets(event: Event, now_ts: int) -> list[CorpusMarket]:
                 closed_at=now_ts,
                 total_volume_usd=volume,
                 enumerated_at=now_ts,
+                market_slug=market.slug,
             )
         )
     return out

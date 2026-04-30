@@ -28,6 +28,7 @@ class CorpusMarket:
     closed_at: int
     total_volume_usd: float
     enumerated_at: int
+    market_slug: str
 
 
 class CorpusMarketsRepo:
@@ -44,6 +45,10 @@ class CorpusMarketsRepo:
     def insert_pending(self, market: CorpusMarket) -> int:
         """Insert a market in ``pending`` state. Idempotent (INSERT OR IGNORE).
 
+        Also backfills ``market_slug`` on existing rows where it was NULL —
+        this lets a re-enumeration after the schema migration populate the
+        new column without touching other fields.
+
         Returns:
             1 if a new row was inserted, 0 if the market was already present.
         """
@@ -51,8 +56,8 @@ class CorpusMarketsRepo:
             """
             INSERT OR IGNORE INTO corpus_markets (
               condition_id, event_slug, category, closed_at, total_volume_usd,
-              backfill_state, enumerated_at
-            ) VALUES (?, ?, ?, ?, ?, 'pending', ?)
+              market_slug, backfill_state, enumerated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
             """,
             (
                 market.condition_id,
@@ -60,11 +65,22 @@ class CorpusMarketsRepo:
                 market.category,
                 market.closed_at,
                 market.total_volume_usd,
+                market.market_slug,
                 market.enumerated_at,
             ),
         )
+        inserted = cur.rowcount or 0
+        # Backfill market_slug on rows that pre-date the migration.
+        self._conn.execute(
+            """
+            UPDATE corpus_markets
+            SET market_slug = ?
+            WHERE condition_id = ? AND market_slug IS NULL
+            """,
+            (market.market_slug, market.condition_id),
+        )
         self._conn.commit()
-        return cur.rowcount or 0
+        return inserted
 
     def next_pending(self, *, limit: int) -> list[CorpusMarket]:
         """Return up to ``limit`` markets needing work, largest-volume-first.
@@ -77,7 +93,7 @@ class CorpusMarketsRepo:
         rows = self._conn.execute(
             """
             SELECT condition_id, event_slug, category, closed_at,
-                   total_volume_usd, enumerated_at
+                   total_volume_usd, market_slug, enumerated_at
             FROM corpus_markets
             WHERE backfill_state IN ('pending', 'in_progress', 'failed')
             ORDER BY total_volume_usd DESC, closed_at DESC
@@ -92,6 +108,7 @@ class CorpusMarketsRepo:
                 category=row["category"],
                 closed_at=row["closed_at"],
                 total_volume_usd=row["total_volume_usd"],
+                market_slug=row["market_slug"] or "",
                 enumerated_at=row["enumerated_at"],
             )
             for row in rows

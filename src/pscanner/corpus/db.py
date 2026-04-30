@@ -26,7 +26,8 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
       error_message TEXT,
       enumerated_at INTEGER NOT NULL,
       backfill_started_at INTEGER,
-      backfill_completed_at INTEGER
+      backfill_completed_at INTEGER,
+      market_slug TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_corpus_markets_state ON corpus_markets(backfill_state)",
@@ -117,6 +118,26 @@ _PRAGMAS: tuple[str, ...] = (
     "PRAGMA foreign_keys=ON",
 )
 
+_MIGRATIONS: tuple[str, ...] = ("ALTER TABLE corpus_markets ADD COLUMN market_slug TEXT",)
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """Apply additive ALTER TABLE migrations. Idempotent.
+
+    SQLite has no IF NOT EXISTS for ADD COLUMN, so each migration is
+    wrapped to swallow ``duplicate column name`` errors. Mirrors the
+    pattern in :mod:`pscanner.store.db`.
+    """
+    for stmt in _MIGRATIONS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError as exc:
+            msg = str(exc).lower()
+            if "duplicate column name" in msg or "no such column" in msg:
+                continue
+            raise
+    conn.commit()
+
 
 def init_corpus_db(path: Path) -> sqlite3.Connection:
     """Open the corpus SQLite database, creating dirs/schema as needed.
@@ -144,6 +165,7 @@ def init_corpus_db(path: Path) -> sqlite3.Connection:
         with conn:
             for statement in _SCHEMA_STATEMENTS:
                 conn.execute(statement)
+        _apply_migrations(conn)
     except sqlite3.DatabaseError:
         conn.close()
         raise
