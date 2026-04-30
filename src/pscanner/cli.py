@@ -34,6 +34,7 @@ from rich.table import Table
 from pscanner.alerts.models import Alert
 from pscanner.config import Config
 from pscanner.corpus.cli import run_corpus_command
+from pscanner.ml.cli import run_ml_command
 from pscanner.scheduler import Scanner
 from pscanner.store.db import init_db
 from pscanner.store.repo import (
@@ -66,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "corpus":
         return asyncio.run(run_corpus_command(args.corpus_argv))
+    if args.command == "ml":
+        return run_ml_command(args.ml_argv)
     config_path = _resolve_config_path(args)
     if not _config_path_is_acceptable(config_path):
         sys.stderr.write(f"{_PROG}: config file not found: {config_path}\n")
@@ -161,6 +164,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "corpus_argv",
         nargs=argparse.REMAINDER,
         help="forwarded to `pscanner corpus --help`",
+    )
+
+    ml = sub.add_parser(
+        "ml",
+        help="machine-learning training pipeline subcommands",
+    )
+    ml.add_argument(
+        "ml_argv",
+        nargs=argparse.REMAINDER,
+        help="forwarded to `pscanner ml --help`",
     )
     return parser
 
