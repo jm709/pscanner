@@ -114,6 +114,22 @@ def empty_market_state(*, market_age_start_ts: int) -> MarketState:
     )
 
 
+# Rolling-window for `recent_30d_trades` storage. The tuple holds only
+# trades within this many seconds of the most recent fold, so the
+# accumulator's per-wallet memory stays bounded for very-active wallets
+# (without a trim, hot wallets create O(N^2) work over the streaming
+# walk: scanning a growing tuple per call). The window matches what
+# `compute_features` reads (30 days), so the trimmed entries are
+# exactly the ones a feature query would have discarded anyway.
+_RECENT_WINDOW_SECONDS = 30 * 86_400
+
+
+def _trim_recent_trades(recent: tuple[int, ...], current_ts: int) -> tuple[int, ...]:
+    """Drop entries older than ``current_ts - _RECENT_WINDOW_SECONDS``."""
+    cutoff = current_ts - _RECENT_WINDOW_SECONDS
+    return tuple(ts for ts in recent if ts >= cutoff)
+
+
 def apply_buy_to_state(state: WalletState, trade: Trade) -> WalletState:
     """Apply a BUY fill to wallet state. Returns a new WalletState."""
     new_categories = dict(state.category_counts)
@@ -125,7 +141,7 @@ def apply_buy_to_state(state: WalletState, trade: Trade) -> WalletState:
         cumulative_buy_price_sum=state.cumulative_buy_price_sum + trade.price,
         cumulative_buy_count=state.cumulative_buy_count + 1,
         last_trade_ts=trade.ts,
-        recent_30d_trades=(*state.recent_30d_trades, trade.ts),
+        recent_30d_trades=(*_trim_recent_trades(state.recent_30d_trades, trade.ts), trade.ts),
         bet_sizes=(*state.bet_sizes, trade.notional_usd),
         category_counts=new_categories,
     )
@@ -141,7 +157,7 @@ def apply_sell_to_state(state: WalletState, trade: Trade) -> WalletState:
         state,
         prior_trades_count=state.prior_trades_count + 1,
         last_trade_ts=trade.ts,
-        recent_30d_trades=(*state.recent_30d_trades, trade.ts),
+        recent_30d_trades=(*_trim_recent_trades(state.recent_30d_trades, trade.ts), trade.ts),
     )
 
 
