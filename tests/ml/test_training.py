@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import optuna
 
-from pscanner.ml.training import run_single_trial
+from pscanner.ml.training import evaluate_on_test, fit_winning_model, run_single_trial
 
 
 def _toy_problem(
@@ -74,3 +74,54 @@ def test_run_single_trial_is_deterministic_under_same_seed() -> None:
         return study.best_value
 
     assert study_value() == study_value()
+
+
+def test_fit_winning_model_returns_booster_with_expected_iterations() -> None:
+    X_train, y_train, _, _, _ = _toy_problem()  # noqa: N806 -- ML matrix convention
+    params = {
+        "learning_rate": 0.1,
+        "max_depth": 3,
+        "min_child_weight": 1.0,
+        "subsample": 0.9,
+        "colsample_bytree": 0.9,
+        "reg_alpha": 1.0,
+        "reg_lambda": 1.0,
+        "gamma": 0.1,
+    }
+    booster = fit_winning_model(
+        best_params=params,
+        best_iteration=10,
+        X_train=X_train,
+        y_train=y_train,
+        seed=42,
+    )
+    # 11 trees corresponds to best_iteration + 1.
+    assert booster.num_boosted_rounds() == 11
+
+
+def test_evaluate_on_test_returns_metric_dict() -> None:
+    X_train, y_train, X_val, y_val, _ = _toy_problem()  # noqa: N806 -- ML matrix convention
+    params = {
+        "learning_rate": 0.1,
+        "max_depth": 3,
+        "min_child_weight": 1.0,
+        "subsample": 0.9,
+        "colsample_bytree": 0.9,
+        "reg_alpha": 1.0,
+        "reg_lambda": 1.0,
+        "gamma": 0.1,
+    }
+    booster = fit_winning_model(
+        best_params=params,
+        best_iteration=20,
+        X_train=X_train,
+        y_train=y_train,
+        seed=42,
+    )
+    implied_test = np.full(len(y_val), 0.5)
+    result = evaluate_on_test(booster, X_val, y_val, implied_test, n_min=5)
+    assert "edge" in result
+    assert "accuracy" in result
+    assert "logloss" in result
+    assert "per_decile" in result
+    assert isinstance(result["per_decile"], dict)

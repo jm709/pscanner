@@ -8,14 +8,17 @@ calibrated against ``implied_prob_at_buy``.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import numpy as np
 import optuna
 import xgboost as xgb
 
-from pscanner.ml.metrics import realized_edge_metric
+from pscanner.ml.metrics import per_decile_edge_breakdown, realized_edge_metric
 
 _NUM_BOOST_ROUND = 2000
 _EARLY_STOPPING_ROUNDS = 50
+_BINARY_DECISION_THRESHOLD = 0.5
 
 
 def run_single_trial(
@@ -81,3 +84,71 @@ def run_single_trial(
     edge = realized_edge_metric(y_val, p_val, implied_prob_val, n_min=n_min)
     trial.set_user_attr("best_iteration", int(best_iter))
     return edge
+
+
+def fit_winning_model(
+    best_params: Mapping[str, object],
+    best_iteration: int,
+    X_train: np.ndarray,  # noqa: N803 -- ML matrix convention
+    y_train: np.ndarray,
+    seed: int,
+) -> xgb.Booster:
+    """Refit the winning hyperparams on train alone for ``best_iteration+1`` rounds.
+
+    Avoids retraining on ``train + val`` (per the spec): the val set
+    has already been used for model selection. Determinism is preserved
+    by the shared ``seed`` + ``nthread=1``; this gives the same booster
+    the winning trial produced.
+
+    Args:
+        best_params: Optuna's ``study.best_params`` dict.
+        best_iteration: From the winning trial's user attrs.
+        X_train: Training feature matrix.
+        y_train: Training labels.
+        seed: XGBoost RNG seed.
+
+    Returns:
+        The fitted XGBoost booster.
+    """
+    params: dict[str, object] = dict(best_params)
+    params.update(
+        {
+            "objective": "binary:logistic",
+            "eval_metric": "logloss",
+            "nthread": 1,
+            "seed": seed,
+            "verbosity": 0,
+        }
+    )
+    dtrain = xgb.DMatrix(X_train, label=y_train)
+    return xgb.train(params, dtrain, num_boost_round=best_iteration + 1)
+
+
+def evaluate_on_test(
+    booster: xgb.Booster,
+    X_test: np.ndarray,  # noqa: N803 -- ML matrix convention
+    y_test: np.ndarray,
+    implied_prob_test: np.ndarray,
+    n_min: int,
+) -> dict[str, object]:
+    """Score the booster on the held-out test split.
+
+    Returns:
+        ``{"edge": float, "accuracy": float, "logloss": float,
+        "per_decile": {decile_label: {"n": float, "mean_edge": float}}}``.
+    """
+    dtest = xgb.DMatrix(X_test)
+    p_test = booster.predict(dtest)
+    edge = realized_edge_metric(y_test, p_test, implied_prob_test, n_min=n_min)
+    accuracy = float(((p_test >= _BINARY_DECISION_THRESHOLD).astype(int) == y_test).mean())
+    eps = 1e-9
+    logloss = float(
+        -(y_test * np.log(p_test + eps) + (1 - y_test) * np.log(1 - p_test + eps)).mean()
+    )
+    decile = per_decile_edge_breakdown(y_test, p_test, implied_prob_test)
+    return {
+        "edge": edge,
+        "accuracy": accuracy,
+        "logloss": logloss,
+        "per_decile": decile,
+    }
