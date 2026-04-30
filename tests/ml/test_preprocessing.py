@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 
 import polars as pl
@@ -10,6 +11,7 @@ from pscanner.ml.preprocessing import (
     CARRIER_COLS,
     CATEGORICAL_COLS,
     LEAKAGE_COLS,
+    OneHotEncoder,
     drop_leakage_cols,
 )
 
@@ -56,3 +58,70 @@ def test_drop_leakage_cols_is_idempotent(
     once = drop_leakage_cols(df)
     twice = drop_leakage_cols(once)
     assert once.columns == twice.columns
+
+
+def test_one_hot_encoder_fits_on_train_levels() -> None:
+    df = pl.DataFrame(
+        {
+            "side": ["YES", "NO", "YES"],
+            "top_category": ["sports", None, "thesis"],
+            "market_category": ["sports", "esports", "thesis"],
+            "implied_prob_at_buy": [0.5, 0.5, 0.5],
+            "label_won": [1, 0, 1],
+        }
+    )
+    enc = OneHotEncoder.fit(df, columns=("side", "top_category", "market_category"))
+    assert enc.levels["side"] == ("NO", "YES")
+    assert enc.levels["top_category"] == ("__none__", "sports", "thesis")
+    assert enc.levels["market_category"] == ("esports", "sports", "thesis")
+
+
+def test_one_hot_encoder_transform_emits_indicator_columns() -> None:
+    df = pl.DataFrame(
+        {
+            "side": ["YES", "NO", "YES"],
+            "top_category": ["sports", None, "thesis"],
+            "market_category": ["sports", "esports", "thesis"],
+            "implied_prob_at_buy": [0.5, 0.5, 0.5],
+            "label_won": [1, 0, 1],
+        }
+    )
+    enc = OneHotEncoder.fit(df, columns=("side", "top_category", "market_category"))
+    out = enc.transform(df)
+    # Original categoricals dropped.
+    for col in ("side", "top_category", "market_category"):
+        assert col not in out.columns
+    # New indicator columns present.
+    assert "side__YES" in out.columns
+    assert "side__NO" in out.columns
+    assert "top_category____none__" in out.columns
+    # Indicators carry correct values for the first row (YES, sports, sports).
+    assert out["side__YES"][0] == 1
+    assert out["side__NO"][0] == 0
+    assert out["top_category__sports"][0] == 1
+    assert out["top_category____none__"][0] == 0
+    # Second row had top_category=None -> __none__.
+    assert out["top_category____none__"][1] == 1
+
+
+def test_one_hot_encoder_handles_unseen_levels_at_transform() -> None:
+    train = pl.DataFrame({"side": ["YES", "NO"]})
+    val = pl.DataFrame({"side": ["YES", "DRAW"]})  # DRAW not seen at fit
+    enc = OneHotEncoder.fit(train, columns=("side",))
+    out = enc.transform(val)
+    # Both fit-time levels exist on the output.
+    assert "side__YES" in out.columns
+    assert "side__NO" in out.columns
+    # Unseen value gets all zeros across known levels.
+    assert out["side__YES"][1] == 0
+    assert out["side__NO"][1] == 0
+
+
+def test_one_hot_encoder_round_trips_through_json() -> None:
+    df = pl.DataFrame({"side": ["YES", "NO"], "top_category": ["sports", None]})
+    enc = OneHotEncoder.fit(df, columns=("side", "top_category"))
+    payload = enc.to_json()
+    rendered = json.dumps(payload)
+    parsed = json.loads(rendered)
+    enc2 = OneHotEncoder.from_json(parsed)
+    assert enc2.levels == enc.levels
