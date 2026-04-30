@@ -82,7 +82,7 @@ async def test_enumerate_inserts_above_gate(tmp_corpus_db: sqlite3.Connection) -
 @pytest.mark.asyncio
 async def test_enumerate_is_idempotent(tmp_corpus_db: sqlite3.Connection) -> None:
     repo = CorpusMarketsRepo(tmp_corpus_db)
-    events = [_event("e1", [_market("c1", 50_000.0)])]
+    events = [_event("e1", [_market("c1", VOLUME_GATE_USD + 1)])]
     await enumerate_closed_markets(
         gamma=_fake_gamma(events), repo=repo, now_ts=1_000, since_ts=None
     )
@@ -100,7 +100,7 @@ async def test_enumerate_skips_open_markets(tmp_corpus_db: sqlite3.Connection) -
     events = [
         _event(
             "e1",
-            [_market("c1", 50_000.0, closed=False)],
+            [_market("c1", VOLUME_GATE_USD + 1, closed=False)],
             closed=True,
         )
     ]
@@ -127,7 +127,7 @@ async def test_enumerate_treats_5xx_as_end_of_catalog(
     must persist the markets it already saw rather than aborting the run.
     """
     repo = CorpusMarketsRepo(tmp_corpus_db)
-    events = [_event("e1", [_market("c1", 50_000.0)])]
+    events = [_event("e1", [_market("c1", VOLUME_GATE_USD + 1)])]
     stub = MagicMock()
     stub.iter_events = lambda **_kw: _events_then_500(events)
     inserted = await enumerate_closed_markets(gamma=stub, repo=repo, now_ts=1_000, since_ts=None)
@@ -152,7 +152,7 @@ async def test_enumerate_propagates_4xx(tmp_corpus_db: sqlite3.Connection) -> No
     client problem and must surface to the caller.
     """
     repo = CorpusMarketsRepo(tmp_corpus_db)
-    events = [_event("e1", [_market("c1", 50_000.0)])]
+    events = [_event("e1", [_market("c1", VOLUME_GATE_USD + 1)])]
     stub = MagicMock()
     stub.iter_events = lambda **_kw: _events_then_4xx(events)
     with pytest.raises(httpx.HTTPStatusError):

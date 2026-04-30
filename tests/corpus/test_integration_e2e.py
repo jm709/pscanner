@@ -30,7 +30,7 @@ def _events_payload() -> list[dict[str, Any]]:
                     "slug": "cond1-slug",
                     "outcomes": '["Yes","No"]',
                     "outcomePrices": '["1.0","0.0"]',
-                    "volume": 50_000.0,
+                    "volume": 2_000_000.0,
                     "active": False,
                     "closed": True,
                 }

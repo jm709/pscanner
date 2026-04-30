@@ -13,7 +13,7 @@ from pscanner.poly.gamma import GammaClient
 from pscanner.poly.models import Event
 
 _log = structlog.get_logger(__name__)
-VOLUME_GATE_USD: Final[float] = 10_000.0
+VOLUME_GATE_USD: Final[float] = 1_000_000.0
 _HTTP_SERVER_ERROR_FLOOR: Final[int] = 500
 
 
