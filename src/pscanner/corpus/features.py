@@ -59,7 +59,14 @@ class WalletState:
     realized_pnl_usd: float
     last_trade_ts: int | None
     recent_30d_trades: tuple[int, ...]
-    bet_sizes: tuple[float, ...]
+    # Running totals for avg_bet_size_usd. Storing the raw bet_sizes
+    # tuple would cost O(N) per fold and O(N) per feature read on
+    # heavy-hitter wallets — a streaming sum/count keeps both at O(1).
+    # ``median_bet_size_usd`` is no longer derived (always None in
+    # FeatureRow) — accepted v1 cost; could be revived via a bounded
+    # rolling window if a model needs it.
+    bet_size_sum: float
+    bet_size_count: int
     category_counts: dict[str, int] = field(default_factory=dict)
 
 
@@ -106,7 +113,8 @@ def empty_wallet_state(*, first_seen_ts: int) -> WalletState:
         realized_pnl_usd=0.0,
         last_trade_ts=None,
         recent_30d_trades=(),
-        bet_sizes=(),
+        bet_size_sum=0.0,
+        bet_size_count=0,
         category_counts={},
     )
 
@@ -150,7 +158,8 @@ def apply_buy_to_state(state: WalletState, trade: Trade) -> WalletState:
         cumulative_buy_count=state.cumulative_buy_count + 1,
         last_trade_ts=trade.ts,
         recent_30d_trades=(*_trim_recent_trades(state.recent_30d_trades, trade.ts), trade.ts),
-        bet_sizes=(*state.bet_sizes, trade.notional_usd),
+        bet_size_sum=state.bet_size_sum + trade.notional_usd,
+        bet_size_count=state.bet_size_count + 1,
         category_counts=new_categories,
     )
 
@@ -289,8 +298,10 @@ def compute_features(trade: Trade, history: HistoryProvider) -> FeatureRow:
         else None
     )
     edge = win_rate - avg_prob if win_rate is not None and avg_prob is not None else None
-    avg_bet = sum(wallet.bet_sizes) / len(wallet.bet_sizes) if wallet.bet_sizes else None
-    median_bet = statistics.median(wallet.bet_sizes) if wallet.bet_sizes else None
+    avg_bet = wallet.bet_size_sum / wallet.bet_size_count if wallet.bet_size_count > 0 else None
+    # median_bet is no longer maintained — would require a bounded
+    # rolling window or a streaming estimator. v1 always emits None.
+    median_bet: float | None = None
     rel_to_avg = trade.notional_usd / avg_bet if avg_bet is not None and avg_bet > 0 else None
     seconds_since_last = (
         trade.ts - wallet.last_trade_ts if wallet.last_trade_ts is not None else None

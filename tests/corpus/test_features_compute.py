@@ -100,7 +100,8 @@ def test_compute_features_with_one_resolved_buy() -> None:
         realized_pnl_usd=70.0,
         last_trade_ts=900_000,
         recent_30d_trades=(900_000,),
-        bet_sizes=(30.0,),
+        bet_size_sum=30.0,
+        bet_size_count=1,
         category_counts={"crypto": 1},
     )
     history: HistoryProvider = _StubHistory(

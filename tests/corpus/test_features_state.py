@@ -45,7 +45,8 @@ def test_empty_wallet_state_has_zero_counts() -> None:
     assert state.realized_pnl_usd == 0.0
     assert state.last_trade_ts is None
     assert state.recent_30d_trades == ()
-    assert state.bet_sizes == ()
+    assert state.bet_size_sum == 0.0
+    assert state.bet_size_count == 0
     assert state.category_counts == {}
 
 
@@ -57,7 +58,8 @@ def test_apply_buy_increments_counts_and_records_price() -> None:
     assert new_state.cumulative_buy_count == 1
     assert new_state.cumulative_buy_price_sum == pytest.approx(0.4)
     assert new_state.last_trade_ts == 1_000
-    assert new_state.bet_sizes == (40.0,)
+    assert new_state.bet_size_sum == pytest.approx(40.0)
+    assert new_state.bet_size_count == 1
     assert new_state.category_counts == {"crypto": 1}
 
 
