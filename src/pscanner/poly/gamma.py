@@ -175,8 +175,10 @@ class GammaClient:
 
         Mirrors :meth:`get_event_by_slug`: gamma's ``/markets`` endpoint
         accepts a ``slug`` query parameter and returns a (possibly empty)
-        list. Useful for the paper-trader cache-miss fallback when the only
-        identifier we have is the slug a trade row carried.
+        list. Passes ``closed=true`` so the lookup finds both active and
+        closed markets — gamma's default filter excludes closed ones,
+        which would silently 404 every paper-trader resolution lookup
+        and every corpus market.
 
         Args:
             slug: Market slug (e.g. ``"nhl-edm-ana-2026-04-26"``).
@@ -188,7 +190,10 @@ class GammaClient:
             httpx.HTTPStatusError: On non-404 HTTP errors.
             TypeError: If gamma returns a non-list payload.
         """
-        payload = await self._http.get("/markets", params={"slug": slug})
+        payload = await self._http.get(
+            "/markets",
+            params={"slug": slug, "closed": "true"},
+        )
         if not isinstance(payload, list):
             msg = f"expected JSON array for /markets?slug={slug}, got {type(payload).__name__}"
             raise TypeError(msg)

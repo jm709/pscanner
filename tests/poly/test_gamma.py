@@ -234,7 +234,33 @@ async def test_get_market_by_slug_returns_first_match() -> None:
     assert market.condition_id == "0xabc"
     assert market.outcomes == ["Yes", "No"]
     assert market.clob_token_ids == ["asset-yes", "asset-no"]
-    http.get.assert_awaited_once_with("/markets", params={"slug": "test-slug"})
+    http.get.assert_awaited_once_with("/markets", params={"slug": "test-slug", "closed": "true"})
+
+
+async def test_get_market_by_slug_finds_closed_market() -> None:
+    """Gamma's `/markets` filter defaults exclude closed markets; the client
+    must pass `closed=true` so paper-trader resolution lookups and the
+    corpus pipeline both find closed markets."""
+    closed_market = {
+        "id": "1234",
+        "conditionId": "0xabc",
+        "question": "Resolved market",
+        "slug": "test-slug",
+        "outcomes": '["Yes", "No"]',
+        "outcomePrices": '["1.0", "0.0"]',
+        "clobTokenIds": '["asset-yes", "asset-no"]',
+        "active": True,
+        "closed": True,
+        "liquidity": 0.0,
+        "volume": 1.0,
+    }
+    http = _mock_http_returning([closed_market])
+    client = GammaClient(http=http)
+
+    market = await client.get_market_by_slug("test-slug")
+    assert market is not None
+    assert market.closed is True
+    http.get.assert_awaited_once_with("/markets", params={"slug": "test-slug", "closed": "true"})
 
 
 async def test_get_market_by_slug_returns_none_on_empty_array() -> None:
