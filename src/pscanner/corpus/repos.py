@@ -319,6 +319,11 @@ class CorpusTradesRepo:
         Tie-breaking on ``(tx_hash, asset_id)`` makes the iteration
         order deterministic for the streaming feature pipeline.
 
+        Performance depends on ``idx_corpus_trades_ts_tx_asset`` covering
+        the full ORDER BY tuple — without it SQLite falls back to a
+        ``USE TEMP B-TREE FOR ORDER BY`` plan and sorts the entire
+        table per chunk.
+
         Args:
             chunk_size: Rows per page. Default 50,000 (~5MB resident).
         """

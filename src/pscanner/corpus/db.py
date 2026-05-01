@@ -49,7 +49,12 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_corpus_trades_market_ts ON corpus_trades(condition_id, ts)",
     "CREATE INDEX IF NOT EXISTS idx_corpus_trades_wallet_ts ON corpus_trades(wallet_address, ts)",
-    "CREATE INDEX IF NOT EXISTS idx_corpus_trades_ts ON corpus_trades(ts)",
+    # Composite covers chronological keyset pagination
+    # (``CorpusTradesRepo.iter_chronological``) without a temp B-tree sort.
+    # The leading ``ts`` column also satisfies any ts-prefix query the old
+    # single-column index served.
+    "CREATE INDEX IF NOT EXISTS idx_corpus_trades_ts_tx_asset "
+    "ON corpus_trades(ts, tx_hash, asset_id)",
     """
     CREATE TABLE IF NOT EXISTS market_resolutions (
       condition_id TEXT PRIMARY KEY,
@@ -118,7 +123,11 @@ _PRAGMAS: tuple[str, ...] = (
     "PRAGMA foreign_keys=ON",
 )
 
-_MIGRATIONS: tuple[str, ...] = ("ALTER TABLE corpus_markets ADD COLUMN market_slug TEXT",)
+_MIGRATIONS: tuple[str, ...] = (
+    "ALTER TABLE corpus_markets ADD COLUMN market_slug TEXT",
+    # Superseded by ``idx_corpus_trades_ts_tx_asset``, which covers ts-prefix queries.
+    "DROP INDEX IF EXISTS idx_corpus_trades_ts",
+)
 
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:
