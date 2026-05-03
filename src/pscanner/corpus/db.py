@@ -136,6 +136,7 @@ _MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE corpus_markets ADD COLUMN market_slug TEXT",
     # Superseded by ``idx_corpus_trades_ts_tx_asset``, which covers ts-prefix queries.
     "DROP INDEX IF EXISTS idx_corpus_trades_ts",
+    "ALTER TABLE corpus_markets ADD COLUMN onchain_trades_count INTEGER",
 )
 
 
