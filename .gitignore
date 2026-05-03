@@ -38,6 +38,9 @@ data/*
 *.sqlite3-wal
 *.sqlite3-shm
 
+# ML training artifacts (per-run model.json, metrics.json, study.db, etc.)
+models/
+
 # Secrets / local config
 .env
 .env.*
