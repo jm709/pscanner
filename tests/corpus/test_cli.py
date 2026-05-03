@@ -16,11 +16,12 @@ from pscanner.corpus.db import init_corpus_db
 from pscanner.corpus.repos import AssetEntry, AssetIndexRepo
 
 
-def test_parser_recognises_three_commands() -> None:
+def test_parser_recognises_all_subcommands() -> None:
     parser = build_corpus_parser()
     assert parser.parse_args(["backfill"]).command == "backfill"
     assert parser.parse_args(["refresh"]).command == "refresh"
     assert parser.parse_args(["build-features"]).command == "build-features"
+    assert parser.parse_args(["onchain-backfill"]).command == "onchain-backfill"
 
 
 def test_parser_supports_rebuild_flag() -> None:

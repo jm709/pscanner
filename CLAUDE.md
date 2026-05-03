@@ -2,7 +2,7 @@
 
 Polymarket data-collection daemon. Python 3.13 + uv + ruff + ty + pytest.
 ~6K LOC, 18 SQLite tables, 8 detectors, 7 collectors, 5 paper-trading
-evaluators. 734 tests.
+evaluators. 892 tests.
 
 ## Quick verify
 `uv run ruff check . && uv run ruff format --check . && uv run ty check && uv run pytest -q`
