@@ -16,6 +16,7 @@ evaluators. 734 tests.
 - Public WS market channel emits `book` + `price_change` ONLY — never `trade` events with wallet info. Per-wallet trades require authenticated `/ws/user` (we don't use it; trade collection is REST-polled `/activity`).
 - `WsBookMessage`: `bids`/`asks`/`last_trade_price`/`price_changes` are **top-level fields**, not under `msg.data` (which is a freeform fallback that's empty in practice).
 - Default `gamma_rpm = 50`, `data_rpm = 50`. Cold-start bottlenecks: smart-money refresh + events catalog sweep both compete for gamma budget; cluster + smart-money depend on watched-wallet `wallet_first_seen` populated by TradeCollector.
+- `/trades` and `/activity` REST cap at `offset=3000` (server: `"max historical activity offset of 3000 exceeded"`, newest-first sort). No documented `before`/`after`/`cursor` workaround — verified May 2026 against ~15 parameter variants and four candidate alt-endpoints. Beyond 3000 trades requires on-chain via Polygon RPC (`OrderFilled` events from CTF Exchange `0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E`). Phase 1 of #42 landed the decoder + `asset_index` resolver; Phase 2 (RPC client + CLI) is queued.
 
 ## Test gotchas
 - `pyproject.toml` has `filterwarnings = ["error"]` — every warning fails tests. Clean up resources (httpx/respx fixtures especially).
@@ -26,12 +27,16 @@ evaluators. 734 tests.
 - `tmp_db` has `row_factory = sqlite3.Row`; rows compare via `tuple(r)`, not against raw tuples.
 - **SQLite `UNIQUE` indexes treat NULLs as distinct.** The `paper_trades` unique-on-entry index uses `COALESCE(rule_variant, '')` so non-twin sources (`rule_variant=NULL`) keep per-key uniqueness while velocity twin trades (follow/fade) coexist. Don't strip the COALESCE.
 - Many test files use the `# type: ignore[arg-type]  # ty:ignore[invalid-argument-type]` doubled annotation when passing string literals where `Literal` types are expected — `ty` doesn't honor mypy ignores so both are needed.
+- `CorpusTradesRepo.insert_batch` silently filters out trades with `notional_usd < _NOTIONAL_FLOOR_USD` (default $10). Test fixtures inserting trades for downstream behavior must use ≥$10 notional or the rows won't land and the test will see an empty `corpus_trades`.
+- For functions that read from a dict but don't mutate it, prefer `Mapping[str, object]` over `dict[str, object]` in the parameter type — `dict` is invariant in its value type so `dict[str, str]` doesn't satisfy `dict[str, object]`, but `Mapping` is covariant and accepts narrower-valued caller dicts.
 
 ## Codebase conventions
 - **Detectors**: 3 lifecycle patterns. Polling → inherit `PollingDetector`. Trade-callback → inherit `TradeDrivenDetector` (callback pattern, `run()` parks). Stream-driven → take `tick_stream: TickStream` and `async for` it. Hybrid (whales, cluster) → compose patterns by hand.
 - Every detector with a sleeping run-loop accepts `clock: Clock | None = None`.
 - **Identifiers**: 5 distinct types in `pscanner.poly.ids` — `MarketId`, `ConditionId`, `AssetId`, `EventId`, `EventSlug`. They're `NewType[str]`; `ty check` catches mis-uses.
-- **Schema migrations**: idempotent `ALTER TABLE` in `_MIGRATIONS` tuple, wrapped by `_apply_migrations` swallowing `"duplicate column name"` and `"no such column"` `OperationalError`s. CREATE statements are `IF NOT EXISTS` in `_SCHEMA_STATEMENTS`.
+- **Schema migrations**: idempotent `ALTER TABLE` in `_MIGRATIONS` tuple, wrapped by `_apply_migrations` swallowing `"duplicate column name"` and `"no such column"` `OperationalError`s. CREATE statements are `IF NOT EXISTS` in `_SCHEMA_STATEMENTS`. **Always open the corpus DB via `init_corpus_db()`**, never raw `sqlite3.connect()` — the latter skips the migration step and pre-existing on-disk corpora won't auto-pick-up new tables.
+- **`closed_at` / `resolved_at` are observational close times.** `CorpusMarketsRepo.mark_complete` rewrites `corpus_markets.closed_at` to `MAX(corpus_trades.ts)` when backfill finishes; `record_resolutions` then propagates that into `market_resolutions.resolved_at`. The previous behavior (placeholder `now_ts` from the enumerator) collapsed `temporal_split` into a hash split — see #40. If you ever bypass `mark_complete`, both columns become meaningless again.
+- **`asset_index` table** maps `asset_id PRIMARY KEY → (condition_id, outcome_side, outcome_index)`. Built by Phase 1 of #42 and used by future on-chain ingest to resolve `OrderFilled` events to corpus trades. Backfilled from `corpus_trades` via `scripts/backfill_asset_index.py` (idempotent).
 - **Categories** (smart-money / convergence / mispricing): single source of truth in `pscanner.categories.DEFAULT_TAXONOMY`. Don't hardcode `"sports"`/`"esports"` strings in detectors.
 - **Velocity alerts** are deduped by `condition_id` (not asset_id) so YES/NO twin alerts on a binary market collapse. Falls back to asset_id when market_cache lookup fails.
 - **`wallet_first_seen`** is populated unconditionally by `TradeCollector._ensure_first_seen` on every poll cycle (TTL-gated 24h). Cluster detector + whales-detector age filter both depend on this.
@@ -53,6 +58,7 @@ evaluators. 734 tests.
 - `pscanner run` (daemon) / `pscanner run --once` (single pass) / `pscanner status` (recent alerts)
 - `pscanner watch <addr> [--reason TEXT]` / `pscanner unwatch <addr>` / `pscanner watchlist`
 - `pscanner paper status` — aggregate NAV + per-wallet PnL + per-source breakdown table (one row per `(triggering_alert_detector, rule_variant)`).
+- `pscanner ml train --device cuda --n-jobs 1` runs xgboost training on a CUDA GPU (~6.5 min for 100 trials). `--n-jobs 1` is required on GPU — parallel Optuna trials would compete for the 8 GB VRAM. CPU path stays default; the laptop dev host OOMs at ~7.4 GB on the full corpus (no GPU + 7.6 GB host). See `LOCAL_NOTES.md` (gitignored) for the desktop training-box workflow.
 - DB: `./data/pscanner.sqlite3`. Drop the file for a clean smoke run.
 - Smoke verification idiom: `rm -f data/pscanner.sqlite3 && timeout NNNN uv run pscanner run > /tmp/smoke.log 2>&1; echo exit=$?`
 - **`scripts/expand_cluster.py`**: cluster expansion via fingerprint matching. Reads seeds' trades from local `wallet_trades`; if seeds are freshly watchlisted (no local data yet) pre-populate via `DataClient.get_activity` first. The `hi_price_rate` field in the output is sampled from the seed-overlap window only — for true behavioral fingerprint, fetch `/positions?user=X&closed=true` and inspect `avg_price` distribution.
