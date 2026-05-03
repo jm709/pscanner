@@ -81,3 +81,48 @@ async def test_get_logs_returns_payload(client: OnchainRpcClient) -> None:
 
     assert len(logs) == 1
     assert logs[0]["transactionHash"] == "0x" + "ab" * 32
+
+
+@respx.mock
+async def test_get_block_timestamp_returns_int_from_hex(
+    client: OnchainRpcClient,
+) -> None:
+    respx.post(_RPC_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"timestamp": "0x65f0a000", "number": "0x10"},
+            },
+        ),
+    )
+    try:
+        ts = await client.get_block_timestamp(16)
+    finally:
+        await client.aclose()
+    assert ts == 0x65F0A000
+
+
+@respx.mock
+async def test_get_block_timestamp_caches_repeat_calls(
+    client: OnchainRpcClient,
+) -> None:
+    route = respx.post(_RPC_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"timestamp": "0x100", "number": "0xa"},
+            },
+        ),
+    )
+    try:
+        ts_a = await client.get_block_timestamp(10)
+        ts_b = await client.get_block_timestamp(10)
+    finally:
+        await client.aclose()
+
+    assert ts_a == ts_b == 0x100
+    assert route.call_count == 1, "second call should hit the cache"
