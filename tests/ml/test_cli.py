@@ -12,7 +12,7 @@ def test_train_subcommand_defaults() -> None:
     assert args.n_trials == 100
     assert args.seed == 42
     assert args.n_min == 20
-    assert args.n_jobs == 10
+    assert args.n_jobs == 2
     assert args.db == "data/corpus.sqlite3"
 
 

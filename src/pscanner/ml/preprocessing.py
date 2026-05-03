@@ -147,33 +147,50 @@ def temporal_split(
     )
 
 
+# Columns excluded at SELECT time so the full-fat DataFrame is never
+# materialized. ``id`` is the autoincrement primary key, useless for
+# training. ``LEAKAGE_COLS`` are dropped downstream by
+# ``drop_leakage_cols`` anyway -- excluding them at the SQL boundary
+# avoids loading ~1+ GB of hex-string columns (tx_hash, asset_id,
+# wallet_address are 42-66 chars x 5M rows each) only to drop them.
+_NEVER_LOAD_COLS: frozenset[str] = frozenset({"id", *LEAKAGE_COLS})
+
+
 def load_dataset(db_path: Path) -> pl.DataFrame:
     """Load ``training_examples`` joined with ``market_resolutions.resolved_at``.
 
     Inner join is correct: ``build-features`` only emits rows for
     markets with a resolutions entry, so the join is row-preserving.
 
+    Excludes ``LEAKAGE_COLS`` (and the internal ``id`` PK) at the SQL
+    SELECT boundary so they are never materialized. At ~5M rows the
+    three hex-string leakage cols (``tx_hash``, ``asset_id``,
+    ``wallet_address``) account for ~1 GB+ of Python/Arrow allocations
+    on their own, which is enough to OOM a 7.6 GB host during load.
+
     Args:
         db_path: Path to the corpus SQLite file.
 
     Returns:
-        A Polars DataFrame with all 34 ``training_examples`` columns
-        plus ``resolved_at``.
+        A Polars DataFrame with the surviving ``training_examples``
+        columns plus ``resolved_at``.
     """
     conn = sqlite3.connect(str(db_path))
     try:
-        cur = conn.execute(
-            """
-            SELECT te.*, mr.resolved_at
-            FROM training_examples te
-            JOIN market_resolutions mr USING (condition_id)
-            """
+        all_cols = [r[1] for r in conn.execute("PRAGMA table_info(training_examples)").fetchall()]
+        keep_cols = [c for c in all_cols if c not in _NEVER_LOAD_COLS]
+        select_list = ", ".join(f"te.{c}" for c in keep_cols)
+        return pl.read_database(
+            query=(
+                f"SELECT {select_list}, mr.resolved_at "  # noqa: S608 -- col names are derived from PRAGMA, not user input
+                "FROM training_examples te "
+                "JOIN market_resolutions mr USING (condition_id)"
+            ),
+            connection=conn,
+            batch_size=100_000,
         )
-        cols = [desc[0] for desc in cur.description]
-        rows = cur.fetchall()
     finally:
         conn.close()
-    return pl.DataFrame(rows, schema=cols, orient="row")
 
 
 def build_feature_matrix(
@@ -186,6 +203,10 @@ def build_feature_matrix(
     Polars nulls become ``np.nan`` in float columns -- XGBoost's
     missing-direction rule handles them at split time.
 
+    ``X`` is returned as ``float32`` to halve DMatrix and numpy memory
+    versus the polars-default ``float64``; XGBoost converts to float32
+    internally regardless.
+
     Args:
         df: A preprocessed Polars DataFrame (post-drop, post-encoding).
 
@@ -193,7 +214,7 @@ def build_feature_matrix(
         ``(X, y, implied_prob)`` tuple.
     """
     feature_cols = [c for c in df.columns if c not in (*CARRIER_COLS, "label_won")]
-    x_matrix = df.select(feature_cols).to_numpy()
+    x_matrix = df.select(feature_cols).to_numpy().astype(np.float32, copy=False)
     y = df["label_won"].to_numpy()
     implied = df["implied_prob_at_buy"].to_numpy()
     return x_matrix, y, implied

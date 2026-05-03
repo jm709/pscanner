@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import optuna
 import polars as pl
+import xgboost as xgb
 
 from pscanner.ml.training import (
     evaluate_on_test,
@@ -35,6 +36,8 @@ def _toy_problem(
 
 def test_run_single_trial_returns_finite_edge() -> None:
     X_train, y_train, X_val, y_val, implied_val = _toy_problem()  # noqa: N806 -- ML matrix convention
+    dtrain = xgb.DMatrix(X_train, label=y_train)
+    dval = xgb.DMatrix(X_val, label=y_val)
     study = optuna.create_study(
         direction="maximize",
         sampler=optuna.samplers.TPESampler(seed=42),
@@ -43,9 +46,8 @@ def test_run_single_trial_returns_finite_edge() -> None:
     def objective(trial: optuna.Trial) -> float:
         return run_single_trial(
             trial=trial,
-            X_train=X_train,
-            y_train=y_train,
-            X_val=X_val,
+            dtrain=dtrain,
+            dval=dval,
             y_val=y_val,
             implied_prob_val=implied_val,
             n_min=5,
@@ -62,6 +64,8 @@ def test_run_single_trial_returns_finite_edge() -> None:
 
 def test_run_single_trial_is_deterministic_under_same_seed() -> None:
     X_train, y_train, X_val, y_val, implied_val = _toy_problem()  # noqa: N806 -- ML matrix convention
+    dtrain = xgb.DMatrix(X_train, label=y_train)
+    dval = xgb.DMatrix(X_val, label=y_val)
 
     def study_value() -> float:
         study = optuna.create_study(
@@ -71,9 +75,8 @@ def test_run_single_trial_is_deterministic_under_same_seed() -> None:
         study.optimize(
             lambda t: run_single_trial(
                 trial=t,
-                X_train=X_train,
-                y_train=y_train,
-                X_val=X_val,
+                dtrain=dtrain,
+                dval=dval,
                 y_val=y_val,
                 implied_prob_val=implied_val,
                 n_min=5,

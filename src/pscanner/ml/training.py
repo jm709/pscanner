@@ -9,6 +9,7 @@ calibrated against ``implied_prob_at_buy``.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -36,15 +37,22 @@ _EARLY_STOPPING_ROUNDS = 50
 _BINARY_DECISION_THRESHOLD = 0.5
 
 
+def _rss_mb() -> int:
+    """Return current resident set size in MB (Linux /proc/self/statm)."""
+    with Path("/proc/self/statm").open() as f:
+        rss_pages = int(f.read().split()[1])
+    return (rss_pages * os.sysconf("SC_PAGE_SIZE")) // (1024 * 1024)
+
+
 def run_single_trial(
     trial: optuna.Trial,
-    X_train: np.ndarray,  # noqa: N803 -- ML matrix convention
-    y_train: np.ndarray,
-    X_val: np.ndarray,  # noqa: N803 -- ML matrix convention
+    dtrain: xgb.DMatrix,
+    dval: xgb.DMatrix,
     y_val: np.ndarray,
     implied_prob_val: np.ndarray,
     n_min: int,
     seed: int,
+    device: str = "cpu",
 ) -> float:
     """Fit one XGBoost trial and return its validation realized edge.
 
@@ -56,15 +64,20 @@ def run_single_trial(
     chosen ``best_iteration`` is recorded on the trial's user attrs so
     the winning model can be refit later without re-running the study.
 
+    ``dtrain`` and ``dval`` are expected to be shared across trials --
+    XGBoost's ``train()`` treats them as read-only, so a single pair
+    serves any number of joblib-thread workers without per-trial
+    DMatrix copies.
+
     Args:
         trial: Optuna trial object for parameter suggestion.
-        X_train: Training feature matrix.
-        y_train: Training labels.
-        X_val: Validation feature matrix.
-        y_val: Validation labels.
+        dtrain: Pre-built training DMatrix (shared across trials).
+        dval: Pre-built validation DMatrix (shared across trials).
+        y_val: Validation labels (for the edge metric).
         implied_prob_val: Implied probability per validation row.
         n_min: Minimum copied bets for the edge metric guard.
         seed: XGBoost RNG seed.
+        device: XGBoost device, ``"cpu"`` or ``"cuda"``.
 
     Returns:
         The trial's realized edge on val (or ``-1.0`` if too few bets).
@@ -80,12 +93,11 @@ def run_single_trial(
         "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 10.0, log=True),
         "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
         "gamma": trial.suggest_float("gamma", 1e-3, 1.0, log=True),
+        "device": device,
         "nthread": 1,
         "seed": seed,
         "verbosity": 0,
     }
-    dtrain = xgb.DMatrix(X_train, label=y_train)
-    dval = xgb.DMatrix(X_val, label=y_val)
     booster = xgb.train(
         params,
         dtrain,
@@ -107,6 +119,7 @@ def fit_winning_model(
     X_train: np.ndarray,  # noqa: N803 -- ML matrix convention
     y_train: np.ndarray,
     seed: int,
+    device: str = "cpu",
 ) -> xgb.Booster:
     """Refit the winning hyperparams on train alone for ``best_iteration+1`` rounds.
 
@@ -121,6 +134,7 @@ def fit_winning_model(
         X_train: Training feature matrix.
         y_train: Training labels.
         seed: XGBoost RNG seed.
+        device: XGBoost device, ``"cpu"`` or ``"cuda"``.
 
     Returns:
         The fitted XGBoost booster.
@@ -130,6 +144,7 @@ def fit_winning_model(
         {
             "objective": "binary:logistic",
             "eval_metric": "logloss",
+            "device": device,
             "nthread": 1,
             "seed": seed,
             "verbosity": 0,
@@ -169,6 +184,71 @@ def evaluate_on_test(
     }
 
 
+def _run_optimization_phase(
+    output_dir: Path,
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_val: np.ndarray,
+    y_val: np.ndarray,
+    implied_val: np.ndarray,
+    n_trials: int,
+    n_jobs: int,
+    n_min: int,
+    seed: int,
+    device: str,
+) -> tuple[int, dict[str, object], float]:
+    """Run the Optuna study and return ``(best_iteration, best_params, best_value)``.
+
+    Built as a separate function so the shared ``dtrain``/``dval``
+    DMatrices (each a copy of the train/val data) are released back
+    to the allocator at function return, before ``fit_winning_model``
+    and ``evaluate_on_test`` build their own DMatrices.
+    """
+    dtrain = xgb.DMatrix(x_train, label=y_train)
+    dval = xgb.DMatrix(x_val, label=y_val)
+    _log.info("ml.mem", phase="post_dmatrix", rss_mb=_rss_mb())
+
+    storage_url = f"sqlite:///{output_dir / 'study.db'}"
+    storage = optuna.storages.RDBStorage(url=storage_url)
+    # Silence optuna's per-trial chatter on stderr while the test suite
+    # is running with filterwarnings=error.
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    try:
+        study = optuna.create_study(
+            direction="maximize",
+            sampler=optuna.samplers.TPESampler(seed=seed),
+            pruner=optuna.pruners.MedianPruner(),
+            storage=storage,
+            study_name="copy_trade_gate",
+        )
+        study.optimize(
+            lambda t: run_single_trial(
+                trial=t,
+                dtrain=dtrain,
+                dval=dval,
+                y_val=y_val,
+                implied_prob_val=implied_val,
+                n_min=n_min,
+                seed=seed,
+                device=device,
+            ),
+            n_trials=n_trials,
+            n_jobs=n_jobs,
+        )
+
+        best_iteration = int(study.best_trial.user_attrs["best_iteration"])
+        best_params = dict(study.best_params)
+        best_value = float(study.best_value)
+    finally:
+        # Release SQLAlchemy connection pool so the SQLite file isn't
+        # left open across pytest teardown (would trip filterwarnings=error
+        # via ResourceWarning -> PytestUnraisableExceptionWarning).
+        storage.remove_session()
+        storage.engine.dispose()
+
+    return best_iteration, best_params, best_value
+
+
 def _dump_artifacts(
     output_dir: Path,
     booster: xgb.Booster,
@@ -193,6 +273,7 @@ def run_study(
     n_jobs: int,
     n_min: int,
     seed: int,
+    device: str = "cpu",
 ) -> None:
     """End-to-end study: preprocess, run Optuna, refit, evaluate, dump.
 
@@ -206,9 +287,14 @@ def run_study(
         n_jobs: Parallel trials. Must be >=1.
         n_min: Edge-metric anti-overfit guard threshold.
         seed: Master RNG seed.
+        device: XGBoost device, ``"cpu"`` or ``"cuda"``. CPU is the
+            default so the test suite stays runnable on hosts without
+            an NVIDIA GPU.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     np.random.seed(seed)
+
+    _log.info("ml.mem", phase="run_study_entry", rss_mb=_rss_mb())
 
     df = drop_leakage_cols(df)
     splits = temporal_split(df)
@@ -216,10 +302,12 @@ def run_study(
     train_df = encoder.transform(splits.train)
     val_df = encoder.transform(splits.val)
     test_df = encoder.transform(splits.test)
+    _log.info("ml.mem", phase="post_split_and_encode", rss_mb=_rss_mb())
 
     x_train, y_train, _ = build_feature_matrix(train_df)
     x_val, y_val, implied_val = build_feature_matrix(val_df)
     x_test, y_test, implied_test = build_feature_matrix(test_df)
+    _log.info("ml.mem", phase="post_build_feature_matrix", rss_mb=_rss_mb())
 
     rates = {
         "train": float(y_train.mean()),
@@ -228,43 +316,25 @@ def run_study(
     }
     _log.info("ml.split_label_won_rate", **rates)
 
-    storage_url = f"sqlite:///{output_dir / 'study.db'}"
-    storage = optuna.storages.RDBStorage(url=storage_url)
-    # Silence optuna's per-trial chatter on stderr while the test suite
-    # is running with filterwarnings=error.
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
-    try:
-        study = optuna.create_study(
-            direction="maximize",
-            sampler=optuna.samplers.TPESampler(seed=seed),
-            pruner=optuna.pruners.MedianPruner(),
-            storage=storage,
-            study_name="copy_trade_gate",
-        )
-        study.optimize(
-            lambda t: run_single_trial(
-                trial=t,
-                X_train=x_train,
-                y_train=y_train,
-                X_val=x_val,
-                y_val=y_val,
-                implied_prob_val=implied_val,
-                n_min=n_min,
-                seed=seed,
-            ),
-            n_trials=n_trials,
-            n_jobs=n_jobs,
-        )
+    # Polars frames are no longer needed once the numpy matrices are
+    # extracted; release ~3-4 GB before the optuna phase allocates
+    # DMatrix copies.
+    del df, splits, train_df, val_df, test_df
+    _log.info("ml.mem", phase="post_polars_release", rss_mb=_rss_mb())
 
-        best_iteration = int(study.best_trial.user_attrs["best_iteration"])
-        best_params = dict(study.best_params)
-        best_value = float(study.best_value)
-    finally:
-        # Release SQLAlchemy connection pool so the SQLite file isn't
-        # left open across pytest teardown (would trip filterwarnings=error
-        # via ResourceWarning -> PytestUnraisableExceptionWarning).
-        storage.remove_session()
-        storage.engine.dispose()
+    best_iteration, best_params, best_value = _run_optimization_phase(
+        output_dir=output_dir,
+        x_train=x_train,
+        y_train=y_train,
+        x_val=x_val,
+        y_val=y_val,
+        implied_val=implied_val,
+        n_trials=n_trials,
+        n_jobs=n_jobs,
+        n_min=n_min,
+        seed=seed,
+        device=device,
+    )
 
     booster = fit_winning_model(
         best_params=best_params,
@@ -272,6 +342,7 @@ def run_study(
         X_train=x_train,
         y_train=y_train,
         seed=seed,
+        device=device,
     )
     test_metrics = evaluate_on_test(
         booster=booster,
