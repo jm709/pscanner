@@ -52,7 +52,7 @@ async def test_get_logs_passes_hex_block_bounds(client: OnchainRpcClient) -> Non
 
     assert logs == []
     assert captured[0]["method"] == "eth_getLogs"
-    params = captured[0]["params"][0]  # type: ignore[index]
+    params = captured[0]["params"][0]  # type: ignore[index]  # ty:ignore[not-subscriptable]
     assert params["address"] == "0xabc"
     assert params["topics"] == ["0xdeadbeef"]
     assert params["fromBlock"] == "0x64"
