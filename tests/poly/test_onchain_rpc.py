@@ -158,3 +158,23 @@ async def test_persistent_503_raises_after_max_attempts(
     finally:
         await client.aclose()
     assert route.call_count == 5
+
+
+@respx.mock
+async def test_rpc_error_payload_raises_runtime_error(client: OnchainRpcClient) -> None:
+    """JSON-RPC error responses should raise RuntimeError with the method name."""
+    respx.post(_RPC_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"code": -32602, "message": "invalid argument"},
+            },
+        ),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="RPC error from eth_blockNumber"):
+            await client.get_block_number()
+    finally:
+        await client.aclose()
