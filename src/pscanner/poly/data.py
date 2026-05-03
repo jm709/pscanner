@@ -28,10 +28,11 @@ _TRADES_PAGE_SIZE: Final[int] = 500
 _TRADES_PAGE_CAP: Final[int] = 30  # 15k trades per condition_id maximum
 
 # Polymarket caps offset-based pagination on /activity and /trades at this
-# offset, returning HTTP 400 once the requested offset reaches it. We treat
-# such 400s as end-of-data; other 400s (e.g. malformed address at offset=0)
-# still propagate.
-_POLYMARKET_OFFSET_CAP: Final[int] = 3500
+# offset, returning HTTP 400 with message
+# ``"max historical activity offset of 3000 exceeded"`` once the requested
+# offset reaches it. We treat such 400s as end-of-data; other 400s (e.g.
+# malformed address at offset=0) still propagate.
+_POLYMARKET_OFFSET_CAP: Final[int] = 3000
 _HTTP_BAD_REQUEST: Final[int] = 400
 
 _log = structlog.get_logger(__name__)

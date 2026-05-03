@@ -653,20 +653,20 @@ async def test_get_market_slug_by_condition_id_returns_none_when_first_item_not_
 async def test_get_first_activity_timestamp_swallows_offset_cap_400(
     fake_http_factory: list[_FakePolyHttpClient],
 ) -> None:
-    """A 400 at offset>=3500 must terminate pagination cleanly (Polymarket cap)."""
+    """A 400 at offset>=3000 must terminate pagination cleanly (Polymarket cap)."""
     client = DataClient()
     data_http = _client_for_host(fake_http_factory, "data-api")
-    # Pages 0..6 (offsets 0, 500, ..., 3000) return full 500-row pages; page at
-    # offset=3500 raises the offset-cap 400 the API actually emits.
+    # Pages 0..5 (offsets 0, 500, ..., 2500) return full 500-row pages; page at
+    # offset=3000 raises the offset-cap 400 the API actually emits.
     full_page = [{"timestamp": 1_700_000_000 + i} for i in range(500)]
-    data_http.get.side_effect = [*([full_page] * 7), _http_400_error()]
+    data_http.get.side_effect = [*([full_page] * 6), _http_400_error()]
 
     earliest = await client.get_first_activity_timestamp("0xa")
 
     assert earliest == 1_700_000_000
-    assert data_http.get.await_count == 8
+    assert data_http.get.await_count == 7
     last_call_kwargs = data_http.get.await_args_list[-1].kwargs
-    assert last_call_kwargs["params"]["offset"] == 3500
+    assert last_call_kwargs["params"]["offset"] == 3000
 
 
 async def test_get_first_activity_timestamp_propagates_400_at_offset_zero(
@@ -684,7 +684,7 @@ async def test_get_first_activity_timestamp_propagates_400_at_offset_zero(
 async def test_get_market_trades_swallows_offset_cap_400(
     fake_http_factory: list[_FakePolyHttpClient],
 ) -> None:
-    """A 400 at offset>=3500 in /trades pagination must break cleanly."""
+    """A 400 at offset>=3000 in /trades pagination must break cleanly."""
     client = DataClient()
     data_http = _client_for_host(fake_http_factory, "data-api")
     full_page = [
@@ -698,7 +698,7 @@ async def test_get_market_trades_swallows_offset_cap_400(
         }
         for i in range(500)
     ]
-    data_http.get.side_effect = [*([full_page] * 7), _http_400_error()]
+    data_http.get.side_effect = [*([full_page] * 6), _http_400_error()]
 
     out = await client.get_market_trades(
         condition_id="0xabc",
@@ -706,11 +706,11 @@ async def test_get_market_trades_swallows_offset_cap_400(
         until_ts=3_000_000_000,
     )
 
-    # 7 successful pages * 500 rows = 3500 trades, then 400 at offset=3500.
-    assert len(out) == 7 * 500
-    assert data_http.get.await_count == 8
+    # 6 successful pages * 500 rows = 3000 trades, then 400 at offset=3000.
+    assert len(out) == 6 * 500
+    assert data_http.get.await_count == 7
     last_call_kwargs = data_http.get.await_args_list[-1].kwargs
-    assert last_call_kwargs["params"]["offset"] == 3500
+    assert last_call_kwargs["params"]["offset"] == 3000
 
 
 async def test_get_market_trades_propagates_400_at_offset_zero(

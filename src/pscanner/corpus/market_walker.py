@@ -21,7 +21,9 @@ from pscanner.poly.data import DataClient
 
 _log = structlog.get_logger(__name__)
 _PAGE_SIZE: Final[int] = 500
-_OFFSET_CAP: Final[int] = 3500  # Polymarket /trades hard cap
+_OFFSET_CAP: Final[int] = (
+    3000  # Polymarket /trades hard cap (server: "max historical activity offset of 3000 exceeded")  # noqa: E501
+)
 
 
 def _parse_trade(item: dict[str, Any], condition_id: str) -> CorpusTrade | None:

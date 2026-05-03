@@ -144,7 +144,7 @@ async def test_walk_truncates_at_offset_cap(
 
     async def _fetch(condition_id: str, *, offset: int) -> list[dict[str, Any]]:
         del condition_id
-        if offset >= 3500:
+        if offset >= 3000:
             return []
         return full_page
 
