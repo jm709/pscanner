@@ -14,6 +14,7 @@ take the full slot.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final
 
@@ -74,7 +75,7 @@ def _hex_to_int(value: str | int) -> int:
     return int(value, 16)
 
 
-def decode_order_filled(log: dict[str, object]) -> OrderFilledEvent:
+def decode_order_filled(log: Mapping[str, object]) -> OrderFilledEvent:
     """Decode a raw `eth_getLogs` response entry into a typed event.
 
     Args:
