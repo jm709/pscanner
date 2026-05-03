@@ -48,6 +48,18 @@ def test_init_corpus_db_sets_row_factory() -> None:
         conn.close()
 
 
+def test_init_corpus_db_creates_asset_index_table() -> None:
+    conn = init_corpus_db(Path(":memory:"))
+    try:
+        info = conn.execute("PRAGMA table_info(asset_index)").fetchall()
+        cols = {row[1] for row in info}
+        assert cols == {"asset_id", "condition_id", "outcome_side", "outcome_index"}
+        pk_cols = [row[1] for row in info if row[5] == 1]
+        assert pk_cols == ["asset_id"]
+    finally:
+        conn.close()
+
+
 def test_corpus_trades_unique_key() -> None:
     conn = init_corpus_db(Path(":memory:"))
     try:

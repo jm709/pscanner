@@ -115,6 +115,15 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
       updated_at INTEGER NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS asset_index (
+      asset_id TEXT PRIMARY KEY,
+      condition_id TEXT NOT NULL,
+      outcome_side TEXT NOT NULL,
+      outcome_index INTEGER NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_asset_index_condition ON asset_index(condition_id)",
 )
 
 _PRAGMAS: tuple[str, ...] = (
