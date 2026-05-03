@@ -82,16 +82,16 @@ async def test_run_onchain_backfill_inserts_trades_and_advances_cursor(
     conn: sqlite3.Connection,
 ) -> None:
     rpc_url = "https://example-rpc.test/"
-    # making=40e6 (40 CTF tokens), taking=20e6 (20 USDC @ 6 decimals).
+    # Maker buying CTF: making=20e6 (20 USDC), taking=40e6 (40 CTF tokens).
     # Price = 20/40 = 0.50, notional = $20 (above the $10 insert floor).
     log = _synthetic_log(
         block_number=150,
         log_index=0,
         tx_hash="0x" + "aa" * 32,
-        maker_asset_id=42,
-        taker_asset_id=0,
-        making=40_000_000,
-        taking=20_000_000,
+        maker_asset_id=0,
+        taker_asset_id=42,
+        making=20_000_000,
+        taking=40_000_000,
     )
 
     def _route(request: httpx.Request) -> httpx.Response:
@@ -143,7 +143,7 @@ async def test_run_onchain_backfill_inserts_trades_and_advances_cursor(
     assert rows[0]["bs"] == "BUY"
     assert rows[0]["price"] == pytest.approx(0.50)
     assert rows[0]["notional_usd"] == pytest.approx(20.0)
-    assert rows[0]["wallet_address"] == "0x" + "22" * 20
+    assert rows[0]["wallet_address"] == "0x" + "11" * 20  # maker
 
     cursor = CorpusStateRepo(conn).get_int("onchain_last_block")
     assert cursor == 200

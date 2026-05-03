@@ -35,13 +35,25 @@ class UnresolvableAsset(Exception):  # noqa: N818 — name prescribed by task sp
     """Raised when neither asset id is known to `AssetIndexRepo`."""
 
 
+_EXCHANGE_ADDRESS_LOWER = CTF_EXCHANGE_ADDRESS.lower()
+
+
 def event_to_corpus_trade(
     event: OrderFilledEvent,
     *,
     asset_repo: AssetIndexRepo,
     ts: int,
 ) -> CorpusTrade:
-    """Convert one `OrderFilledEvent` to a `CorpusTrade` from the taker's POV.
+    """Convert one `OrderFilledEvent` to a `CorpusTrade` from the maker's POV.
+
+    On Polymarket's CTF Exchange, every user-facing trade is recorded with
+    the user as ``maker`` (their resting order is the one that was filled);
+    the ``taker`` field carries either a counterparty user address or the
+    exchange contract itself when the fill is settled via a merge/split
+    of YES/NO complementary tokens. We therefore record the trade from
+    the maker's perspective and skip events whose maker is the exchange
+    contract (those are bookkeeping side-effects of merges, not real
+    user trades).
 
     Args:
         event: Decoded event payload.
@@ -52,30 +64,36 @@ def event_to_corpus_trade(
         A `CorpusTrade` row. Caller inserts via `CorpusTradesRepo`.
 
     Raises:
-        UnsupportedFill: Both asset ids zero, or both non-zero (split/merge).
+        UnsupportedFill: Both asset ids are zero, both are non-zero
+            (split/merge between two CTF tokens), or the maker is the
+            exchange contract itself.
         UnresolvableAsset: The CTF asset id is not in `asset_repo`.
     """
+    maker_lower = event.maker.lower()
+    if maker_lower == _EXCHANGE_ADDRESS_LOWER:
+        raise UnsupportedFill(f"maker is exchange contract in fill {event.tx_hash}")
+
     maker_id, taker_id = event.maker_asset_id, event.taker_asset_id
-    maker_is_usdc = maker_id == 0
-    taker_is_usdc = taker_id == 0
-    if maker_is_usdc == taker_is_usdc:
+    maker_gives_usdc = maker_id == 0
+    taker_gives_usdc = taker_id == 0
+    if maker_gives_usdc == taker_gives_usdc:
         raise UnsupportedFill(
             f"both-zero or both-non-zero asset ids: maker={maker_id}, taker={taker_id}"
         )
 
-    # Taker initiated; their side determines BUY/SELL.
-    if taker_is_usdc:
-        # Taker gave USDC, received CTF token → taker BUY.
+    # The user is the maker; their side determines BUY/SELL.
+    if maker_gives_usdc:
+        # Maker gave USDC, received CTF token → maker BUY.
         bs = "BUY"
-        usdc_amount = event.taking
-        ctf_amount = event.making
-        ctf_asset_id = maker_id
-    else:
-        # Taker gave CTF token, received USDC → taker SELL.
-        bs = "SELL"
         usdc_amount = event.making
         ctf_amount = event.taking
         ctf_asset_id = taker_id
+    else:
+        # Maker gave CTF token, received USDC → maker SELL.
+        bs = "SELL"
+        usdc_amount = event.taking
+        ctf_amount = event.making
+        ctf_asset_id = maker_id
 
     asset_id_str = str(ctf_asset_id)
     entry = asset_repo.get(asset_id_str)
@@ -93,7 +111,7 @@ def event_to_corpus_trade(
     return CorpusTrade(
         tx_hash=event.tx_hash,
         asset_id=asset_id_str,
-        wallet_address=event.taker.lower(),
+        wallet_address=maker_lower,
         condition_id=entry.condition_id,
         outcome_side=entry.outcome_side,
         bs=bs,

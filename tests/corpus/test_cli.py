@@ -100,11 +100,13 @@ async def test_run_corpus_command_onchain_backfill_inserts_trade(
     )
     conn.close()
 
+    # Maker buying CTF: maker_asset=0 (USDC), taker_asset=42 (CTF), making=20e6 (USDC),
+    # taking=40e6 (CTF tokens). Price = 20/40 = 0.50.
     log_data = (
-        (42).to_bytes(32, "big")
-        + (0).to_bytes(32, "big")
-        + (40_000_000).to_bytes(32, "big")
+        (0).to_bytes(32, "big")
+        + (42).to_bytes(32, "big")
         + (20_000_000).to_bytes(32, "big")
+        + (40_000_000).to_bytes(32, "big")
         + (0).to_bytes(32, "big")
     )
     log = {

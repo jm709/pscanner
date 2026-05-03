@@ -12,7 +12,7 @@ import respx
 
 from pscanner.corpus.db import init_corpus_db
 from pscanner.corpus.repos import AssetEntry, AssetIndexRepo, CorpusTrade
-from pscanner.poly.onchain import ORDER_FILLED_TOPIC0, OrderFilledEvent
+from pscanner.poly.onchain import CTF_EXCHANGE_ADDRESS, ORDER_FILLED_TOPIC0, OrderFilledEvent
 from pscanner.poly.onchain_ingest import (
     UnresolvableAsset,
     UnsupportedFill,
@@ -64,15 +64,15 @@ def _ev(
     )
 
 
-def test_event_to_corpus_trade_buy_taker_gives_usdc(
+def test_event_to_corpus_trade_buy_maker_gives_usdc(
     asset_repo: AssetIndexRepo,
 ) -> None:
-    """Taker giving USDC for CTF tokens is a BUY from the taker's POV."""
+    """Maker giving USDC for CTF tokens is a BUY from the maker's POV."""
     event = _ev(
-        maker_asset_id=123_456_789,
-        taker_asset_id=0,
-        making=1_000_000,  # 1.0 CTF the maker is giving
-        taking=700_000,  # 0.70 USDC the taker is giving
+        maker_asset_id=0,
+        taker_asset_id=123_456_789,
+        making=700_000,  # 0.70 USDC the maker gives
+        taking=1_000_000,  # 1.0 CTF the maker receives
     )
     trade = event_to_corpus_trade(event, asset_repo=asset_repo, ts=1_700_000_000)
     assert isinstance(trade, CorpusTrade)
@@ -80,7 +80,7 @@ def test_event_to_corpus_trade_buy_taker_gives_usdc(
     assert trade.asset_id == "123456789"
     assert trade.condition_id == "0xCONDITION"
     assert trade.outcome_side == "YES"
-    assert trade.wallet_address == "0x" + "22" * 20  # taker
+    assert trade.wallet_address == "0x" + "11" * 20  # maker
     assert trade.bs == "BUY"
     assert trade.price == pytest.approx(0.70)
     assert trade.size == pytest.approx(1.0)
@@ -88,22 +88,37 @@ def test_event_to_corpus_trade_buy_taker_gives_usdc(
     assert trade.ts == 1_700_000_000
 
 
-def test_event_to_corpus_trade_sell_taker_gives_ctf(
+def test_event_to_corpus_trade_sell_maker_gives_ctf(
     asset_repo: AssetIndexRepo,
 ) -> None:
-    """Taker giving CTF tokens for USDC is a SELL from the taker's POV."""
+    """Maker giving CTF tokens for USDC is a SELL from the maker's POV."""
     event = _ev(
-        maker_asset_id=0,
-        taker_asset_id=123_456_789,
-        making=420_000,  # 0.42 USDC the maker gives
-        taking=1_000_000,  # 1.0 CTF the taker gives
+        maker_asset_id=123_456_789,
+        taker_asset_id=0,
+        making=1_000_000,  # 1.0 CTF the maker gives
+        taking=420_000,  # 0.42 USDC the maker receives
     )
     trade = event_to_corpus_trade(event, asset_repo=asset_repo, ts=1_700_000_000)
     assert trade.bs == "SELL"
-    assert trade.wallet_address == "0x" + "22" * 20  # taker
+    assert trade.wallet_address == "0x" + "11" * 20  # maker
     assert trade.price == pytest.approx(0.42)
     assert trade.size == pytest.approx(1.0)
     assert trade.notional_usd == pytest.approx(0.42)
+
+
+def test_event_to_corpus_trade_skips_exchange_as_maker(
+    asset_repo: AssetIndexRepo,
+) -> None:
+    """When the maker is the exchange contract itself, skip — it's a merge."""
+    event = _ev(
+        maker=CTF_EXCHANGE_ADDRESS,
+        maker_asset_id=0,
+        taker_asset_id=123_456_789,
+        making=500_000,
+        taking=1_000_000,
+    )
+    with pytest.raises(UnsupportedFill, match="maker is exchange contract"):
+        event_to_corpus_trade(event, asset_repo=asset_repo, ts=0)
 
 
 def test_event_to_corpus_trade_raises_when_both_assets_zero(

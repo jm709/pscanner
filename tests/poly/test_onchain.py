@@ -6,9 +6,7 @@ import pytest
 
 from pscanner.poly.onchain import OrderFilledEvent, decode_order_filled
 
-_ORDER_FILLED_TOPIC0 = (
-    "0xd0a08e8c493f9c94f29311604c9de1b4e8c8d4c06bd0c789af57f2d65bfec0f6"
-)
+_ORDER_FILLED_TOPIC0 = "0xd0a08e8c493f9c94f29311604c9de1b4e8c8d4c06bd0c789af57f2d65bfec0f6"
 
 
 def _make_log(
