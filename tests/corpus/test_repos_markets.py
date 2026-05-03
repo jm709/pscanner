@@ -10,17 +10,19 @@ from pscanner.corpus.repos import (
     CorpusMarket,
     CorpusMarketsRepo,
     CorpusStateRepo,
+    CorpusTrade,
+    CorpusTradesRepo,
 )
 
 
 def _insert_market(repo: CorpusMarketsRepo, condition_id: str, **kwargs: object) -> None:
     base = CorpusMarket(
         condition_id=condition_id,
-        event_slug=kwargs.get("event_slug", "evt"),  # type: ignore[arg-type]
-        category=kwargs.get("category", "crypto"),  # type: ignore[arg-type]
-        closed_at=int(kwargs.get("closed_at", 1_000)),  # type: ignore[arg-type]
-        total_volume_usd=float(kwargs.get("total_volume_usd", 50_000.0)),  # type: ignore[arg-type]
-        enumerated_at=int(kwargs.get("enumerated_at", 500)),  # type: ignore[arg-type]
+        event_slug=kwargs.get("event_slug", "evt"),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        category=kwargs.get("category", "crypto"),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        closed_at=int(kwargs.get("closed_at", 1_000)),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        total_volume_usd=float(kwargs.get("total_volume_usd", 50_000.0)),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        enumerated_at=int(kwargs.get("enumerated_at", 500)),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         market_slug=str(kwargs.get("market_slug", "slug-" + condition_id)),  # type: ignore[arg-type]
     )
     repo.insert_pending(base)
@@ -103,6 +105,72 @@ def test_mark_complete_with_truncation_sets_flag(tmp_corpus_db: sqlite3.Connecti
         "SELECT truncated_at_offset_cap FROM corpus_markets WHERE condition_id = 'cond1'"
     ).fetchone()
     assert row["truncated_at_offset_cap"] == 1
+
+
+def _insert_trade(trades_repo: CorpusTradesRepo, condition_id: str, ts: int) -> None:
+    """Insert a minimal corpus_trades row at the given timestamp."""
+    trades_repo.insert_batch(
+        [
+            CorpusTrade(
+                tx_hash=f"0x{condition_id}-{ts}",
+                asset_id="asset1",
+                wallet_address="0xw",
+                condition_id=condition_id,
+                outcome_side="YES",
+                bs="BUY",
+                price=0.5,
+                size=100.0,
+                notional_usd=50.0,
+                ts=ts,
+            )
+        ]
+    )
+
+
+def test_mark_complete_rewrites_closed_at_to_max_trade_ts(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """`mark_complete` should overwrite the enumerator placeholder with MAX(trade_ts)."""
+    markets = CorpusMarketsRepo(tmp_corpus_db)
+    trades = CorpusTradesRepo(tmp_corpus_db)
+    _insert_market(markets, "cond1", closed_at=10_000)  # placeholder from enumerator
+    _insert_trade(trades, "cond1", ts=5_555)
+    _insert_trade(trades, "cond1", ts=7_777)  # latest
+    _insert_trade(trades, "cond1", ts=6_000)
+    markets.mark_complete("cond1", completed_at=20_000, truncated=False)
+    row = tmp_corpus_db.execute(
+        "SELECT closed_at FROM corpus_markets WHERE condition_id = 'cond1'"
+    ).fetchone()
+    assert row["closed_at"] == 7_777
+
+
+def test_mark_complete_preserves_closed_at_when_no_trades(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """Without observed trades, `mark_complete` keeps the placeholder rather than NULL-ing it."""
+    markets = CorpusMarketsRepo(tmp_corpus_db)
+    _insert_market(markets, "cond1", closed_at=10_000)
+    markets.mark_complete("cond1", completed_at=20_000, truncated=False)
+    row = tmp_corpus_db.execute(
+        "SELECT closed_at FROM corpus_markets WHERE condition_id = 'cond1'"
+    ).fetchone()
+    assert row["closed_at"] == 10_000
+
+
+def test_mark_complete_is_idempotent_on_closed_at(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """Re-running `mark_complete` after the same set of trades should not drift the value."""
+    markets = CorpusMarketsRepo(tmp_corpus_db)
+    trades = CorpusTradesRepo(tmp_corpus_db)
+    _insert_market(markets, "cond1", closed_at=10_000)
+    _insert_trade(trades, "cond1", ts=8_000)
+    markets.mark_complete("cond1", completed_at=20_000, truncated=False)
+    markets.mark_complete("cond1", completed_at=21_000, truncated=False)
+    row = tmp_corpus_db.execute(
+        "SELECT closed_at FROM corpus_markets WHERE condition_id = 'cond1'"
+    ).fetchone()
+    assert row["closed_at"] == 8_000
 
 
 def test_mark_failed_records_error(tmp_corpus_db: sqlite3.Connection) -> None:

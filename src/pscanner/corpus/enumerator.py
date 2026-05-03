@@ -41,7 +41,7 @@ def _qualifying_markets(event: Event, now_ts: int) -> list[CorpusMarket]:
                 condition_id=str(market.condition_id),
                 event_slug=event.slug,
                 category=category,
-                closed_at=now_ts,
+                closed_at=now_ts,  # placeholder; mark_complete rewrites this to MAX(trade_ts) once backfill finishes  # noqa: E501
                 total_volume_usd=volume,
                 enumerated_at=now_ts,
                 market_slug=market.slug,
