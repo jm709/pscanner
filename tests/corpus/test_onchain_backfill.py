@@ -40,9 +40,6 @@ def _synthetic_log(
     taker: str = "0x" + "22" * 20,
 ) -> dict[str, object]:
     parts = [
-        bytes(32),
-        bytes(12) + bytes.fromhex(maker[2:]),
-        bytes(12) + bytes.fromhex(taker[2:]),
         maker_asset_id.to_bytes(32, "big"),
         taker_asset_id.to_bytes(32, "big"),
         making.to_bytes(32, "big"),
@@ -51,7 +48,12 @@ def _synthetic_log(
     ]
     return {
         "data": "0x" + b"".join(parts).hex(),
-        "topics": [ORDER_FILLED_TOPIC0],
+        "topics": [
+            ORDER_FILLED_TOPIC0,
+            "0x" + "00" * 32,
+            "0x" + "00" * 12 + maker[2:],
+            "0x" + "00" * 12 + taker[2:],
+        ],
         "transactionHash": tx_hash,
         "blockNumber": hex(block_number),
         "logIndex": hex(log_index),

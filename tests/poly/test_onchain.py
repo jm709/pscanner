@@ -6,6 +6,10 @@ import pytest
 
 from pscanner.poly.onchain import OrderFilledEvent, decode_order_filled
 
+_ORDER_FILLED_TOPIC0 = (
+    "0xd0a08e8c493f9c94f29311604c9de1b4e8c8d4c06bd0c789af57f2d65bfec0f6"
+)
+
 
 def _make_log(
     *,
@@ -21,11 +25,13 @@ def _make_log(
     block_number: int = 0x1234567,
     log_index: int = 5,
 ) -> dict[str, object]:
-    """Build a synthetic eth_getLogs response entry for an OrderFilled event."""
+    """Build a synthetic eth_getLogs response entry for an OrderFilled event.
+
+    Mirrors the CTF Exchange's actual log layout: 4 topics
+    (signature + indexed orderHash, maker, taker) and 5 data slots
+    (makerAssetId, takerAssetId, making, taking, fee).
+    """
     parts = [
-        bytes.fromhex(order_hash[2:]),
-        bytes(12) + bytes.fromhex(maker[2:]),
-        bytes(12) + bytes.fromhex(taker[2:]),
         maker_asset_id.to_bytes(32, "big"),
         taker_asset_id.to_bytes(32, "big"),
         making.to_bytes(32, "big"),
@@ -33,10 +39,15 @@ def _make_log(
         fee.to_bytes(32, "big"),
     ]
     data = b"".join(parts)
-    assert len(data) == 8 * 32
+    assert len(data) == 5 * 32
     return {
         "data": "0x" + data.hex(),
-        "topics": ["0x" + "00" * 32],
+        "topics": [
+            _ORDER_FILLED_TOPIC0,
+            order_hash,
+            "0x" + "00" * 12 + maker[2:],
+            "0x" + "00" * 12 + taker[2:],
+        ],
         "transactionHash": tx_hash,
         "blockNumber": hex(block_number),
         "logIndex": hex(log_index),
@@ -71,7 +82,13 @@ def test_decode_order_filled_extracts_all_fields() -> None:
 
 def test_decode_order_filled_rejects_short_data() -> None:
     log = {
-        "data": "0x" + "00" * 100,
+        "topics": [
+            _ORDER_FILLED_TOPIC0,
+            "0x" + "00" * 32,
+            "0x" + "00" * 32,
+            "0x" + "00" * 32,
+        ],
+        "data": "0x" + "00" * 50,  # 50 bytes — well under 5 * 32 = 160
         "transactionHash": "0x" + "00" * 32,
         "blockNumber": "0x1",
         "logIndex": "0x0",
@@ -82,12 +99,30 @@ def test_decode_order_filled_rejects_short_data() -> None:
 
 def test_decode_order_filled_rejects_missing_prefix() -> None:
     log = {
-        "data": "ab" * 256,
+        "topics": [
+            _ORDER_FILLED_TOPIC0,
+            "0x" + "00" * 32,
+            "0x" + "00" * 32,
+            "0x" + "00" * 32,
+        ],
+        "data": "ab" * 160,
         "transactionHash": "0x" + "00" * 32,
         "blockNumber": "0x1",
         "logIndex": "0x0",
     }
     with pytest.raises(ValueError, match="0x prefix"):
+        decode_order_filled(log)
+
+
+def test_decode_order_filled_rejects_wrong_topic_count() -> None:
+    log = {
+        "topics": [_ORDER_FILLED_TOPIC0],  # signature only, missing 3 indexed params
+        "data": "0x" + "00" * 160,
+        "transactionHash": "0x" + "00" * 32,
+        "blockNumber": "0x1",
+        "logIndex": "0x0",
+    }
+    with pytest.raises(ValueError, match="must be a list of 4"):
         decode_order_filled(log)
 
 

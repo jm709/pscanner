@@ -101,12 +101,7 @@ async def test_run_corpus_command_onchain_backfill_inserts_trade(
     conn.close()
 
     log_data = (
-        bytes(32)
-        + bytes(12)
-        + bytes.fromhex("11" * 20)
-        + bytes(12)
-        + bytes.fromhex("22" * 20)
-        + (42).to_bytes(32, "big")
+        (42).to_bytes(32, "big")
         + (0).to_bytes(32, "big")
         + (40_000_000).to_bytes(32, "big")
         + (20_000_000).to_bytes(32, "big")
@@ -114,7 +109,12 @@ async def test_run_corpus_command_onchain_backfill_inserts_trade(
     )
     log = {
         "data": "0x" + log_data.hex(),
-        "topics": ["0xd0a08e8c493f9c94f29311604c9de1b4e8c8d4c06bd0c789af57f2d65bfec0f6"],
+        "topics": [
+            "0xd0a08e8c493f9c94f29311604c9de1b4e8c8d4c06bd0c789af57f2d65bfec0f6",
+            "0x" + "00" * 32,
+            "0x" + "00" * 12 + "11" * 20,
+            "0x" + "00" * 12 + "22" * 20,
+        ],
         "transactionHash": "0x" + "ab" * 32,
         "blockNumber": "0xa",
         "logIndex": "0x0",
