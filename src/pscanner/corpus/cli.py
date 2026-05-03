@@ -37,8 +37,8 @@ from pscanner.poly.onchain_rpc import OnchainRpcClient
 
 _log = structlog.get_logger(__name__)
 
-_DEFAULT_RPC_URL = "https://polygon-rpc.com/"
-_DEFAULT_FROM_BLOCK = 31_478_500  # CTF Exchange deployment block (verify via PolygonScan)
+_DEFAULT_RPC_URL = "https://polygon-bor-rpc.publicnode.com"
+_DEFAULT_FROM_BLOCK = 33_605_403  # CTF Exchange deployment, Polygon block, 2022-09-26
 _DEFAULT_CHUNK_SIZE = 5_000
 _DEFAULT_MAX_BLOCKS = 1_000_000
 
