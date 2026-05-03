@@ -1,8 +1,8 @@
-"""argparse handlers for ``pscanner corpus {backfill, refresh, build-features}``.
+"""argparse handlers for ``pscanner corpus`` subcommands.
 
-Each handler opens ``corpus.sqlite3``, instantiates the gamma + data
-clients with their own rate budget, runs the orchestration, and exits
-with 0 on success.
+Covers ``backfill``, ``refresh``, ``build-features``, and ``onchain-backfill``.
+Each handler opens ``corpus.sqlite3``, instantiates the required clients with
+their own rate budget, runs the orchestration, and exits with 0 on success.
 """
 
 from __future__ import annotations
@@ -19,6 +19,10 @@ from pscanner.corpus.db import init_corpus_db
 from pscanner.corpus.enumerator import enumerate_closed_markets
 from pscanner.corpus.examples import build_features
 from pscanner.corpus.market_walker import walk_market
+from pscanner.corpus.onchain_backfill import (
+    clear_truncation_flags,
+    run_onchain_backfill,
+)
 from pscanner.corpus.repos import (
     CorpusMarketsRepo,
     CorpusStateRepo,
@@ -29,8 +33,14 @@ from pscanner.corpus.repos import (
 from pscanner.corpus.resolutions import record_resolutions
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
+from pscanner.poly.onchain_rpc import OnchainRpcClient
 
 _log = structlog.get_logger(__name__)
+
+_DEFAULT_RPC_URL = "https://polygon-rpc.com/"
+_DEFAULT_FROM_BLOCK = 31_478_500  # CTF Exchange deployment block (verify via PolygonScan)
+_DEFAULT_CHUNK_SIZE = 5_000
+_DEFAULT_MAX_BLOCKS = 1_000_000
 
 
 def _add_db_arg(p: argparse.ArgumentParser) -> None:
@@ -56,6 +66,50 @@ def build_corpus_parser() -> argparse.ArgumentParser:
     bf = sub.add_parser("build-features", help="Rebuild training_examples from raw events")
     _add_db_arg(bf)
     bf.add_argument("--rebuild", action="store_true", help="Drop and recreate the table")
+    ob = sub.add_parser(
+        "onchain-backfill",
+        help="Walk CTF Exchange OrderFilled events and write to corpus_trades",
+    )
+    _add_db_arg(ob)
+    ob.add_argument(
+        "--from-block",
+        type=int,
+        default=None,
+        help=(
+            "First block (inclusive). Default: corpus_state['onchain_last_block'] + 1, "
+            f"or {_DEFAULT_FROM_BLOCK} on first run."
+        ),
+    )
+    ob.add_argument(
+        "--to-block",
+        type=int,
+        default=None,
+        help="Last block (inclusive). Default: current Polygon head.",
+    )
+    ob.add_argument(
+        "--rpc-url",
+        type=str,
+        default=_DEFAULT_RPC_URL,
+        help=f"Polygon RPC endpoint (default: {_DEFAULT_RPC_URL})",
+    )
+    ob.add_argument(
+        "--chunk-size",
+        type=int,
+        default=_DEFAULT_CHUNK_SIZE,
+        help=f"Blocks per eth_getLogs call (default: {_DEFAULT_CHUNK_SIZE})",
+    )
+    ob.add_argument(
+        "--max-blocks",
+        type=int,
+        default=_DEFAULT_MAX_BLOCKS,
+        help=f"Safety cap per run (default: {_DEFAULT_MAX_BLOCKS})",
+    )
+    ob.add_argument(
+        "--rpm",
+        type=int,
+        default=600,
+        help="RPC requests per minute ceiling (default: 600)",
+    )
     return parser
 
 
@@ -187,10 +241,64 @@ async def _cmd_build_features(args: argparse.Namespace) -> int:
         conn.close()
 
 
+async def _cmd_onchain_backfill(args: argparse.Namespace) -> int:
+    """Walk on-chain `OrderFilled` events into corpus_trades."""
+    conn = init_corpus_db(Path(args.db))
+    try:
+        state = CorpusStateRepo(conn)
+        cursor = state.get_int("onchain_last_block")
+        from_block: int = (
+            args.from_block
+            if args.from_block is not None
+            else (cursor + 1 if cursor is not None else _DEFAULT_FROM_BLOCK)
+        )
+        async with OnchainRpcClient(rpc_url=args.rpc_url, rpm=args.rpm) as rpc:
+            to_block: int = (
+                args.to_block if args.to_block is not None else await rpc.get_block_number()
+            )
+            if to_block < from_block:
+                _log.info(
+                    "onchain.nothing_to_do",
+                    from_block=from_block,
+                    to_block=to_block,
+                )
+                return 0
+            capped_to = min(to_block, from_block + args.max_blocks - 1)
+            if capped_to < to_block:
+                _log.warning(
+                    "onchain.capped_to_block",
+                    requested_to=to_block,
+                    capped_to=capped_to,
+                    max_blocks=args.max_blocks,
+                )
+            summary = await run_onchain_backfill(
+                conn=conn,
+                rpc=rpc,
+                from_block=from_block,
+                to_block=capped_to,
+                chunk_size=args.chunk_size,
+            )
+        cleared = clear_truncation_flags(conn=conn)
+        _log.info(
+            "onchain.run_summary",
+            chunks=summary.chunks_processed,
+            events=summary.events_decoded,
+            inserted=summary.trades_inserted,
+            skipped_unsupported=summary.skipped_unsupported,
+            skipped_unresolvable=summary.skipped_unresolvable,
+            last_block=summary.last_block,
+            truncation_flags_cleared=cleared,
+        )
+        return 0
+    finally:
+        conn.close()
+
+
 _HANDLERS = {
     "backfill": _cmd_backfill,
     "refresh": _cmd_refresh,
     "build-features": _cmd_build_features,
+    "onchain-backfill": _cmd_onchain_backfill,
 }
 
 

@@ -89,3 +89,15 @@ def test_corpus_trades_unique_key() -> None:
             pass
     finally:
         conn.close()
+
+
+def test_corpus_markets_has_onchain_trades_count_column() -> None:
+    """Phase 2 migration: corpus_markets.onchain_trades_count is present and nullable."""
+    conn = init_corpus_db(Path(":memory:"))
+    try:
+        cols = {row["name"]: row for row in conn.execute("PRAGMA table_info(corpus_markets)")}
+        assert "onchain_trades_count" in cols
+        assert cols["onchain_trades_count"]["type"].upper() == "INTEGER"
+        assert cols["onchain_trades_count"]["notnull"] == 0
+    finally:
+        conn.close()
