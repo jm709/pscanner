@@ -231,3 +231,30 @@ async def test_iter_order_filled_logs_chunks_and_yields() -> None:
     methods = [p["method"] for p in posts]
     assert methods.count("eth_getLogs") == 2
     assert methods.count("eth_getBlockByNumber") == 2
+
+
+async def test_iter_order_filled_logs_from_block_greater_than_to_block() -> None:
+    """Early return when from_block > to_block yields nothing (no RPC calls)."""
+    client = OnchainRpcClient(rpc_url="https://unused.test/", rpm=600)
+    yielded: list[tuple[OrderFilledEvent, int]] = []
+    try:
+        async for item in iter_order_filled_logs(
+            rpc=client, from_block=100, to_block=50, chunk_size=200
+        ):
+            yielded.append(item)
+    finally:
+        await client.aclose()
+    assert yielded == []
+
+
+async def test_iter_order_filled_logs_rejects_nonpositive_chunk_size() -> None:
+    """Raises ValueError for non-positive chunk_size before yielding."""
+    client = OnchainRpcClient(rpc_url="https://unused.test/", rpm=600)
+    try:
+        with pytest.raises(ValueError, match="chunk_size must be positive"):
+            async for _ in iter_order_filled_logs(
+                rpc=client, from_block=0, to_block=100, chunk_size=0
+            ):
+                pass
+    finally:
+        await client.aclose()
