@@ -265,7 +265,7 @@ async def _cmd_onchain_backfill(args: argparse.Namespace) -> int:
                 return 0
             capped_to = min(to_block, from_block + args.max_blocks - 1)
             if capped_to < to_block:
-                _log.info(
+                _log.warning(
                     "onchain.capped_to_block",
                     requested_to=to_block,
                     capped_to=capped_to,
