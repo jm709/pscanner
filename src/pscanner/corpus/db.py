@@ -137,6 +137,10 @@ _MIGRATIONS: tuple[str, ...] = (
     # Superseded by ``idx_corpus_trades_ts_tx_asset``, which covers ts-prefix queries.
     "DROP INDEX IF EXISTS idx_corpus_trades_ts",
     "ALTER TABLE corpus_markets ADD COLUMN onchain_trades_count INTEGER",
+    # Resume cursor for the per-market targeted on-chain backfill: NULL means
+    # the market has not been processed yet; an integer Unix-second timestamp
+    # marks completion. Cleared at runtime if a market needs to be re-processed.
+    "ALTER TABLE corpus_markets ADD COLUMN onchain_processed_at INTEGER",
 )
 
 

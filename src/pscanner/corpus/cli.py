@@ -23,6 +23,7 @@ from pscanner.corpus.onchain_backfill import (
     clear_truncation_flags,
     run_onchain_backfill,
 )
+from pscanner.corpus.onchain_targeted import run_targeted_backfill
 from pscanner.corpus.repos import (
     CorpusMarketsRepo,
     CorpusStateRepo,
@@ -37,10 +38,12 @@ from pscanner.poly.onchain_rpc import OnchainRpcClient
 
 _log = structlog.get_logger(__name__)
 
-_DEFAULT_RPC_URL = "https://polygon-bor-rpc.publicnode.com"
+_DEFAULT_RPC_URL = "https://polygon.gateway.tenderly.co"
 _DEFAULT_FROM_BLOCK = 33_605_403  # CTF Exchange deployment, Polygon block, 2022-09-26
 _DEFAULT_CHUNK_SIZE = 5_000
 _DEFAULT_MAX_BLOCKS = 1_000_000
+_DEFAULT_TARGETED_CHUNK_SIZE = 500
+_DEFAULT_BLOCK_SLACK = 5_000
 
 
 def _add_db_arg(p: argparse.ArgumentParser) -> None:
@@ -109,6 +112,49 @@ def build_corpus_parser() -> argparse.ArgumentParser:
         type=int,
         default=600,
         help="RPC requests per minute ceiling (default: 600)",
+    )
+    ot = sub.add_parser(
+        "onchain-backfill-targeted",
+        help=(
+            "Per-market on-chain backfill of truncated markets (resumable). "
+            "For each market with truncated_at_offset_cap=1 and no "
+            "onchain_processed_at, walks its trade-time-window block range, "
+            "filters OrderFilled events to that market's asset_ids, and inserts."
+        ),
+    )
+    _add_db_arg(ot)
+    ot.add_argument(
+        "--rpc-url",
+        type=str,
+        default=_DEFAULT_RPC_URL,
+        help=f"Polygon RPC endpoint (default: {_DEFAULT_RPC_URL})",
+    )
+    ot.add_argument(
+        "--chunk-size",
+        type=int,
+        default=_DEFAULT_TARGETED_CHUNK_SIZE,
+        help=f"Blocks per eth_getLogs call (default: {_DEFAULT_TARGETED_CHUNK_SIZE})",
+    )
+    ot.add_argument(
+        "--block-slack",
+        type=int,
+        default=_DEFAULT_BLOCK_SLACK,
+        help=(
+            "Extra blocks padded around each market's trade window (default: "
+            f"{_DEFAULT_BLOCK_SLACK}). Absorbs interpolator drift."
+        ),
+    )
+    ot.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Process at most N markets in this run (default: no limit).",
+    )
+    ot.add_argument(
+        "--rpm",
+        type=int,
+        default=60,
+        help="RPC requests per minute ceiling (default: 60).",
     )
     return parser
 
@@ -294,11 +340,38 @@ async def _cmd_onchain_backfill(args: argparse.Namespace) -> int:
         conn.close()
 
 
+async def _cmd_onchain_backfill_targeted(args: argparse.Namespace) -> int:
+    """Run the per-market targeted on-chain backfill (resumable)."""
+    conn = init_corpus_db(Path(args.db))
+    try:
+        async with OnchainRpcClient(rpc_url=args.rpc_url, rpm=args.rpm) as rpc:
+            summary = await run_targeted_backfill(
+                conn=conn,
+                rpc=rpc,
+                chunk_size=args.chunk_size,
+                block_slack=args.block_slack,
+                limit=args.limit,
+            )
+        _log.info(
+            "onchain_targeted.cli_summary",
+            markets_processed=summary.markets_processed,
+            markets_failed=summary.markets_failed,
+            events_decoded=summary.events_decoded,
+            trades_inserted=summary.trades_inserted,
+            skipped_unsupported=summary.skipped_unsupported,
+            skipped_unresolvable=summary.skipped_unresolvable,
+        )
+        return 0
+    finally:
+        conn.close()
+
+
 _HANDLERS = {
     "backfill": _cmd_backfill,
     "refresh": _cmd_refresh,
     "build-features": _cmd_build_features,
     "onchain-backfill": _cmd_onchain_backfill,
+    "onchain-backfill-targeted": _cmd_onchain_backfill_targeted,
 }
 
 
