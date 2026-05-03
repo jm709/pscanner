@@ -126,3 +126,35 @@ async def test_get_block_timestamp_caches_repeat_calls(
 
     assert ts_a == ts_b == 0x100
     assert route.call_count == 1, "second call should hit the cache"
+
+
+@respx.mock
+async def test_429_with_retry_after_zero_retries_and_succeeds(
+    client: OnchainRpcClient,
+) -> None:
+    respx.post(_RPC_URL).mock(
+        side_effect=[
+            httpx.Response(429, headers={"Retry-After": "0"}, json={"err": "rl"}),
+            httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": "0x1"}),
+        ],
+    )
+    try:
+        head = await client.get_block_number()
+    finally:
+        await client.aclose()
+    assert head == 1
+
+
+@respx.mock
+async def test_persistent_503_raises_after_max_attempts(
+    client: OnchainRpcClient,
+) -> None:
+    route = respx.post(_RPC_URL).mock(
+        return_value=httpx.Response(503, json={"err": "down"}),
+    )
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.get_block_number()
+    finally:
+        await client.aclose()
+    assert route.call_count == 5
