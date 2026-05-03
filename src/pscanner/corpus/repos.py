@@ -167,6 +167,13 @@ class CorpusMarketsRepo:
 
         Sets the truncation flag when the offset cap was hit before all trades
         were retrieved.
+
+        Also rewrites ``closed_at`` to ``MAX(corpus_trades.ts)`` for this
+        market, replacing the placeholder ``now_ts`` written at enumeration
+        time. Without this, every row gets the enumerator's run time and the
+        downstream ``temporal_split`` collapses to a hash split. Falls back
+        to leaving ``closed_at`` unchanged if the market has no observed
+        trades (shouldn't happen given the $1M volume gate, but guarded).
         """
         self._conn.execute(
             """
@@ -174,10 +181,14 @@ class CorpusMarketsRepo:
             SET backfill_state = 'complete',
                 backfill_completed_at = ?,
                 truncated_at_offset_cap = ?,
-                error_message = NULL
+                error_message = NULL,
+                closed_at = COALESCE(
+                    (SELECT MAX(ts) FROM corpus_trades WHERE condition_id = ?),
+                    closed_at
+                )
             WHERE condition_id = ?
             """,
-            (completed_at, 1 if truncated else 0, condition_id),
+            (completed_at, 1 if truncated else 0, condition_id, condition_id),
         )
         self._conn.commit()
 
@@ -580,3 +591,95 @@ def _example_to_row(ex: TrainingExample) -> tuple[object, ...]:
         ex.price_volatility_recent,
         ex.label_won,
     )
+
+
+@dataclass(frozen=True)
+class AssetEntry:
+    """One row in `asset_index`: asset_id -> (condition_id, outcome_side, outcome_index).
+
+    `outcome_index` is 0 for YES / first outcome, 1 for NO / second outcome
+    on standard binary markets. We persist it explicitly for parity with
+    Polymarket's `outcome_prices` array ordering.
+    """
+
+    asset_id: str
+    condition_id: str
+    outcome_side: str
+    outcome_index: int
+
+
+class AssetIndexRepo:
+    """Lookups and upserts against `asset_index`.
+
+    Phase 2's on-chain ingest needs to map a decoded `OrderFilledEvent`'s
+    `makerAssetId` / `takerAssetId` (uint256, the CTF position id) to the
+    parent market's `condition_id` and the outcome side. We persist that
+    mapping here so the lookup is local-only (no gamma round-trip per event).
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        """Bind the repo to an already-initialised connection."""
+        self._conn = conn
+
+    def upsert(self, entry: AssetEntry) -> None:
+        """Insert or replace the row for `entry.asset_id`."""
+        self._conn.execute(
+            """
+            INSERT INTO asset_index (asset_id, condition_id, outcome_side, outcome_index)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(asset_id) DO UPDATE SET
+              condition_id = excluded.condition_id,
+              outcome_side = excluded.outcome_side,
+              outcome_index = excluded.outcome_index
+            """,
+            (entry.asset_id, entry.condition_id, entry.outcome_side, entry.outcome_index),
+        )
+        self._conn.commit()
+
+    def get(self, asset_id: str) -> AssetEntry | None:
+        """Look up an entry by its `asset_id`, or `None` if not present."""
+        row = self._conn.execute(
+            "SELECT asset_id, condition_id, outcome_side, outcome_index "
+            "FROM asset_index WHERE asset_id = ?",
+            (asset_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return AssetEntry(
+            asset_id=row["asset_id"],
+            condition_id=row["condition_id"],
+            outcome_side=row["outcome_side"],
+            outcome_index=row["outcome_index"],
+        )
+
+    def backfill_from_corpus_trades(self) -> int:
+        """Populate `asset_index` from existing `corpus_trades` rows.
+
+        Each `corpus_trades` row already carries (asset_id, condition_id,
+        outcome_side). We derive `outcome_index` from the side: YES -> 0,
+        NO -> 1 (matches Polymarket's `outcome_prices` array ordering).
+
+        Returns:
+            Number of distinct `asset_id`s inserted (excludes existing rows
+            that conflicted on the PRIMARY KEY).
+        """
+        cursor = self._conn.execute(
+            """
+            INSERT OR IGNORE INTO asset_index (
+              asset_id, condition_id, outcome_side, outcome_index
+            )
+            SELECT
+              asset_id,
+              condition_id,
+              outcome_side,
+              CASE outcome_side WHEN 'YES' THEN 0 ELSE 1 END
+            FROM (
+              SELECT asset_id, condition_id, outcome_side
+              FROM corpus_trades
+              GROUP BY asset_id
+            )
+            """
+        )
+        inserted = cursor.rowcount
+        self._conn.commit()
+        return inserted
