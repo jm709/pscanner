@@ -253,6 +253,119 @@ def test_run_study_n_jobs_2_completes_without_lock_errors(
     assert (output_dir / "metrics.json").exists()
 
 
+def _toy_booster(
+    seed: int = 42,
+) -> tuple[xgb.Booster, np.ndarray, np.ndarray, np.ndarray]:
+    """Build a minimal booster + test arrays for evaluate_on_test tests."""
+    X_train, y_train, X_val, y_val, _ = _toy_problem(seed=seed)  # noqa: N806 -- ML matrix convention
+    params = {
+        "learning_rate": 0.1,
+        "max_depth": 3,
+        "min_child_weight": 1.0,
+        "subsample": 0.9,
+        "colsample_bytree": 0.9,
+        "reg_alpha": 1.0,
+        "reg_lambda": 1.0,
+        "gamma": 0.1,
+    }
+    booster = fit_winning_model(
+        best_params=params,
+        best_iteration=20,
+        X_train=X_train,
+        y_train=y_train,
+        seed=seed,
+    )
+    implied_test = np.full(len(y_val), 0.5)
+    return booster, X_val, y_val, implied_test
+
+
+def test_evaluate_on_test_returns_edge_filtered_when_categories_provided() -> None:
+    booster, X_val, y_val, implied_test = _toy_booster()  # noqa: N806 -- ML matrix convention
+    n = len(y_val)
+    # Assign half the rows to accepted categories, the other half to "thesis".
+    top_cat = np.array(["sports" if i % 2 == 0 else "thesis" for i in range(n)])
+    accepted = ("sports", "esports")
+
+    result = evaluate_on_test(
+        booster,
+        X_val,
+        y_val,
+        implied_test,
+        n_min=1,
+        top_category_test=top_cat,
+        accepted_categories=accepted,
+    )
+
+    assert "edge_filtered" in result
+    assert "edge" in result
+    # Verify edge_filtered is independently computable from raw arrays.
+    p_test = booster.predict(xgb.DMatrix(X_val))
+    cat_mask = np.isin(top_cat, accepted)
+    take_mask = p_test > implied_test
+    combined = cat_mask & take_mask
+    if combined.sum() >= 1:
+        expected_filtered = float((y_val[combined] - implied_test[combined]).mean())
+        assert result["edge_filtered"] == expected_filtered
+    # The overall edge uses all taken bets, so the two metrics differ when
+    # there are taken bets outside the accepted categories.
+    assert result["edge"] != result["edge_filtered"] or not (take_mask & ~cat_mask).any(), (
+        "edge == edge_filtered implies no out-of-category taken bets"
+    )
+
+
+def test_evaluate_on_test_omits_edge_filtered_when_categories_none() -> None:
+    booster, X_val, y_val, implied_test = _toy_booster()  # noqa: N806 -- ML matrix convention
+    result = evaluate_on_test(
+        booster,
+        X_val,
+        y_val,
+        implied_test,
+        n_min=5,
+        top_category_test=None,
+        accepted_categories=None,
+    )
+    assert "edge_filtered" not in result
+
+
+def test_run_study_writes_accepted_categories_to_preprocessor_json(
+    tmp_path: Path,
+    make_synthetic_examples: Callable[..., pl.DataFrame],
+) -> None:
+    df = make_synthetic_examples(n_markets=20, rows_per_market=15, seed=3)
+    output_dir = tmp_path / "run_cats"
+    run_study(
+        df=df,
+        output_dir=output_dir,
+        n_trials=2,
+        n_jobs=1,
+        n_min=5,
+        seed=42,
+    )
+    preprocessor = json.loads((output_dir / "preprocessor.json").read_text())
+    assert "accepted_categories" in preprocessor
+    assert preprocessor["accepted_categories"] == ["sports", "esports"]
+
+
+def test_run_study_writes_test_edge_filtered_to_metrics_json(
+    tmp_path: Path,
+    make_synthetic_examples: Callable[..., pl.DataFrame],
+) -> None:
+    df = make_synthetic_examples(n_markets=20, rows_per_market=15, seed=3)
+    output_dir = tmp_path / "run_filtered"
+    run_study(
+        df=df,
+        output_dir=output_dir,
+        n_trials=2,
+        n_jobs=1,
+        n_min=5,
+        seed=42,
+    )
+    metrics = json.loads((output_dir / "metrics.json").read_text())
+    assert "test_edge_filtered" in metrics
+    assert "accepted_categories" in metrics
+    assert metrics["accepted_categories"] == ["sports", "esports"]
+
+
 def test_run_study_is_deterministic_under_same_seed(
     tmp_path: Path,
     make_synthetic_examples: Callable[..., pl.DataFrame],
