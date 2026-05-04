@@ -12,7 +12,7 @@ import pytest
 import respx
 
 from pscanner.corpus import cli as corpus_cli
-from pscanner.corpus.cli import build_corpus_parser, run_corpus_command
+from pscanner.corpus.cli import _DEFAULT_SUBGRAPH_ID, build_corpus_parser, run_corpus_command
 from pscanner.corpus.db import init_corpus_db
 from pscanner.corpus.repos import AssetEntry, AssetIndexRepo
 from pscanner.corpus.subgraph_ingest import SubgraphRunSummary
@@ -242,18 +242,6 @@ async def test_subgraph_backfill_missing_api_key_exits(
         )
 
 
-@pytest.mark.asyncio
-async def test_subgraph_backfill_placeholder_subgraph_id_exits(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Running with the unmodified _DEFAULT_SUBGRAPH_ID placeholder must exit."""
-    monkeypatch.setenv("GRAPH_API_KEY", "fake-key")
-    with pytest.raises(SystemExit, match="placeholder"):
-        await corpus_cli.run_corpus_command(
-            [
-                "subgraph-backfill",
-                "--db",
-                str(tmp_path / "c.sqlite3"),
-                # No --subgraph-id provided → falls back to _DEFAULT_SUBGRAPH_ID
-            ]
-        )
+def test_default_subgraph_id_matches_polymarket_orderbook() -> None:
+    """The pinned default must be the verified Polymarket Orderbook subgraph id."""
+    assert _DEFAULT_SUBGRAPH_ID == "7fu2DWYK93ePfzB24c2wrP94S3x4LGHUrQxphhoEypyY"

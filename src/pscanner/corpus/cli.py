@@ -50,8 +50,11 @@ _DEFAULT_TARGETED_CHUNK_SIZE = 500
 _DEFAULT_BLOCK_SLACK = 5_000
 _DEFAULT_SUBGRAPH_RPM = 600
 _DEFAULT_SUBGRAPH_PAGE_SIZE = 1000
-# TODO(plan task 7): replace with verified id once Graph Explorer lookup completes.
-_DEFAULT_SUBGRAPH_ID = "REPLACE_AFTER_TASK_7"
+# Polymarket Orderbook subgraph on The Graph's hosted gateway. Verified via
+# Graph Explorer (https://thegraph.com/explorer) — the subgraph's title is
+# "Polymarket Orderbook" and both Exchange + NegRiskExchange contracts write
+# into the same OrderFilledEvent entity.
+_DEFAULT_SUBGRAPH_ID = "7fu2DWYK93ePfzB24c2wrP94S3x4LGHUrQxphhoEypyY"
 _GATEWAY_URL_TEMPLATE = "https://gateway.thegraph.com/api/{api_key}/subgraphs/id/{subgraph_id}"
 
 
@@ -184,8 +187,8 @@ def build_corpus_parser() -> argparse.ArgumentParser:
         type=str,
         default=_DEFAULT_SUBGRAPH_ID,
         help=(
-            "Subgraph deployment id. The default is a placeholder that must be "
-            "replaced with the real Graph deployment id (Task 7 of the Phase 3 plan)."
+            "Subgraph deployment id. The default is the verified Polymarket "
+            "Orderbook subgraph on The Graph."
         ),
     )
     sg.add_argument(
@@ -421,11 +424,6 @@ async def _cmd_subgraph_backfill(args: argparse.Namespace) -> int:
     api_key = args.api_key or os.environ.get("GRAPH_API_KEY")
     if not api_key:
         raise SystemExit("subgraph-backfill requires --api-key or $GRAPH_API_KEY")
-    if args.subgraph_id == _DEFAULT_SUBGRAPH_ID:
-        raise SystemExit(
-            "subgraph-backfill requires --subgraph-id (the placeholder default has not been "
-            "replaced — see plan Task 7)."
-        )
     url = _GATEWAY_URL_TEMPLATE.format(api_key=api_key, subgraph_id=args.subgraph_id)
     conn = init_corpus_db(Path(args.db))
     try:
