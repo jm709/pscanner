@@ -18,6 +18,16 @@ evaluators. 734 tests.
 - Default `gamma_rpm = 50`, `data_rpm = 50`. Cold-start bottlenecks: smart-money refresh + events catalog sweep both compete for gamma budget; cluster + smart-money depend on watched-wallet `wallet_first_seen` populated by TradeCollector.
 - `/trades` and `/activity` REST cap at `offset=3000` (server: `"max historical activity offset of 3000 exceeded"`, newest-first sort). No documented `before`/`after`/`cursor` workaround — verified May 2026 against ~15 parameter variants and four candidate alt-endpoints. Beyond 3000 trades requires on-chain via Polygon RPC (`OrderFilled` events from CTF Exchange `0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E`). Phase 1 of #42 landed the decoder + `asset_index` resolver; Phase 2 (RPC client + CLI) is queued.
 
+## Manifold API quirks (will bite you)
+- **Mana-denominated**: bets are in mana (play money), NOT USD. Never aggregate Manifold bet amounts into real-money totals or mix with Polymarket/Kalshi volumes.
+- **No traditional orderbook**: limit orders are encoded as bets with a `limitProb` parameter. Fetch open limit orders via `GET /v0/bets?kinds=open-limit`.
+- **CFMM markets**: many Manifold markets are multi-outcome (CFMM mechanism, `outcomeType != "BINARY"`). Stage 1 only supports binary YES/NO. Filter non-binary at the collector layer (`ManifoldMarket.is_binary` property). Non-binary markets still parse — `prob` will be `None`.
+- **Rate limit**: 500 req/min per IP, applied globally across all endpoints. Multi-IP rotation is prohibited per Manifold ToS. The `ManifoldClient._TokenBucket` enforces this with capacity=500, rate=500/60.
+- **WS auth-free**: subscribe to `global/new-bet` for the bet firehose; 30-60s pings required. `ManifoldStream` uses `websockets`' built-in `ping_interval=45, ping_timeout=20`. Unknown-topic frames (e.g. `global/new-contract`) that arrive on the same connection are silently skipped.
+- **Identifiers**: hash strings, not numeric or 0x-prefixed hex. `ManifoldMarketId` and `ManifoldUserId` are `NewType[str]` wrappers — don't alias to Polymarket's `MarketId` or `ConditionId`.
+- **Pagination cursor**: both `/v0/markets` and `/v0/bets` use a `before=<id>` cursor (the `id` of the last item from the previous page), not an offset. Pass `before=None` to start from the most recent.
+- **Tables**: `manifold_markets`, `manifold_bets`, `manifold_users` live in `pscanner.manifold.db`. Apply via `init_manifold_tables(conn)` — separate from `init_db()` (daemon) and `init_corpus_db()` (corpus).
+
 ## Test gotchas
 - `pyproject.toml` has `filterwarnings = ["error"]` — every warning fails tests. Clean up resources (httpx/respx fixtures especially).
 - NEVER `monkeypatch.setattr(asyncio, "sleep", AsyncMock())` — deadlocks the suite (sibling detector loops become CPU spinners). Use `FakeClock` from `pscanner.util.clock` instead; inject via `clock=` ctor kwarg, drive with `await fake_clock.advance(seconds)`.
