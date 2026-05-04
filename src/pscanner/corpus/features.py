@@ -242,6 +242,10 @@ class FeatureRow:
     category_diversity: int
     bet_size_usd: float
     bet_size_rel_to_avg: float | None
+    edge_confidence_weighted: float
+    win_rate_confidence_weighted: float
+    is_high_quality_wallet: int
+    bet_size_relative_to_history: float
     side: str
     implied_prob_at_buy: float
     market_category: str
@@ -277,6 +281,10 @@ class HistoryProvider(Protocol):
 
 _SECONDS_PER_DAY = 86_400
 _MIN_PRICES_FOR_VOLATILITY = 2
+# Minimum resolved buys for full confidence in per-wallet edge estimates.
+# Below this threshold features are linearly discounted toward zero.
+_CONFIDENCE_N_MIN = 20
+_HIGH_QUALITY_WIN_RATE_THRESHOLD = 0.55
 
 
 def compute_features(trade: Trade, history: HistoryProvider) -> FeatureRow:
@@ -303,6 +311,17 @@ def compute_features(trade: Trade, history: HistoryProvider) -> FeatureRow:
     # rolling window or a streaming estimator. v1 always emits None.
     median_bet: float | None = None
     rel_to_avg = trade.notional_usd / avg_bet if avg_bet is not None and avg_bet > 0 else None
+    confidence = min(1.0, wallet.prior_resolved_buys / _CONFIDENCE_N_MIN)
+    edge_conf = (edge * confidence) if edge is not None else 0.0
+    wr_conf = ((win_rate - 0.5) * confidence) if win_rate is not None else 0.0
+    is_high_quality = int(
+        wallet.prior_resolved_buys >= _CONFIDENCE_N_MIN
+        and win_rate is not None
+        and win_rate > _HIGH_QUALITY_WIN_RATE_THRESHOLD
+    )
+    rel_to_median = (
+        trade.notional_usd / median_bet if median_bet is not None and median_bet > 0 else 1.0
+    )
     seconds_since_last = (
         trade.ts - wallet.last_trade_ts if wallet.last_trade_ts is not None else None
     )
@@ -344,6 +363,10 @@ def compute_features(trade: Trade, history: HistoryProvider) -> FeatureRow:
         category_diversity=diversity,
         bet_size_usd=trade.notional_usd,
         bet_size_rel_to_avg=rel_to_avg,
+        edge_confidence_weighted=edge_conf,
+        win_rate_confidence_weighted=wr_conf,
+        is_high_quality_wallet=is_high_quality,
+        bet_size_relative_to_history=rel_to_median,
         side=trade.outcome_side,
         implied_prob_at_buy=implied_prob,
         market_category=meta.category,

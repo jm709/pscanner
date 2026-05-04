@@ -92,6 +92,10 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
       category_diversity INTEGER NOT NULL,
       bet_size_usd REAL NOT NULL,
       bet_size_rel_to_avg REAL,
+      edge_confidence_weighted REAL NOT NULL DEFAULT 0,
+      win_rate_confidence_weighted REAL NOT NULL DEFAULT 0,
+      is_high_quality_wallet INTEGER NOT NULL DEFAULT 0,
+      bet_size_relative_to_history REAL NOT NULL DEFAULT 1,
       side TEXT NOT NULL,
       implied_prob_at_buy REAL NOT NULL,
       market_category TEXT NOT NULL,
@@ -136,6 +140,11 @@ _MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE corpus_markets ADD COLUMN market_slug TEXT",
     # Superseded by ``idx_corpus_trades_ts_tx_asset``, which covers ts-prefix queries.
     "DROP INDEX IF EXISTS idx_corpus_trades_ts",
+    # Wallet-quality x confidence interaction features (issue #44).
+    "ALTER TABLE training_examples ADD COLUMN edge_confidence_weighted REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE training_examples ADD COLUMN win_rate_confidence_weighted REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE training_examples ADD COLUMN is_high_quality_wallet INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE training_examples ADD COLUMN bet_size_relative_to_history REAL NOT NULL DEFAULT 1",
 )
 
 
