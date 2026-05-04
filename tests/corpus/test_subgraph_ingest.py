@@ -1,12 +1,35 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+import json as _json
+import sqlite3
+import time
+from collections.abc import Iterator, Mapping
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
+import respx
 
-from pscanner.corpus.subgraph_ingest import iter_market_trades, subgraph_row_to_event
+from pscanner.corpus.db import init_corpus_db
+from pscanner.corpus.repos import (
+    AssetEntry,
+    AssetIndexRepo,
+    CorpusMarket,
+    CorpusMarketsRepo,
+    CorpusTrade,
+    CorpusTradesRepo,
+)
+from pscanner.corpus.subgraph_ingest import (
+    SubgraphRunSummary,
+    iter_market_trades,
+    run_subgraph_backfill,
+    subgraph_row_to_event,
+)
+from pscanner.poly.subgraph import SubgraphClient
+
+_GATEWAY_URL = "https://gateway.example.test/api/k/subgraphs/id/abc"
 
 
 def test_subgraph_row_to_event_parses_buy_side_row() -> None:
@@ -240,3 +263,224 @@ def _row(
         "takerAmountFilled": str(taking),
         "fee": "0",
     }
+
+
+# ---------------------------------------------------------------------------
+# run_subgraph_backfill orchestrator tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def conn(tmp_path: Path) -> Iterator[sqlite3.Connection]:
+    """Corpus DB seeded with one truncated market and its asset_index entries."""
+    db = init_corpus_db(tmp_path / "c.sqlite3")
+    try:
+        markets = CorpusMarketsRepo(db)
+        markets.insert_pending(
+            CorpusMarket(
+                condition_id="0xMARKET_A",
+                event_slug="some-event",
+                category=None,
+                closed_at=1_700_001_000,
+                total_volume_usd=42_000.0,
+                enumerated_at=1_700_000_000,
+                market_slug="some-market",
+            )
+        )
+        db.execute(
+            """
+            UPDATE corpus_markets
+            SET truncated_at_offset_cap = 1, backfill_state = 'complete'
+            WHERE condition_id = ?
+            """,
+            ("0xMARKET_A",),
+        )
+        db.commit()
+        AssetIndexRepo(db).upsert(
+            AssetEntry(
+                asset_id="111",
+                condition_id="0xMARKET_A",
+                outcome_side="YES",
+                outcome_index=0,
+            )
+        )
+        AssetIndexRepo(db).upsert(
+            AssetEntry(
+                asset_id="222",
+                condition_id="0xMARKET_A",
+                outcome_side="NO",
+                outcome_index=1,
+            )
+        )
+        CorpusTradesRepo(db).insert_batch(
+            [
+                CorpusTrade(
+                    tx_hash="0x" + "aa" * 32,
+                    asset_id="111",
+                    wallet_address="0x" + "11" * 20,
+                    condition_id="0xMARKET_A",
+                    outcome_side="YES",
+                    bs="BUY",
+                    price=0.5,
+                    size=20.0,
+                    notional_usd=10.0,
+                    ts=1_700_000_500,
+                ),
+                CorpusTrade(
+                    tx_hash="0x" + "bb" * 32,
+                    asset_id="111",
+                    wallet_address="0x" + "11" * 20,
+                    condition_id="0xMARKET_A",
+                    outcome_side="YES",
+                    bs="BUY",
+                    price=0.5,
+                    size=20.0,
+                    notional_usd=10.0,
+                    ts=1_700_000_900,
+                ),
+            ]
+        )
+        yield db
+    finally:
+        db.close()
+
+
+@respx.mock
+async def test_run_subgraph_backfill_processes_pending_market(
+    conn: sqlite3.Connection,
+) -> None:
+    """End-to-end: one pending market → 1 trade inserted → market marked processed."""
+
+    def _route(request: httpx.Request) -> httpx.Response:
+        body = _json.loads(request.read())
+        side = "maker" if "makerAssetId_in" in body["query"] else "taker"
+        cursor = body["variables"]["cursor"]
+        if side == "maker" and cursor == "":
+            # SELL from maker POV: maker gives CTF (asset 111), taker gives USDC
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "orderFilledEvents": [
+                            {
+                                "id": "0xtx1_0xord1",
+                                "transactionHash": "0x" + "ee" * 32,
+                                "timestamp": "1700001500",
+                                "orderHash": "0x" + "ab" * 32,
+                                "maker": "0x" + "ff" * 20,
+                                "taker": "0x" + "22" * 20,
+                                "makerAssetId": "111",
+                                "takerAssetId": "0",
+                                "makerAmountFilled": "40000000",
+                                "takerAmountFilled": "20000000",
+                                "fee": "0",
+                            }
+                        ]
+                    }
+                },
+            )
+        return httpx.Response(200, json={"data": {"orderFilledEvents": []}})
+
+    respx.post(_GATEWAY_URL).mock(side_effect=_route)
+
+    client = SubgraphClient(url=_GATEWAY_URL, rpm=600)
+    try:
+        summary = await run_subgraph_backfill(conn=conn, client=client)
+    finally:
+        await client.aclose()
+
+    assert isinstance(summary, SubgraphRunSummary)
+    assert summary.markets_processed == 1
+    assert summary.markets_failed == 0
+    assert summary.trades_inserted == 1
+
+    rows = conn.execute(
+        """
+        SELECT bs, asset_id, wallet_address, ts FROM corpus_trades
+        WHERE condition_id = '0xMARKET_A' AND tx_hash = ?
+        """,
+        ("0x" + "ee" * 32,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["bs"] == "SELL"  # maker gave CTF → SELL from maker POV
+    assert rows[0]["asset_id"] == "111"
+    assert rows[0]["wallet_address"] == "0x" + "ff" * 20
+    assert rows[0]["ts"] == 1_700_001_500
+
+    row = conn.execute(
+        "SELECT onchain_processed_at, onchain_trades_count, truncated_at_offset_cap "
+        "FROM corpus_markets WHERE condition_id = '0xMARKET_A'"
+    ).fetchone()
+    assert row["onchain_processed_at"] is not None
+    assert row["onchain_processed_at"] <= int(time.time())
+    assert row["onchain_trades_count"] == 3  # 2 seeded + 1 inserted
+    assert row["truncated_at_offset_cap"] == 1  # below 3000 threshold
+
+
+@respx.mock
+async def test_run_subgraph_backfill_skips_already_processed_markets(
+    conn: sqlite3.Connection,
+) -> None:
+    """Markets with onchain_processed_at set must be skipped on subsequent runs."""
+    conn.execute(
+        "UPDATE corpus_markets SET onchain_processed_at = ? WHERE condition_id = ?",
+        (int(time.time()) - 60, "0xMARKET_A"),
+    )
+    conn.commit()
+
+    route = respx.post(_GATEWAY_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"orderFilledEvents": []}})
+    )
+
+    client = SubgraphClient(url=_GATEWAY_URL, rpm=600)
+    try:
+        summary = await run_subgraph_backfill(conn=conn, client=client)
+    finally:
+        await client.aclose()
+
+    assert summary.markets_processed == 0
+    assert route.call_count == 0  # no markets pending → no queries fired
+
+
+@respx.mock
+async def test_run_subgraph_backfill_respects_limit(
+    conn: sqlite3.Connection,
+) -> None:
+    """`limit=N` processes at most N markets even if more are pending."""
+    CorpusMarketsRepo(conn).insert_pending(
+        CorpusMarket(
+            condition_id="0xMARKET_B",
+            event_slug="event-b",
+            category=None,
+            closed_at=1_700_001_000,
+            total_volume_usd=10_000.0,
+            enumerated_at=1_700_000_000,
+            market_slug="market-b",
+        )
+    )
+    conn.execute(
+        "UPDATE corpus_markets SET truncated_at_offset_cap = 1, backfill_state = 'complete' "
+        "WHERE condition_id = ?",
+        ("0xMARKET_B",),
+    )
+    conn.commit()
+    AssetIndexRepo(conn).upsert(
+        AssetEntry(
+            asset_id="333",
+            condition_id="0xMARKET_B",
+            outcome_side="YES",
+            outcome_index=0,
+        )
+    )
+
+    respx.post(_GATEWAY_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"orderFilledEvents": []}})
+    )
+
+    client = SubgraphClient(url=_GATEWAY_URL, rpm=600)
+    try:
+        summary = await run_subgraph_backfill(conn=conn, client=client, limit=1)
+    finally:
+        await client.aclose()
+
+    assert summary.markets_processed == 1
