@@ -18,6 +18,17 @@ evaluators. 734 tests.
 - Default `gamma_rpm = 50`, `data_rpm = 50`. Cold-start bottlenecks: smart-money refresh + events catalog sweep both compete for gamma budget; cluster + smart-money depend on watched-wallet `wallet_first_seen` populated by TradeCollector.
 - `/trades` and `/activity` REST cap at `offset=3000` (server: `"max historical activity offset of 3000 exceeded"`, newest-first sort). No documented `before`/`after`/`cursor` workaround — verified May 2026 against ~15 parameter variants and four candidate alt-endpoints. Beyond 3000 trades requires on-chain via Polygon RPC (`OrderFilled` events from CTF Exchange `0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E`). Phase 1 of #42 landed the decoder + `asset_index` resolver; Phase 2 (RPC client + CLI) is queued.
 
+## Kalshi API quirks (will bite you)
+- **Pricing**: cents expressed as dollar strings on the wire (`"0.0900"` = 9 cents). Convert to probability via `price_dollars` (already a float 0.0-1.0) or use the `.last_price_cents` property (integer 0-100). Contracts settle to $0 or $1.
+- **Identifiers**: ticker strings (`"KXELONMARS-99"`), not hex. `KalshiMarketTicker`, `KalshiEventTicker`, `KalshiSeriesTicker` are `NewType[str]` in `pscanner.kalshi.ids` — distinct from `pscanner.poly.ids` per the multi-platform RFC. Pass `KalshiMarketTicker(...)` at call sites so `ty` catches cross-platform confusion.
+- **Series fan-out**: a series (e.g. `"KXELONMARS"`) groups multiple events; an event groups multiple markets. On simple binary contracts the event ticker and market ticker are equal (e.g. both `"KXELONMARS-99"`).
+- **Settlement**: $0 or $1 per share (0 or 100 cents). No mid-resolution prices.
+- **Trades endpoint**: market trades live at `GET /markets/trades?ticker=TICKER`, NOT at `GET /markets/{ticker}/trades` (that path returns 404). `KalshiClient.get_market_trades` uses the correct URL.
+- **Public REST is unauth**; WS streaming requires a Kalshi account + RSA-signed handshake (Stage 2, not yet implemented).
+- **Base URL**: `https://api.elections.kalshi.com/trade-api/v2` (verified 2026-05-04).
+- **Volume/size fields**: returned as fixed-point strings (`"1.00"`), coerced to `float` by pydantic. The `count_fp` on trades is a contract count, not a dollar amount.
+- **Kalshi schema tables** (`kalshi_markets`, `kalshi_trades`, `kalshi_orderbook_snapshots`) are registered into `store/db.py:_SCHEMA_STATEMENTS` via `KALSHI_SCHEMA_STATEMENTS` from `pscanner.kalshi.db`. They are created by `init_db` alongside the Polymarket daemon tables — `tmp_db` in tests includes them automatically.
+
 ## Test gotchas
 - `pyproject.toml` has `filterwarnings = ["error"]` — every warning fails tests. Clean up resources (httpx/respx fixtures especially).
 - NEVER `monkeypatch.setattr(asyncio, "sleep", AsyncMock())` — deadlocks the suite (sibling detector loops become CPU spinners). Use `FakeClock` from `pscanner.util.clock` instead; inject via `clock=` ctor kwarg, drive with `await fake_clock.advance(seconds)`.

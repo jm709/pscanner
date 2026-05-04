@@ -10,6 +10,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from pscanner.kalshi.db import KALSHI_SCHEMA_STATEMENTS
+
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS tracked_wallets (
@@ -260,6 +262,10 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_paper_trades_open "
     "ON paper_trades(condition_id, asset_id) WHERE trade_kind = 'entry'",
     "CREATE INDEX IF NOT EXISTS idx_paper_trades_parent ON paper_trades(parent_trade_id)",
+    # Kalshi tables — registered here so init_db creates them alongside the
+    # Polymarket daemon tables. The CREATE statements are defined in
+    # pscanner.kalshi.db to keep platform code co-located.
+    *KALSHI_SCHEMA_STATEMENTS,
 )
 
 _MIGRATIONS: tuple[str, ...] = (
