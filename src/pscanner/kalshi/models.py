@@ -74,6 +74,16 @@ class KalshiMarket(BaseModel):
         """Integer cents for the YES ask price."""
         return _dollars_to_cents(self.yes_ask_dollars)
 
+    @property
+    def no_bid_cents(self) -> int:
+        """Integer cents for the NO bid price."""
+        return _dollars_to_cents(self.no_bid_dollars)
+
+    @property
+    def no_ask_cents(self) -> int:
+        """Integer cents for the NO ask price."""
+        return _dollars_to_cents(self.no_ask_dollars)
+
 
 class _OrderbookInner(BaseModel):
     """Inner object under the ``orderbook_fp`` key in orderbook responses."""

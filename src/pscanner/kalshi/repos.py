@@ -111,8 +111,8 @@ class KalshiMarketsRepo:
                 market.last_price_cents,
                 market.yes_bid_cents,
                 market.yes_ask_cents,
-                _dollars_to_cents(market.no_bid_dollars),
-                _dollars_to_cents(market.no_ask_dollars),
+                market.no_bid_cents,
+                market.no_ask_cents,
                 market.volume_fp,
                 market.volume_24h_fp,
                 market.open_interest_fp,
@@ -302,10 +302,6 @@ class KalshiOrderbookSnapshotsRepo:
 # ---------------------------------------------------------------------------
 # Internal row-mapper helpers
 # ---------------------------------------------------------------------------
-
-
-def _dollars_to_cents(dollars: float) -> int:
-    return round(dollars * 100)
 
 
 def _market_row(row: sqlite3.Row) -> KalshiMarketRow:
