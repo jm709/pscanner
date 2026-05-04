@@ -1,6 +1,7 @@
 """argparse handlers for ``pscanner corpus`` subcommands.
 
-Covers ``backfill``, ``refresh``, ``build-features``, and ``onchain-backfill``.
+Covers ``backfill``, ``refresh``, ``build-features``, ``onchain-backfill``,
+``onchain-backfill-targeted``, and ``subgraph-backfill``.
 Each handler opens ``corpus.sqlite3``, instantiates the required clients with
 their own rate budget, runs the orchestration, and exits with 0 on success.
 """
@@ -182,7 +183,10 @@ def build_corpus_parser() -> argparse.ArgumentParser:
         "--subgraph-id",
         type=str,
         default=_DEFAULT_SUBGRAPH_ID,
-        help=f"Subgraph deployment id (default: {_DEFAULT_SUBGRAPH_ID}).",
+        help=(
+            "Subgraph deployment id. The default is a placeholder that must be "
+            "replaced with the real Graph deployment id (Task 7 of the Phase 3 plan)."
+        ),
     )
     sg.add_argument(
         "--rpm",

@@ -221,6 +221,8 @@ async def test_subgraph_backfill_subcommand_dispatches(
     assert "abc123" in str(captured["client_url"])
     assert captured["client_rpm"] == 120
     assert captured["limit"] == 5
+    assert captured["page_size"] == 1000  # default _DEFAULT_SUBGRAPH_PAGE_SIZE
+    assert captured["truncation_threshold"] == 3000  # orchestrator default
 
 
 @pytest.mark.asyncio
@@ -236,5 +238,22 @@ async def test_subgraph_backfill_missing_api_key_exits(
                 str(tmp_path / "c.sqlite3"),
                 "--subgraph-id",
                 "abc",
+            ]
+        )
+
+
+@pytest.mark.asyncio
+async def test_subgraph_backfill_placeholder_subgraph_id_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Running with the unmodified _DEFAULT_SUBGRAPH_ID placeholder must exit."""
+    monkeypatch.setenv("GRAPH_API_KEY", "fake-key")
+    with pytest.raises(SystemExit, match="placeholder"):
+        await corpus_cli.run_corpus_command(
+            [
+                "subgraph-backfill",
+                "--db",
+                str(tmp_path / "c.sqlite3"),
+                # No --subgraph-id provided → falls back to _DEFAULT_SUBGRAPH_ID
             ]
         )
