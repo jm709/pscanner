@@ -8,9 +8,11 @@ maker-POV BUY/SELL semantics stay identical.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
+from typing import Any
 
 from pscanner.poly.onchain import OrderFilledEvent
+from pscanner.poly.subgraph import SubgraphClient
 
 _REQUIRED_KEYS = (
     "transactionHash",
@@ -85,3 +87,123 @@ def subgraph_row_to_event(row: Mapping[str, object]) -> OrderFilledEvent:
         block_number=0,
         log_index=0,
     )
+
+
+# ---------------------------------------------------------------------------
+# Paginator
+# ---------------------------------------------------------------------------
+
+# The Graph's hard cap on a single page of results.
+_MAX_PAGE_SIZE = 1000
+
+_TRADES_QUERY_MAKER_SIDE = """
+query MarketTradesMakerSide($assets: [String!]!, $cursor: String!, $first: Int!) {
+  orderFilledEvents(
+    where: { makerAssetId_in: $assets, id_gt: $cursor }
+    orderBy: id
+    first: $first
+  ) {
+    id transactionHash timestamp orderHash maker taker
+    makerAssetId takerAssetId makerAmountFilled takerAmountFilled fee
+  }
+}
+""".strip()
+
+_TRADES_QUERY_TAKER_SIDE = """
+query MarketTradesTakerSide($assets: [String!]!, $cursor: String!, $first: Int!) {
+  orderFilledEvents(
+    where: { takerAssetId_in: $assets, id_gt: $cursor }
+    orderBy: id
+    first: $first
+  ) {
+    id transactionHash timestamp orderHash maker taker
+    makerAssetId takerAssetId makerAmountFilled takerAmountFilled fee
+  }
+}
+""".strip()
+
+
+async def _paginate_side(
+    *,
+    client: SubgraphClient,
+    graphql: str,
+    asset_ids: Sequence[str],
+    page_size: int,
+) -> AsyncGenerator[tuple[OrderFilledEvent, int]]:
+    """Yield decoded events from one filter side, paginated by id_gt.
+
+    Args:
+        client: Open ``SubgraphClient``.
+        graphql: One of ``_TRADES_QUERY_MAKER_SIDE`` or ``_TRADES_QUERY_TAKER_SIDE``.
+        asset_ids: CTF token ids (as strings) to filter on.
+        page_size: Rows per query page (≤ ``_MAX_PAGE_SIZE``).
+
+    Yields:
+        ``(event, ts)`` tuples where ``ts`` is the Unix timestamp integer
+        from the subgraph ``timestamp`` field.
+    """
+    cursor = ""
+    while True:
+        result = await client.query(
+            graphql,
+            {"assets": list(asset_ids), "cursor": cursor, "first": page_size},
+        )
+        rows: list[dict[str, Any]] = result.get("orderFilledEvents") or []
+        if not rows:
+            return
+        for row in rows:
+            event = subgraph_row_to_event(row)
+            ts = int(str(row["timestamp"]))
+            yield event, ts
+        if len(rows) < page_size:
+            # Short page guarantees no more rows exist for this cursor range.
+            return
+        cursor = str(rows[-1]["id"])
+
+
+async def iter_market_trades(
+    *,
+    client: SubgraphClient,
+    asset_ids: Sequence[str],
+    page_size: int = _MAX_PAGE_SIZE,
+) -> AsyncIterator[tuple[OrderFilledEvent, int]]:
+    """Yield every ``OrderFilledEvent`` whose maker- or taker-side asset is in ``asset_ids``.
+
+    Runs maker-side queries to exhaustion, then taker-side queries.  Each side
+    uses ``id_gt`` cursor pagination so restarts are safe (no duplicates on
+    resume, only forward progress).
+
+    Args:
+        client: Open ``SubgraphClient``.
+        asset_ids: CTF token ids (as decimal strings) belonging to one condition.
+            Pass both YES and NO token ids for a binary market.
+        page_size: Rows per query, capped at ``_MAX_PAGE_SIZE`` (1000) by
+            The Graph.  Reduce for lower memory pressure during tests.
+
+    Yields:
+        ``(event, ts)`` tuples — same shape as ``iter_order_filled_logs``
+        from Phase 2 so the orchestrator can mirror its loop body.
+
+    Raises:
+        ValueError: ``page_size`` is out of the ``1.._MAX_PAGE_SIZE`` range.
+    """
+    if page_size <= 0 or page_size > _MAX_PAGE_SIZE:
+        raise ValueError(f"page_size must be in 1..{_MAX_PAGE_SIZE}, got {page_size}")
+    if not asset_ids:
+        return
+
+    async for ev, ts in _paginate_side(
+        client=client,
+        graphql=_TRADES_QUERY_MAKER_SIDE,
+        asset_ids=asset_ids,
+        page_size=page_size,
+    ):
+        yield ev, ts
+
+    async for ev, ts in _paginate_side(
+        client=client,
+        graphql=_TRADES_QUERY_TAKER_SIDE,
+        asset_ids=asset_ids,
+        page_size=page_size,
+    ):
+        yield ev, ts
