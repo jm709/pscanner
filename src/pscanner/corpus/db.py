@@ -140,6 +140,8 @@ _MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE corpus_markets ADD COLUMN market_slug TEXT",
     # Superseded by ``idx_corpus_trades_ts_tx_asset``, which covers ts-prefix queries.
     "DROP INDEX IF EXISTS idx_corpus_trades_ts",
+    "ALTER TABLE corpus_markets ADD COLUMN onchain_trades_count INTEGER",
+    "ALTER TABLE corpus_markets ADD COLUMN onchain_processed_at INTEGER",
     # Wallet-quality x confidence interaction features (issue #44).
     "ALTER TABLE training_examples ADD COLUMN edge_confidence_weighted REAL NOT NULL DEFAULT 0",
     "ALTER TABLE training_examples ADD COLUMN win_rate_confidence_weighted REAL NOT NULL DEFAULT 0",

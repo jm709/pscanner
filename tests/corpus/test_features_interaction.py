@@ -86,7 +86,6 @@ def _wallet_with_history(
     *,
     prior_resolved_buys: int,
     prior_wins: int,
-    realized_edge_pp: float | None = None,
     bet_size_sum: float = 0.0,
     bet_size_count: int = 0,
 ) -> WalletState:
@@ -130,9 +129,7 @@ def _history(wallet: WalletState) -> HistoryProvider:
 
 
 def test_edge_confidence_weighted_full_credit_at_high_n() -> None:
-    """n=50 (>=20): edge_conf = realized_edge_pp * 1.0."""
-    wallet = _wallet_with_history(prior_resolved_buys=50, prior_wins=52)
-    # 52/50 is impossible but let's use 50 wins out of 50 for clean math
+    """n=50, win_rate=1.0: edge_conf = realized_edge_pp * 1.0."""
     wallet = _wallet_with_history(prior_resolved_buys=50, prior_wins=50)
     # win_rate = 50/50 = 1.0, avg_prob = 0.5, edge = 0.5
     features = compute_features(_trade(), _history(wallet))

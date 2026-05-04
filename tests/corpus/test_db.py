@@ -60,6 +60,28 @@ def test_init_corpus_db_creates_asset_index_table() -> None:
         conn.close()
 
 
+def test_training_examples_has_wallet_quality_interaction_columns() -> None:
+    """Issue #44 migration: 4 new columns present and have correct types/defaults."""
+    conn = init_corpus_db(Path(":memory:"))
+    try:
+        cols = {row["name"]: row for row in conn.execute("PRAGMA table_info(training_examples)")}
+        for col in (
+            "edge_confidence_weighted",
+            "win_rate_confidence_weighted",
+            "is_high_quality_wallet",
+            "bet_size_relative_to_history",
+        ):
+            assert col in cols, f"missing column: {col}"
+            assert cols[col]["notnull"] == 1, f"{col} should be NOT NULL"
+        # Type checks
+        assert cols["edge_confidence_weighted"]["type"].upper() == "REAL"
+        assert cols["win_rate_confidence_weighted"]["type"].upper() == "REAL"
+        assert cols["is_high_quality_wallet"]["type"].upper() == "INTEGER"
+        assert cols["bet_size_relative_to_history"]["type"].upper() == "REAL"
+    finally:
+        conn.close()
+
+
 def test_corpus_trades_unique_key() -> None:
     conn = init_corpus_db(Path(":memory:"))
     try:

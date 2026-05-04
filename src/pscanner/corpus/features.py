@@ -245,6 +245,9 @@ class FeatureRow:
     edge_confidence_weighted: float
     win_rate_confidence_weighted: float
     is_high_quality_wallet: int
+    # Always 1.0 in v1; the streaming feature provider doesn't maintain a running
+    # median (see WalletState.median_bet_size_usd). A future v2 provider will fill
+    # this in without schema changes.
     bet_size_relative_to_history: float
     side: str
     implied_prob_at_buy: float
