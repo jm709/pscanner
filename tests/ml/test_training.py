@@ -9,9 +9,11 @@ from pathlib import Path
 import numpy as np
 import optuna
 import polars as pl
+import pytest
 import xgboost as xgb
 
 from pscanner.ml.training import (
+    _make_edge_eval_metric,
     evaluate_on_test,
     fit_winning_model,
     run_single_trial,
@@ -32,6 +34,60 @@ def _toy_problem(
     y_train, y_val = y[:150], y[150:]
     implied_val = implied[150:]
     return X_train, y_train, X_val, y_val, implied_val
+
+
+def test_make_edge_eval_metric_returns_negated_edge() -> None:
+    """When predictions beat implied for many rows, the metric returns -edge."""
+    n = 100
+    y_val = np.array([1] * 60 + [0] * 40)  # 60% win rate among taken bets
+    implied_val = np.full(n, 0.4)  # All bets at 40% implied prob
+    predt = np.full(n, 0.7)  # Model predicts 70% > 40%, so all rows pass the gate
+
+    metric = _make_edge_eval_metric(y_val=y_val, implied_prob_val=implied_val, n_min=20)
+    name, value = metric(predt, xgb.DMatrix(np.zeros((n, 1)), label=y_val))
+
+    assert name == "realized_edge"
+    # Realized edge = mean(y - implied) over taken bets = 0.6 - 0.4 = 0.2
+    # Negated for xgboost minimization → -0.2
+    assert value == pytest.approx(-0.2)
+
+
+def test_make_edge_eval_metric_returns_plus_one_in_n_min_flat_region() -> None:
+    """When too few predictions beat implied (n_taken < n_min), metric returns +1.0.
+
+    The flat ``-1.0`` from the underlying ``realized_edge_metric`` becomes
+    ``+1.0`` after negation — early-stopping sees the worst-possible value
+    and continues training rather than stopping in the flat region.
+    """
+    n = 100
+    y_val = np.zeros(n, dtype=int)
+    implied_val = np.full(n, 0.9)
+    # Only 5 predictions beat implied (below the n_min=20 floor).
+    predt = np.full(n, 0.1)
+    predt[:5] = 0.95
+
+    metric = _make_edge_eval_metric(y_val=y_val, implied_prob_val=implied_val, n_min=20)
+    name, value = metric(predt, xgb.DMatrix(np.zeros((n, 1)), label=y_val))
+
+    assert name == "realized_edge"
+    assert value == 1.0
+
+
+def test_make_edge_eval_metric_closure_captures_inputs() -> None:
+    """The closure binds y_val/implied/n_min at construction time, not call time."""
+    y_val = np.array([1, 0, 1, 0])
+    implied_val = np.array([0.3, 0.3, 0.3, 0.3])
+    metric = _make_edge_eval_metric(y_val=y_val, implied_prob_val=implied_val, n_min=2)
+
+    # Mutate the source arrays after factory return — closure must use captured refs.
+    # NumPy arrays are passed by reference, so the closure sees the mutation; this
+    # test pins that behavior so any future shift to a defensive copy is intentional.
+    y_val[:] = [0, 0, 0, 0]
+
+    predt = np.array([0.5, 0.5, 0.5, 0.5])
+    _, value = metric(predt, xgb.DMatrix(np.zeros((4, 1)), label=y_val))
+    # All rows pass gate (4 >= n_min=2). Edge = (0+0+0+0)/4 - 0.3 = -0.3. Negated: +0.3.
+    assert value == pytest.approx(0.3)
 
 
 def test_run_single_trial_returns_finite_edge() -> None:

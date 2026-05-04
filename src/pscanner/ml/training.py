@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import numpy as np
@@ -44,6 +44,37 @@ def _rss_mb() -> int:
     return (rss_pages * os.sysconf("SC_PAGE_SIZE")) // (1024 * 1024)
 
 
+def _make_edge_eval_metric(
+    y_val: np.ndarray,
+    implied_prob_val: np.ndarray,
+    n_min: int,
+) -> Callable[[np.ndarray, xgb.DMatrix], tuple[str, float]]:
+    """Build an xgboost ``custom_metric`` closure that tracks realized edge.
+
+    Returned tuple is ``("realized_edge", -edge)`` so xgboost's default
+    minimization treats higher edge as better — early stopping then picks
+    the round whose val edge is highest, not the round whose val log-loss
+    is lowest. Logloss minima and edge maxima can diverge sharply (logloss
+    penalizes overconfidence on losers; edge cares whether ``pred >
+    implied`` predicts winners), so aligning the inner loop with what the
+    outer Optuna loop actually grades on closes a real selection bias.
+
+    The flat ``-1.0`` region returned by ``realized_edge_metric`` when
+    ``n_taken < n_min`` becomes ``+1.0`` after negation. xgboost sees a
+    plateau at the worst possible value early in training and continues
+    boosting until enough bets pass the gate — no false-positive stop.
+    """
+    captured_y = y_val
+    captured_implied = implied_prob_val
+    captured_n_min = n_min
+
+    def _metric(predt: np.ndarray, _dmatrix: xgb.DMatrix) -> tuple[str, float]:
+        edge = realized_edge_metric(captured_y, predt, captured_implied, n_min=captured_n_min)
+        return ("realized_edge", -edge)
+
+    return _metric
+
+
 def run_single_trial(
     trial: optuna.Trial,
     dtrain: xgb.DMatrix,
@@ -59,10 +90,13 @@ def run_single_trial(
     Sampled hyperparameters: ``learning_rate``, ``max_depth``,
     ``min_child_weight``, ``subsample``, ``colsample_bytree``,
     ``reg_alpha``, ``reg_lambda``, ``gamma``. Boosting rounds are
-    capped at 2000 with 50-round early stopping on val log-loss; the
-    actual rounds used for prediction is ``best_iteration + 1``. The
-    chosen ``best_iteration`` is recorded on the trial's user attrs so
-    the winning model can be refit later without re-running the study.
+    capped at 2000 with 50-round early stopping on the custom
+    ``realized_edge`` metric (negated so xgboost's default minimization
+    selects the edge-maximizing round). ``logloss`` is still reported
+    via ``eval_metric`` as a calibration sanity baseline in train logs.
+    The actual rounds used for prediction is ``best_iteration + 1``.
+    The chosen ``best_iteration`` is recorded on the trial's user attrs
+    so the winning model can be refit later without re-running the study.
 
     ``dtrain`` and ``dval`` are expected to be shared across trials --
     XGBoost's ``train()`` treats them as read-only, so a single pair
@@ -98,11 +132,15 @@ def run_single_trial(
         "seed": seed,
         "verbosity": 0,
     }
+    edge_metric = _make_edge_eval_metric(
+        y_val=y_val, implied_prob_val=implied_prob_val, n_min=n_min
+    )
     booster = xgb.train(
         params,
         dtrain,
         num_boost_round=_NUM_BOOST_ROUND,
         evals=[(dval, "val")],
+        custom_metric=edge_metric,
         early_stopping_rounds=_EARLY_STOPPING_ROUNDS,
         verbose_eval=False,
     )
