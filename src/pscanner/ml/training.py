@@ -19,6 +19,7 @@ import polars as pl
 import structlog
 import xgboost as xgb
 
+from pscanner.categories import Category
 from pscanner.ml.metrics import per_decile_edge_breakdown, realized_edge_metric
 from pscanner.ml.preprocessing import (
     CARRIER_COLS,
@@ -35,6 +36,7 @@ _log = structlog.get_logger(__name__)
 _NUM_BOOST_ROUND = 2000
 _EARLY_STOPPING_ROUNDS = 50
 _BINARY_DECISION_THRESHOLD = 0.5
+_DEFAULT_ACCEPTED_CATEGORIES: tuple[str, ...] = (Category.SPORTS, Category.ESPORTS)
 
 
 def _rss_mb() -> int:
@@ -198,12 +200,29 @@ def evaluate_on_test(
     y_test: np.ndarray,
     implied_prob_test: np.ndarray,
     n_min: int,
+    top_category_test: np.ndarray | None = None,
+    accepted_categories: tuple[str, ...] | None = None,
 ) -> dict[str, object]:
     """Score the booster on the held-out test split.
 
+    Args:
+        booster: Fitted XGBoost booster.
+        X_test: Test feature matrix.
+        y_test: Test labels.
+        implied_prob_test: Implied probabilities per test row.
+        n_min: Anti-overfit guard threshold for ``realized_edge_metric``.
+        top_category_test: Optional string array (parallel to ``y_test``)
+            of per-row ``top_category`` values. When provided together
+            with ``accepted_categories``, an ``edge_filtered`` metric is
+            computed over the accepted-category subset of taken bets.
+        accepted_categories: Category strings to include in the filtered
+            edge computation. Ignored when ``top_category_test`` is None.
+
     Returns:
-        ``{"edge": float, "accuracy": float, "logloss": float,
-        "per_decile": {decile_label: {"n": float, "mean_edge": float}}}``.
+        Dict with keys ``"edge"``, ``"accuracy"``, ``"logloss"``,
+        ``"per_decile"``. When both ``top_category_test`` and
+        ``accepted_categories`` are supplied, also includes
+        ``"edge_filtered"``.
     """
     dtest = xgb.DMatrix(X_test)
     p_test = booster.predict(dtest)
@@ -214,12 +233,39 @@ def evaluate_on_test(
         -(y_test * np.log(p_test + eps) + (1 - y_test) * np.log(1 - p_test + eps)).mean()
     )
     decile = per_decile_edge_breakdown(y_test, p_test, implied_prob_test)
-    return {
+    result: dict[str, object] = {
         "edge": edge,
         "accuracy": accuracy,
         "logloss": logloss,
         "per_decile": decile,
     }
+    if top_category_test is not None and accepted_categories is not None:
+        cat_mask = np.isin(top_category_test, accepted_categories)
+        # Apply category mask first, then let realized_edge_metric handle the
+        # take-mask + n_min sentinel uniformly with the unfiltered branch.
+        result["edge_filtered"] = realized_edge_metric(
+            y_test[cat_mask],
+            p_test[cat_mask],
+            implied_prob_test[cat_mask],
+            n_min=n_min,
+        )
+    return result
+
+
+def _extract_top_category(df: pl.DataFrame) -> np.ndarray:
+    """Return ``top_category`` values as a numpy string array.
+
+    Null entries become the empty string ``""`` so ``np.isin`` comparisons
+    against real category names always return ``False`` for them.
+
+    Args:
+        df: A Polars DataFrame that still has the ``top_category`` column
+            (i.e. before the leakage-drop or one-hot encoding step).
+
+    Returns:
+        1D numpy array of dtype ``object`` (Python str), one entry per row.
+    """
+    return df["top_category"].fill_null("").to_numpy()
 
 
 def _run_optimization_phase(
@@ -292,6 +338,7 @@ def _dump_artifacts(
     booster: xgb.Booster,
     encoder: OneHotEncoder,
     metrics: dict[str, object],
+    accepted_categories: tuple[str, ...],
 ) -> None:
     """Write model, preprocessor, and metrics to ``output_dir``."""
     booster.save_model(str(output_dir / "model.json"))
@@ -299,6 +346,7 @@ def _dump_artifacts(
         "leakage_cols": list(LEAKAGE_COLS),
         "carrier_cols": list(CARRIER_COLS),
         "encoder": encoder.to_json(),
+        "accepted_categories": list(accepted_categories),
     }
     (output_dir / "preprocessor.json").write_text(json.dumps(preprocessor, indent=2))
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
@@ -312,6 +360,7 @@ def run_study(
     n_min: int,
     seed: int,
     device: str = "cpu",
+    accepted_categories: tuple[str, ...] | None = None,
 ) -> None:
     """End-to-end study: preprocess, run Optuna, refit, evaluate, dump.
 
@@ -328,7 +377,15 @@ def run_study(
         device: XGBoost device, ``"cpu"`` or ``"cuda"``. CPU is the
             default so the test suite stays runnable on hosts without
             an NVIDIA GPU.
+        accepted_categories: Category strings to gate on at inference
+            time. Written to ``preprocessor.json`` as metadata; does
+            NOT filter training data. Defaults to
+            ``_DEFAULT_ACCEPTED_CATEGORIES`` when ``None``.
     """
+    resolved_categories = (
+        accepted_categories if accepted_categories is not None else _DEFAULT_ACCEPTED_CATEGORIES
+    )
+
     output_dir.mkdir(parents=True, exist_ok=True)
     np.random.seed(seed)
 
@@ -345,6 +402,7 @@ def run_study(
     x_train, y_train, _ = build_feature_matrix(train_df)
     x_val, y_val, implied_val = build_feature_matrix(val_df)
     x_test, y_test, implied_test = build_feature_matrix(test_df)
+    top_category_test = _extract_top_category(splits.test)
     _log.info("ml.mem", phase="post_build_feature_matrix", rss_mb=_rss_mb())
 
     rates = {
@@ -388,9 +446,11 @@ def run_study(
         y_test=y_test,
         implied_prob_test=implied_test,
         n_min=n_min,
+        top_category_test=top_category_test,
+        accepted_categories=resolved_categories,
     )
 
-    metrics = {
+    metrics: dict[str, object] = {
         "best_params": best_params,
         "best_iteration": best_iteration,
         "best_val_edge": best_value,
@@ -400,8 +460,11 @@ def run_study(
         "test_per_decile": test_metrics["per_decile"],
         "split_label_won_rate": rates,
         "seed": seed,
+        "accepted_categories": list(resolved_categories),
     }
-    _dump_artifacts(output_dir, booster, encoder, metrics)
+    if "edge_filtered" in test_metrics:
+        metrics["test_edge_filtered"] = test_metrics["edge_filtered"]
+    _dump_artifacts(output_dir, booster, encoder, metrics, resolved_categories)
     _log.info(
         "ml.study_complete",
         best_val_edge=metrics["best_val_edge"],

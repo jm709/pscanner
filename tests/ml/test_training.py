@@ -253,6 +253,144 @@ def test_run_study_n_jobs_2_completes_without_lock_errors(
     assert (output_dir / "metrics.json").exists()
 
 
+def _toy_booster(
+    seed: int = 42,
+) -> tuple[xgb.Booster, np.ndarray, np.ndarray, np.ndarray]:
+    """Build a minimal booster + test arrays for evaluate_on_test tests."""
+    X_train, y_train, X_val, y_val, _ = _toy_problem(seed=seed)  # noqa: N806 -- ML matrix convention
+    params = {
+        "learning_rate": 0.1,
+        "max_depth": 3,
+        "min_child_weight": 1.0,
+        "subsample": 0.9,
+        "colsample_bytree": 0.9,
+        "reg_alpha": 1.0,
+        "reg_lambda": 1.0,
+        "gamma": 0.1,
+    }
+    booster = fit_winning_model(
+        best_params=params,
+        best_iteration=20,
+        X_train=X_train,
+        y_train=y_train,
+        seed=seed,
+    )
+    implied_test = np.full(len(y_val), 0.5)
+    return booster, X_val, y_val, implied_test
+
+
+def test_evaluate_on_test_returns_edge_filtered_when_categories_provided() -> None:
+    """edge_filtered restricts realized edge to taken bets in accepted categories.
+
+    Manual computation: predictions and labels are constructed so 4 of the 6
+    test rows fall in the 'sports' category, all of those have pred > implied,
+    and we know the resulting edge by direct calculation.
+    """
+    X_train, y_train, _, _, _ = _toy_problem()  # noqa: N806
+    booster = fit_winning_model(
+        best_params={
+            "learning_rate": 0.1,
+            "max_depth": 3,
+            "min_child_weight": 1.0,
+            "subsample": 0.9,
+            "colsample_bytree": 0.9,
+            "reg_alpha": 1.0,
+            "reg_lambda": 1.0,
+            "gamma": 0.1,
+        },
+        best_iteration=10,
+        X_train=X_train,
+        y_train=y_train,
+        seed=42,
+    )
+
+    # Construct a small test set with known categories.
+    X_test = np.zeros((6, 3))  # noqa: N806
+    X_test[:, 0] = [3.0, 3.0, 3.0, 3.0, -3.0, -3.0]  # 4 strong-positive, 2 negative
+    y_test = np.array([1, 1, 0, 1, 0, 0])
+    implied_test = np.full(6, 0.4)
+    categories = np.array(["sports", "sports", "thesis", "esports", "thesis", "sports"])
+
+    accepted = ("sports", "esports")
+
+    result = evaluate_on_test(
+        booster=booster,
+        X_test=X_test,
+        y_test=y_test,
+        implied_prob_test=implied_test,
+        n_min=1,
+        top_category_test=categories,
+        accepted_categories=accepted,
+    )
+
+    # Compute expected edge_filtered by hand using the same mask logic.
+    p_test = booster.predict(xgb.DMatrix(X_test))
+    cat_mask = np.isin(categories, accepted)
+    take_mask = p_test > implied_test
+    combined = cat_mask & take_mask
+
+    assert combined.sum() >= 1  # sanity: deterministic positive predictions
+    expected = float((y_test[combined] - implied_test[combined]).mean())
+    assert result["edge_filtered"] == pytest.approx(expected)
+    # And edge (no category filter) should differ
+    assert result["edge"] != result["edge_filtered"]
+
+
+def test_evaluate_on_test_omits_edge_filtered_when_categories_none() -> None:
+    booster, X_val, y_val, implied_test = _toy_booster()  # noqa: N806 -- ML matrix convention
+    result = evaluate_on_test(
+        booster,
+        X_val,
+        y_val,
+        implied_test,
+        n_min=5,
+        top_category_test=None,
+        accepted_categories=None,
+    )
+    assert "edge_filtered" not in result
+
+
+def test_run_study_writes_accepted_categories_to_preprocessor_json(
+    tmp_path: Path,
+    make_synthetic_examples: Callable[..., pl.DataFrame],
+) -> None:
+    df = make_synthetic_examples(n_markets=20, rows_per_market=15, seed=3)
+    output_dir = tmp_path / "run_cats"
+    run_study(
+        df=df,
+        output_dir=output_dir,
+        n_trials=2,
+        n_jobs=1,
+        n_min=5,
+        seed=42,
+    )
+    preprocessor = json.loads((output_dir / "preprocessor.json").read_text())
+    assert "accepted_categories" in preprocessor
+    assert preprocessor["accepted_categories"] == ["sports", "esports"]
+
+
+def test_run_study_writes_test_edge_filtered_to_metrics_json(
+    tmp_path: Path,
+    make_synthetic_examples: Callable[..., pl.DataFrame],
+) -> None:
+    df = make_synthetic_examples(n_markets=20, rows_per_market=15, seed=3)
+    output_dir = tmp_path / "run_filtered"
+    run_study(
+        df=df,
+        output_dir=output_dir,
+        n_trials=2,
+        n_jobs=1,
+        n_min=5,
+        seed=42,
+    )
+    metrics = json.loads((output_dir / "metrics.json").read_text())
+    assert "test_edge_filtered" in metrics
+    assert isinstance(metrics["test_edge_filtered"], float)
+    assert -1.0 <= metrics["test_edge_filtered"] <= 1.0
+    assert "accepted_categories" in metrics
+    assert metrics["accepted_categories"] == ["sports", "esports"]
+
+
 def test_run_study_is_deterministic_under_same_seed(
     tmp_path: Path,
     make_synthetic_examples: Callable[..., pl.DataFrame],
@@ -279,3 +417,53 @@ def test_run_study_is_deterministic_under_same_seed(
     assert a["test_edge"] == b["test_edge"]
     assert a["test_accuracy"] == b["test_accuracy"]
     assert a["test_logloss"] == b["test_logloss"]
+
+
+def test_evaluate_on_test_omits_edge_filtered_when_only_one_kwarg_set() -> None:
+    """Partial application (one kwarg None) silently skips edge_filtered.
+
+    The gate is AND, not OR — both top_category_test and accepted_categories
+    must be provided. Pinning this so a future refactor doesn't quietly flip
+    the gate to OR.
+    """
+    X_train, y_train, X_val, y_val, implied_val = _toy_problem()  # noqa: N806
+    booster = fit_winning_model(
+        best_params={
+            "learning_rate": 0.1,
+            "max_depth": 3,
+            "min_child_weight": 1.0,
+            "subsample": 0.9,
+            "colsample_bytree": 0.9,
+            "reg_alpha": 1.0,
+            "reg_lambda": 1.0,
+            "gamma": 0.1,
+        },
+        best_iteration=10,
+        X_train=X_train,
+        y_train=y_train,
+        seed=42,
+    )
+
+    # top_category_test set, accepted_categories=None
+    result_a = evaluate_on_test(
+        booster=booster,
+        X_test=X_val,
+        y_test=y_val,
+        implied_prob_test=implied_val,
+        n_min=5,
+        top_category_test=np.array(["sports"] * len(y_val)),
+        accepted_categories=None,
+    )
+    assert "edge_filtered" not in result_a
+
+    # accepted_categories set, top_category_test=None
+    result_b = evaluate_on_test(
+        booster=booster,
+        X_test=X_val,
+        y_test=y_val,
+        implied_prob_test=implied_val,
+        n_min=5,
+        top_category_test=None,
+        accepted_categories=("sports",),
+    )
+    assert "edge_filtered" not in result_b
