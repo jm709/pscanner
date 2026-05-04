@@ -1,8 +1,13 @@
 # pscanner — Claude Code notes
 
-Polymarket data-collection daemon. Python 3.13 + uv + ruff + ty + pytest.
-~6K LOC, 18 SQLite tables, 8 detectors, 7 collectors, 5 paper-trading
-evaluators. 734 tests.
+Multi-platform prediction-market data daemon. Polymarket is the primary
+source (live detectors, on-chain trade backfill, paper trading); Kalshi
+and Manifold ship Stage 1 REST/WS clients without detector wiring yet.
+Python 3.13 + uv + ruff + ty + pytest. ~19K LOC, 30 SQLite tables,
+8 detectors, 5 paper-trading evaluators, 3 platform clients. ~1011 tests.
+
+Multi-platform architecture decisions live in
+`docs/superpowers/specs/2026-05-04-multi-platform-rfc.md` (#35).
 
 ## Quick verify
 `uv run ruff check . && uv run ruff format --check . && uv run ty check && uv run pytest -q`
@@ -16,7 +21,7 @@ evaluators. 734 tests.
 - Public WS market channel emits `book` + `price_change` ONLY — never `trade` events with wallet info. Per-wallet trades require authenticated `/ws/user` (we don't use it; trade collection is REST-polled `/activity`).
 - `WsBookMessage`: `bids`/`asks`/`last_trade_price`/`price_changes` are **top-level fields**, not under `msg.data` (which is a freeform fallback that's empty in practice).
 - Default `gamma_rpm = 50`, `data_rpm = 50`. Cold-start bottlenecks: smart-money refresh + events catalog sweep both compete for gamma budget; cluster + smart-money depend on watched-wallet `wallet_first_seen` populated by TradeCollector.
-- `/trades` and `/activity` REST cap at `offset=3000` (server: `"max historical activity offset of 3000 exceeded"`, newest-first sort). No documented `before`/`after`/`cursor` workaround — verified May 2026 against ~15 parameter variants and four candidate alt-endpoints. Beyond 3000 trades requires on-chain via Polygon RPC (`OrderFilled` events from CTF Exchange `0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E`). Phase 1 of #42 landed the decoder + `asset_index` resolver; Phase 2 (RPC client + CLI) is queued.
+- `/trades` and `/activity` REST cap at `offset=3000` (server: `"max historical activity offset of 3000 exceeded"`, newest-first sort). No documented `before`/`after`/`cursor` workaround — verified May 2026 against ~15 parameter variants and four candidate alt-endpoints. Beyond 3000 trades requires on-chain via Polygon RPC (`OrderFilled` events from CTF Exchange `0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E`). Phase 1 of #42 landed the decoder + `asset_index` resolver; Phase 2 (`pscanner corpus onchain-backfill` and `onchain-backfill-targeted` via `eth_getLogs`) is also live. Phase 3 (subgraph-driven backfill via The Graph; #46) is in flight on `feat/corpus-subgraph-phase3` — not yet on main. The subgraph indexer's earliest event is `1744013119` (2025-04-07), so pre-cutoff markets still need the eth_getLogs path.
 
 ## Manifold API quirks (will bite you)
 - **Mana-denominated**: bets are in mana (play money), NOT USD. Never aggregate Manifold bet amounts into real-money totals or mix with Polymarket/Kalshi volumes.
@@ -69,6 +74,20 @@ evaluators. 734 tests.
 - **Constant sizing**: paper trades size off `starting_bankroll_usd` (constant), NOT running NAV. The `bankroll_exhausted` gate is removed by design — research config trades infinite paper bankroll for max data collection. NAV is still recorded on `paper_trades.nav_after_usd` for analysis (can be negative).
 - **Velocity twin trades**: every alert spawns 2 ParsedSignals (`rule_variant="follow"` + `"fade"`) by walking `MarketCacheRepo.get_by_condition_id().outcomes` to find the opposing-side outcome name. Cache miss → returns `[]` (skip both). Each side sized at half the normal fraction (default 0.0025 per side, 0.5% pair total).
 - **Severity ranking**: `SEVERITY_RANK = {"low": 0, "med": 1, "high": 2}` lives in `pscanner.alerts.models`. Evaluator gates use strict `[]` lookup on the configured `min_severity` (config-validated Literal) and lenient `.get(severity, -1)` on alert-provided values.
+- **Multi-platform module shape (per RFC #35)**: each platform owns its own subpackage (`pscanner.poly`, `pscanner.kalshi`, `pscanner.manifold`) with parallel `ids.py` (per-platform `NewType[str]` modules; no shared `MarketId` supertype), `client.py`, `models.py`, `db.py`, `repos.py`. Daemon-side tables are namespaced (`kalshi_*`, `manifold_*`) — no `platform` column on existing Polymarket tables. The corpus-side `platform` column on shared tables is RFC PR A, not yet implemented. Stage 1 PRs (#36, #37) only ship the data-layer; trade collectors and detector instances per platform are deferred.
+
+## ML training pipeline (`pscanner.ml`)
+- **Optimization target**: `realized_edge_metric` from `pscanner.ml.metrics` — mean of `(label_won - implied_prob)` over taken bets (where `pred > implied`). Returns `-1.0` sentinel when fewer than `n_min` bets pass the gate (default 20) so trial configs that overfit a tiny lucky subset get penalized.
+- **Inner-loop early-stopping uses the edge metric directly** (#43). `_make_edge_eval_metric` builds an xgboost `custom_metric` returning `("realized_edge", -edge)` (negated so xgboost's default minimize acts as edge-maximize). The `n_min` flat region becomes `+1.0` after negation; xgboost reads it as the worst possible value and continues training rather than stopping in the plateau. `eval_metric=logloss` stays in params as a calibration sanity baseline in train logs.
+- **Outer Optuna loop** maximizes `realized_edge_metric` directly via `direction="maximize"`. The two loops are now aligned — previously the inner loop optimized logloss and Optuna optimized edge, picking trials' `best_iteration` from the wrong metric.
+- **Category-aware filter metadata** (#41): `accepted_categories` field on `preprocessor.json` (default `(Category.SPORTS, Category.ESPORTS)`) plus `test_edge_filtered` in `metrics.json`. The filter is purely stored metadata — no inference path consumes it yet. When the gate model gets deployed, the inference path reads `accepted_categories` and gates copy signals on `top_category` membership. Out-of-time analysis showed sports + esports carry ~11% gross edge while thesis bleeds ~1% despite high classification accuracy — winners are already priced in.
+- **Wallet-quality interaction features** (#44): four new columns on `training_examples` give the depth-3 booster "free depth" on the wallet-quality dimension:
+  - `edge_confidence_weighted = realized_edge_pp * min(1, prior_resolved_buys/20)`
+  - `win_rate_confidence_weighted = (win_rate - 0.5) * min(1, prior_resolved_buys/20)`
+  - `is_high_quality_wallet = (prior_resolved_buys >= 20) AND (win_rate > 0.55)`
+  - `bet_size_relative_to_history = bet_size_usd / median_bet_size_usd` — always 1.0 in v1 (the streaming feature provider doesn't yet maintain a running median; future v2 will)
+  - 77% of wallets have ≤5 trades, so per-wallet edge estimates are noise. Pre-multiplying with sample-size confidence gives the tree a clean signal it currently has to derive through implicit splits.
+- **Build features**: `pscanner corpus build-features --rebuild` (re)builds `training_examples` from `corpus_trades` + `market_resolutions`. The training pipeline reads `training_examples` via `pscanner.ml.preprocessing.load_dataset` which discovers columns dynamically via `PRAGMA table_info`, so adding new columns to the build pipeline doesn't require updating ML code.
 
 ## Build orchestration (when shipping multi-issue waves)
 - Use `git worktree add /home/macph/projects/pscanner-worktrees/<name> -b <branch>` for parallel sub-agents (per global standards).
@@ -79,8 +98,11 @@ evaluators. 734 tests.
 - `pscanner run` (daemon) / `pscanner run --once` (single pass) / `pscanner status` (recent alerts)
 - `pscanner watch <addr> [--reason TEXT]` / `pscanner unwatch <addr>` / `pscanner watchlist`
 - `pscanner paper status` — aggregate NAV + per-wallet PnL + per-source breakdown table (one row per `(triggering_alert_detector, rule_variant)`).
+- `pscanner corpus backfill` / `pscanner corpus refresh` — pull closed-market trade history into the corpus DB via gamma + data REST.
+- `pscanner corpus onchain-backfill` / `pscanner corpus onchain-backfill-targeted` — Phase 2 on-chain trade backfill via `eth_getLogs`. The targeted variant walks per-market trade-time windows; the naive variant walks the full deployment-to-head range.
+- `pscanner corpus build-features [--rebuild]` — (re)build `training_examples` from `corpus_trades` + `market_resolutions`.
 - `pscanner ml train --device cuda --n-jobs 1` runs xgboost training on a CUDA GPU (~6.5 min for 100 trials). `--n-jobs 1` is required on GPU — parallel Optuna trials would compete for the 8 GB VRAM. CPU path stays default; the laptop dev host OOMs at ~7.4 GB on the full corpus (no GPU + 7.6 GB host). See `LOCAL_NOTES.md` (gitignored) for the desktop training-box workflow.
-- DB: `./data/pscanner.sqlite3`. Drop the file for a clean smoke run.
+- DBs: `./data/pscanner.sqlite3` (daemon) and `./data/corpus.sqlite3` (corpus). Drop either for a clean smoke run of its respective domain.
 - Smoke verification idiom: `rm -f data/pscanner.sqlite3 && timeout NNNN uv run pscanner run > /tmp/smoke.log 2>&1; echo exit=$?`
 - **`scripts/expand_cluster.py`**: cluster expansion via fingerprint matching. Reads seeds' trades from local `wallet_trades`; if seeds are freshly watchlisted (no local data yet) pre-populate via `DataClient.get_activity` first. The `hi_price_rate` field in the output is sampled from the seed-overlap window only — for true behavioral fingerprint, fetch `/positions?user=X&closed=true` and inspect `avg_price` distribution.
 
@@ -130,3 +152,7 @@ Surfaced 2026-04-28 during expanded-paper-trading smoke. 50-day creation span, 4
 - **`tick_stream.subscriber_queue_full` regression in long runs.** A 6h smoke surfaced 2,708 drops over a 1h 42m mid-run window (~28/min sustained). `WorkerSink` decoupled the alert-emit hot path but velocity's per-tick consume work (record + window math + cache lookup) is still synchronous. Mitigations sketched in `docs/superpowers/specs/2026-04-27-paper-trading-expansion-design.md` post-deployment-observations section. Not blocking.
 - **`paper status` rendering polish.** When `resolved_count=0`, `win_rate` shows `0.0%` (indistinguishable from "all losses"). Render as `-` instead. Also: the per-wallet PnL panel groups all non-smart_money entries under an unlabeled `(no wallet)` row; should be labeled or merged with the per-source breakdown.
 - **Monotone evaluator can produce orphaned single legs** when one of the two pair `condition_id`s isn't yet in `market_cache`. The `_backfill_market_cache` recovery in `PaperTrader._resolve_outcome` runs per-leg, so a missing slug for one market won't block the other. ~25% of the live-smoke alerts hit this (1 of 4). Acceptable for research mode; if it becomes a measurement problem, add a "both-or-neither" gate in `_run_pipeline` for paired-variant evaluators.
+- **`_TokenBucket` duplicated across 4 modules** (`pscanner.poly.http`, `pscanner.poly.onchain_rpc`, `pscanner.kalshi.client`, `pscanner.manifold.client`). Extract to a shared `pscanner.util.rate_limit` module before the four copies diverge.
+- **`manifold_bets` schema omits `shares` and `fees`.** `ManifoldBet.shares` / `.fees` are `None` after a DB round-trip. Add columns to the schema before relying on those fields for CFMM position-sizing analysis.
+- **Phase 3 corpus subgraph backfill (#46)** is on local `feat/corpus-subgraph-phase3` and not yet on main. Live validation is the gate. Once it lands, the eth_getLogs corpus path (`onchain-backfill`, `onchain-backfill-targeted`, supporting modules) gets deleted in a follow-up commit.
+- **RFC PR A** (`platform` column on shared corpus tables) is pending — would let the ML pipeline aggregate Kalshi + Manifold + Polymarket training rows together. Stage 1 platform PRs (#36, #37) deferred this.
