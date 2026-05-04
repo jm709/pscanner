@@ -19,6 +19,7 @@ import polars as pl
 import structlog
 import xgboost as xgb
 
+from pscanner.categories import Category
 from pscanner.ml.metrics import per_decile_edge_breakdown, realized_edge_metric
 from pscanner.ml.preprocessing import (
     CARRIER_COLS,
@@ -35,7 +36,7 @@ _log = structlog.get_logger(__name__)
 _NUM_BOOST_ROUND = 2000
 _EARLY_STOPPING_ROUNDS = 50
 _BINARY_DECISION_THRESHOLD = 0.5
-_DEFAULT_ACCEPTED_CATEGORIES: tuple[str, ...] = ("sports", "esports")
+_DEFAULT_ACCEPTED_CATEGORIES: tuple[str, ...] = (Category.SPORTS, Category.ESPORTS)
 
 
 def _rss_mb() -> int:
@@ -240,15 +241,31 @@ def evaluate_on_test(
     }
     if top_category_test is not None and accepted_categories is not None:
         cat_mask = np.isin(top_category_test, accepted_categories)
-        take_mask = p_test > implied_prob_test
-        combined_mask = cat_mask & take_mask
-        if int(combined_mask.sum()) < n_min:
-            result["edge_filtered"] = -1.0
-        else:
-            result["edge_filtered"] = float(
-                (y_test[combined_mask] - implied_prob_test[combined_mask]).mean()
-            )
+        # Apply category mask first, then let realized_edge_metric handle the
+        # take-mask + n_min sentinel uniformly with the unfiltered branch.
+        result["edge_filtered"] = realized_edge_metric(
+            y_test[cat_mask],
+            p_test[cat_mask],
+            implied_prob_test[cat_mask],
+            n_min=n_min,
+        )
     return result
+
+
+def _extract_top_category(df: pl.DataFrame) -> np.ndarray:
+    """Return ``top_category`` values as a numpy string array.
+
+    Null entries become the empty string ``""`` so ``np.isin`` comparisons
+    against real category names always return ``False`` for them.
+
+    Args:
+        df: A Polars DataFrame that still has the ``top_category`` column
+            (i.e. before the leakage-drop or one-hot encoding step).
+
+    Returns:
+        1D numpy array of dtype ``object`` (Python str), one entry per row.
+    """
+    return df["top_category"].fill_null("").to_numpy()
 
 
 def _run_optimization_phase(
@@ -333,22 +350,6 @@ def _dump_artifacts(
     }
     (output_dir / "preprocessor.json").write_text(json.dumps(preprocessor, indent=2))
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
-
-
-def _extract_top_category(df: pl.DataFrame) -> np.ndarray:
-    """Return ``top_category`` values as a numpy string array.
-
-    Null entries become the empty string ``""`` so ``np.isin`` comparisons
-    against real category names always return ``False`` for them.
-
-    Args:
-        df: A Polars DataFrame that still has the ``top_category`` column
-            (i.e. before the leakage-drop or one-hot encoding step).
-
-    Returns:
-        1D numpy array of dtype ``object`` (Python str), one entry per row.
-    """
-    return df["top_category"].fill_null("").to_numpy()
 
 
 def run_study(
