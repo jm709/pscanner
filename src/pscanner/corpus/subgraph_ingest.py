@@ -255,6 +255,7 @@ class _PendingMarket:
 
 
 def _load_pending_markets(conn: sqlite3.Connection, *, limit: int | None) -> list[_PendingMarket]:
+    """Return truncated, unprocessed markets ordered by descending volume."""
     sql = """
         SELECT condition_id,
                COALESCE(market_slug, '') AS market_slug,
@@ -278,6 +279,7 @@ def _load_pending_markets(conn: sqlite3.Connection, *, limit: int | None) -> lis
 
 
 def _load_market_asset_ids(conn: sqlite3.Connection, condition_id: str) -> list[str]:
+    """Return every ``asset_id`` mapped to ``condition_id`` in ``asset_index``."""
     rows = conn.execute(
         "SELECT asset_id FROM asset_index WHERE condition_id = ?", (condition_id,)
     ).fetchall()
@@ -289,21 +291,31 @@ def _mark_processed(
     condition_id: str,
     *,
     now_ts: int,
+    truncation_threshold: int,
 ) -> int:
-    """Persist post-backfill state; returns the new on-chain trade count."""
+    """Persist post-backfill state for one market. Returns updated trade count.
+
+    Updates ``onchain_processed_at``, ``onchain_trades_count``, and
+    ``truncated_at_offset_cap`` in one atomic write. The flag is cleared
+    iff ``count >= truncation_threshold``. Mirrors the per-market
+    write in ``onchain_targeted._mark_processed`` so a mid-run crash
+    loses at most the one market in flight.
+    """
     count = int(
         conn.execute(
             "SELECT COUNT(*) FROM corpus_trades WHERE condition_id = ?", (condition_id,)
         ).fetchone()[0]
     )
+    new_flag = 0 if count >= truncation_threshold else 1
     conn.execute(
         """
         UPDATE corpus_markets
         SET onchain_processed_at = ?,
-            onchain_trades_count = ?
+            onchain_trades_count = ?,
+            truncated_at_offset_cap = ?
         WHERE condition_id = ?
         """,
-        (now_ts, count, condition_id),
+        (now_ts, count, new_flag, condition_id),
     )
     conn.commit()
     return count
@@ -341,6 +353,10 @@ async def _backfill_one_market(
             skipped_unresolvable += 1
             continue
         if trade.condition_id != condition_id:
+            # Defensive: iter_market_trades filters by asset_ids and each asset_id
+            # maps to exactly one condition_id via asset_index, so a mismatch only
+            # occurs if the asset_index has a stale (asset_id → condition_id) row.
+            # Drop silently — that's an asset_index integrity issue, not ours.
             continue
         pending.append(trade)
 
@@ -354,6 +370,7 @@ async def run_subgraph_backfill(
     client: SubgraphClient,
     page_size: int = _MAX_PAGE_SIZE,
     limit: int | None = None,
+    truncation_threshold: int = 3000,
 ) -> SubgraphRunSummary:
     """Process every truncated, unprocessed market via the subgraph.
 
@@ -362,6 +379,9 @@ async def run_subgraph_backfill(
         client: Open ``SubgraphClient``.
         page_size: GraphQL ``first:`` per query (max 1000).
         limit: Process at most ``N`` markets in this run.
+        truncation_threshold: Trade count at or above which
+            ``truncated_at_offset_cap`` is cleared for a market. Mirrors
+            ``clear_truncation_flags``'s default of 3000.
     """
     pending = _load_pending_markets(conn, limit=limit)
     _LOG.info("subgraph.start", markets=len(pending))
@@ -385,7 +405,12 @@ async def run_subgraph_backfill(
             total_inserted += inserted
             total_unsupported += unsup
             total_unresolvable += unres
-            count = _mark_processed(conn, market.condition_id, now_ts=int(time.time()))
+            count = _mark_processed(
+                conn,
+                market.condition_id,
+                now_ts=int(time.time()),
+                truncation_threshold=truncation_threshold,
+            )
             processed += 1
             _LOG.info(
                 "subgraph.market_done",

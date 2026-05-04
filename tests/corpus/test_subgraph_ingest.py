@@ -484,3 +484,85 @@ async def test_run_subgraph_backfill_respects_limit(
         await client.aclose()
 
     assert summary.markets_processed == 1
+
+    # Volume-ordering: MARKET_A (42k) should run before MARKET_B (10k),
+    # so with limit=1 only MARKET_A gets onchain_processed_at set.
+    row_a = conn.execute(
+        "SELECT onchain_processed_at FROM corpus_markets WHERE condition_id = ?",
+        ("0xMARKET_A",),
+    ).fetchone()
+    row_b = conn.execute(
+        "SELECT onchain_processed_at FROM corpus_markets WHERE condition_id = ?",
+        ("0xMARKET_B",),
+    ).fetchone()
+    assert row_a["onchain_processed_at"] is not None
+    assert row_b["onchain_processed_at"] is None
+
+
+@respx.mock
+async def test_run_subgraph_backfill_records_market_failure_and_continues(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A market whose paginator raises is recorded as failed, run continues."""
+    # Add a second pending market so we can verify the run continues past the failure.
+    CorpusMarketsRepo(conn).insert_pending(
+        CorpusMarket(
+            condition_id="0xMARKET_B",
+            event_slug="event-b",
+            category=None,
+            closed_at=1_700_001_000,
+            total_volume_usd=10_000.0,
+            enumerated_at=1_700_000_000,
+            market_slug="market-b",
+        )
+    )
+    conn.execute(
+        "UPDATE corpus_markets SET truncated_at_offset_cap = 1, backfill_state = 'complete' "
+        "WHERE condition_id = ?",
+        ("0xMARKET_B",),
+    )
+    conn.commit()
+    AssetIndexRepo(conn).upsert(
+        AssetEntry(asset_id="333", condition_id="0xMARKET_B", outcome_side="YES", outcome_index=0)
+    )
+
+    # First call raises (the highest-volume market, MARKET_A — volume 42k).
+    # Second call succeeds with empty result (MARKET_B — volume 10k).
+    call_count = {"n": 0}
+
+    async def fake_iter(**kwargs: object):  # type: ignore[no-untyped-def]
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("simulated subgraph failure")
+        # Empty async generator
+        if False:
+            yield None  # pragma: no cover
+
+    monkeypatch.setattr("pscanner.corpus.subgraph_ingest.iter_market_trades", fake_iter)
+
+    respx.post(_GATEWAY_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"orderFilledEvents": []}})
+    )
+
+    client = SubgraphClient(url=_GATEWAY_URL, rpm=600)
+    try:
+        summary = await run_subgraph_backfill(conn=conn, client=client)
+    finally:
+        await client.aclose()
+
+    assert summary.markets_failed == 1
+    assert summary.markets_processed == 1  # the second market still processed
+
+    # Failed market should NOT have onchain_processed_at set
+    row_a = conn.execute(
+        "SELECT onchain_processed_at FROM corpus_markets WHERE condition_id = ?",
+        ("0xMARKET_A",),
+    ).fetchone()
+    assert row_a["onchain_processed_at"] is None
+
+    # Successful market SHOULD
+    row_b = conn.execute(
+        "SELECT onchain_processed_at FROM corpus_markets WHERE condition_id = ?",
+        ("0xMARKET_B",),
+    ).fetchone()
+    assert row_b["onchain_processed_at"] is not None
