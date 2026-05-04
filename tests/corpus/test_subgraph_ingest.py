@@ -214,6 +214,16 @@ async def test_iter_market_trades_short_first_page_exits_without_second_query() 
     assert side_calls == {"maker": 1, "taker": 1}
 
 
+@pytest.mark.parametrize("bad_size", [0, -1, 1001])
+async def test_iter_market_trades_rejects_invalid_page_size(bad_size: int) -> None:
+    """page_size must be in 1..1000 (subgraph hard limit)."""
+    client = AsyncMock()
+    with pytest.raises(ValueError, match="page_size must be in 1"):
+        async for _ in iter_market_trades(client=client, asset_ids=["111"], page_size=bad_size):
+            pass
+    client.query.assert_not_called()
+
+
 def _row(
     *, id_: str, maker_asset: str, taker_asset: str, making: int, taking: int
 ) -> dict[str, str]:

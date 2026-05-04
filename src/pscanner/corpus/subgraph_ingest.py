@@ -15,6 +15,7 @@ from pscanner.poly.onchain import OrderFilledEvent
 from pscanner.poly.subgraph import SubgraphClient
 
 _REQUIRED_KEYS = (
+    "id",  # consumed by _paginate_side (Task 4) cursor logic, not by the adapter
     "transactionHash",
     "timestamp",  # consumed by iter_market_trades (Task 4), not by the adapter
     "orderHash",
@@ -96,6 +97,11 @@ def subgraph_row_to_event(row: Mapping[str, object]) -> OrderFilledEvent:
 # The Graph's hard cap on a single page of results.
 _MAX_PAGE_SIZE = 1000
 
+# Two separate query constants rather than one template: the filter field
+# name (makerAssetId_in vs takerAssetId_in) is a structural part of the
+# GraphQL document, not a $variable, so it can't be parameterised. Keeping
+# them as separate string literals avoids any string-formatting on GraphQL
+# document text — which would be a query-injection foot-gun.
 _TRADES_QUERY_MAKER_SIDE = """
 query MarketTradesMakerSide($assets: [String!]!, $cursor: String!, $first: Int!) {
   orderFilledEvents(
