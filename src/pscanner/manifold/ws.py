@@ -52,6 +52,12 @@ class ManifoldStream:
 
     Unknown-topic messages that arrive on the socket are silently dropped,
     so callers don't need to handle unexpected event types.
+
+    On connection loss the iteration raises ``ManifoldStreamError``; callers
+    are responsible for wrapping the stream in their own reconnect loop. This
+    is a deliberate divergence from the auto-reconnecting ``poly.clob_ws``
+    pattern — the Manifold WS protocol's frame-loss-on-reconnect semantics
+    make blind retry problematic, so we surface drops to let callers decide.
     """
 
     def __init__(

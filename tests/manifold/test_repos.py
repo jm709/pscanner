@@ -178,10 +178,8 @@ def test_markets_null_close_time_last(mdb: sqlite3.Connection) -> None:
     )
     repo.insert_or_replace(m_no_time)
     repo.insert_or_replace(m_with_time)
-    from pscanner.manifold.ids import ManifoldMarketId as MID
-
     ids = [m.id for m in repo.iter_chronological()]
-    assert ids.index(MID("timed")) < ids.index(MID("notimed"))
+    assert ids.index(ManifoldMarketId("timed")) < ids.index(ManifoldMarketId("notimed"))
 
 
 # ---- ManifoldBetsRepo ----

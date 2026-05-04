@@ -22,3 +22,8 @@ from typing import NewType
 
 ManifoldMarketId = NewType("ManifoldMarketId", str)
 ManifoldUserId = NewType("ManifoldUserId", str)
+# ManifoldSlug is the URL-friendly handle (e.g. "will-trump-be-president"),
+# distinct from ManifoldMarketId which is the opaque hash primary key
+# (e.g. "j3ZE85L2QVxKFP6N3VLs"). Slugs appear in market URLs and search
+# results; IDs are used in all API calls.
+ManifoldSlug = NewType("ManifoldSlug", str)

@@ -96,6 +96,11 @@ class ManifoldBetsRepo:
     """Manage the ``manifold_bets`` table.
 
     Stores individual bets (trades) by their opaque ID. Amounts are in mana.
+
+    Note: ``ManifoldBet.shares`` and ``ManifoldBet.fees`` are NOT persisted by
+    this repo (the table schema omits them). After a DB round-trip both will be
+    ``None``. If a future use case needs CFMM position sizing analysis, add the
+    columns to the schema migration before relying on these fields downstream.
     """
 
     def __init__(self, conn: sqlite3.Connection) -> None:

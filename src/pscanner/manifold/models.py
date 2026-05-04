@@ -14,7 +14,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from pscanner.manifold.ids import ManifoldMarketId, ManifoldUserId
+from pscanner.manifold.ids import ManifoldMarketId, ManifoldSlug, ManifoldUserId
 
 _BASE_CONFIG: ConfigDict = ConfigDict(
     populate_by_name=True,
@@ -38,13 +38,13 @@ class ManifoldMarket(BaseModel):
     outcome_type: str = Field(alias="outcomeType")
     mechanism: str
     prob: float | None = None
-    volume: float
+    volume: float = 0.0
     total_liquidity: float = Field(alias="totalLiquidity", default=0.0)
     is_resolved: bool = Field(alias="isResolved")
     resolution_time: int | None = Field(alias="resolutionTime", default=None)
     close_time: int | None = Field(alias="closeTime", default=None)
     url: str | None = None
-    slug: str | None = None
+    slug: ManifoldSlug | None = None
 
     @property
     def is_binary(self) -> bool:
