@@ -216,6 +216,47 @@ async def test_get_market_trades_with_cursor(client: KalshiClient) -> None:
     assert route.called
 
 
+def _trade(trade_id: str) -> dict[str, str]:
+    """Minimal trade dict with the required fields per KalshiTrade."""
+    return {
+        "trade_id": trade_id,
+        "ticker": "KXFOO-99",
+        "taker_side": "yes",
+        "yes_price_dollars": "0.0900",
+        "no_price_dollars": "0.9100",
+        "count_fp": "1.00",
+        "created_time": "2026-05-04T12:00:00Z",
+    }
+
+
+@respx.mock
+async def test_get_market_trades_paginates_across_two_pages(
+    client: KalshiClient,
+) -> None:
+    """Cursor in the first response feeds into the second call."""
+    page_1 = {"trades": [_trade("t1"), _trade("t2")], "cursor": "page2"}
+    page_2 = {"trades": [_trade("t3"), _trade("t4")], "cursor": ""}
+
+    def _route(request: httpx.Request) -> httpx.Response:
+        if "cursor=page2" in str(request.url):
+            return httpx.Response(200, json=page_2)
+        return httpx.Response(200, json=page_1)
+
+    respx.get(url__regex=r".*/markets/trades.*").mock(side_effect=_route)
+    try:
+        first = await client.get_market_trades(KalshiMarketTicker("KXFOO-99"), limit=2)
+        second = await client.get_market_trades(
+            KalshiMarketTicker("KXFOO-99"), limit=2, cursor=first.cursor
+        )
+    finally:
+        await client.aclose()
+
+    assert len(first.trades) == 2
+    assert first.cursor == "page2"
+    assert len(second.trades) == 2
+    assert second.cursor in ("", None)
+
+
 # ---------------------------------------------------------------------------
 # Retry behaviour
 # ---------------------------------------------------------------------------
