@@ -11,9 +11,11 @@ import httpx
 import pytest
 import respx
 
+from pscanner.corpus import cli as corpus_cli
 from pscanner.corpus.cli import build_corpus_parser, run_corpus_command
 from pscanner.corpus.db import init_corpus_db
 from pscanner.corpus.repos import AssetEntry, AssetIndexRepo
+from pscanner.corpus.subgraph_ingest import SubgraphRunSummary
 
 
 def test_parser_recognises_all_subcommands() -> None:
@@ -22,6 +24,10 @@ def test_parser_recognises_all_subcommands() -> None:
     assert parser.parse_args(["refresh"]).command == "refresh"
     assert parser.parse_args(["build-features"]).command == "build-features"
     assert parser.parse_args(["onchain-backfill"]).command == "onchain-backfill"
+    assert (
+        parser.parse_args(["subgraph-backfill", "--api-key", "k", "--subgraph-id", "abc"]).command
+        == "subgraph-backfill"
+    )
 
 
 def test_parser_supports_rebuild_flag() -> None:
@@ -173,3 +179,62 @@ async def test_run_corpus_command_onchain_backfill_inserts_trade(
     assert len(rows) == 1
     assert rows[0]["bs"] == "BUY"
     assert rows[0]["price"] == pytest.approx(0.50)
+
+
+@pytest.mark.asyncio
+async def test_subgraph_backfill_subcommand_dispatches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`pscanner corpus subgraph-backfill --db ... --api-key X` dispatches the handler."""
+    db_path = tmp_path / "c.sqlite3"
+
+    captured: dict[str, object] = {}
+
+    async def fake_run(*, conn, client, page_size, limit, truncation_threshold=3000):  # type: ignore[no-untyped-def]
+        captured["conn"] = conn
+        captured["client_url"] = client.url
+        captured["client_rpm"] = client.rpm
+        captured["page_size"] = page_size
+        captured["limit"] = limit
+        captured["truncation_threshold"] = truncation_threshold
+        return SubgraphRunSummary(0, 0, 0, 0, 0, 0, 0)
+
+    monkeypatch.setattr(corpus_cli, "run_subgraph_backfill", fake_run)
+
+    rc = await corpus_cli.run_corpus_command(
+        [
+            "subgraph-backfill",
+            "--db",
+            str(db_path),
+            "--api-key",
+            "test-key",
+            "--subgraph-id",
+            "abc123",
+            "--rpm",
+            "120",
+            "--limit",
+            "5",
+        ]
+    )
+    assert rc == 0
+    assert "test-key" in str(captured["client_url"])
+    assert "abc123" in str(captured["client_url"])
+    assert captured["client_rpm"] == 120
+    assert captured["limit"] == 5
+
+
+@pytest.mark.asyncio
+async def test_subgraph_backfill_missing_api_key_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("GRAPH_API_KEY", raising=False)
+    with pytest.raises(SystemExit, match="GRAPH_API_KEY"):
+        await corpus_cli.run_corpus_command(
+            [
+                "subgraph-backfill",
+                "--db",
+                str(tmp_path / "c.sqlite3"),
+                "--subgraph-id",
+                "abc",
+            ]
+        )
