@@ -1,22 +1,36 @@
 # pscanner
 
-Polymarket scanner — a persistent asyncio daemon that watches Polymarket and
-surfaces three actionable trading signals:
+Multi-platform prediction-market data daemon. Polymarket is the primary
+target — live detectors, on-chain trade backfill, paper trading, and an
+xgboost gate model for filtering copy-trade signals. Kalshi and Manifold
+ship Stage 1 data-layer modules (REST/WS clients, schema, repos) without
+detector wiring yet.
 
-1. **Smart money** — high-conviction positions from wallets with proven
-   *edge over the market*. For each candidate's closed positions we compute
-   `edge = outcome - implied_prob_at_entry`; wallets with `mean_edge` and
-   `excess_pnl_usd` above thresholds are tracked, and we then poll their
-   open positions for new entries clearing `new_position_min_usd`.
-2. **Mispricing** — mutex outcomes within an event whose YES prices don't
-   sum to 1.0. A persistent deviation hints at either an arbitrage
-   opportunity or a stale book.
-3. **Whales** — newly-active accounts placing outsized bets on illiquid
-   markets. Fires on each newly-recorded `wallet_trades` row when the
-   trader is a new wallet, the market is small, and the bet is big.
+The Polymarket detector lineup surfaces eight independent signals:
 
-Output goes to a SQLite log at `./data/pscanner.sqlite3` and to a live
-`rich` terminal panel.
+| Detector | Signal |
+|---|---|
+| **Smart money** | High-conviction positions from wallets with proven `mean_edge` and `excess_pnl_usd` above thresholds |
+| **Mispricing** | Mutex outcomes within an event whose YES prices don't sum to 1.0 |
+| **Whales** | New accounts placing outsized bets on illiquid markets |
+| **Velocity** | Sudden price spikes outside normal volatility on liquid markets |
+| **Move attribution** | Decomposes large price moves into the wallets that caused them |
+| **Monotone arbitrage** | Inconsistent prices across events that should monotonically order (e.g. earlier deadline strictly cheaper than later) |
+| **Convergence** | Markets whose outcome is largely settled but price hasn't converged |
+| **Cluster** | Coordinated wallet groups (creation-window cohort + shared-obscure-market graph) |
+
+Each Polymarket signal is also evaluated by `pscanner.strategies.evaluators`
+through five paper-trading evaluators (smart-money, move-attribution,
+velocity, mispricing, monotone) so PnL and edge are tracked end-to-end.
+
+Output goes to two SQLite databases:
+
+- `./data/pscanner.sqlite3` — daemon state: detectors, alerts, watched
+  wallets, market cache, paper trades, Kalshi + Manifold market caches.
+- `./data/corpus.sqlite3` — closed-market trade corpus + ML training
+  examples for the xgboost copy-trade gate.
+
+Plus a live `rich` terminal panel.
 
 ## Install
 
@@ -53,22 +67,31 @@ env var.
 
 ## Querying the data
 
-The SQLite database at `./data/pscanner.sqlite3` exposes nine tables:
+The schema spans 30 tables across the daemon DB (`./data/pscanner.sqlite3`)
+and the corpus DB (`./data/corpus.sqlite3`). The headline tables for
+direct querying:
 
-| Table | Purpose |
-|---|---|
-| `tracked_wallets` | Smart-money wallets with computed edge/PnL metrics. |
-| `wallet_position_snapshots` | Latest position per `(wallet, market, side)` for diff-based new-entry alerts. |
-| `wallet_first_seen` | Cached first-activity metadata for whale-detector age checks. |
-| `market_cache` | Most-recent gamma snapshot of every active market. |
-| `wallet_watchlist` | Wallets enrolled in the data-collection pipeline. |
-| `wallet_trades` | Append-only confirmed trade fills per watched wallet. |
-| `wallet_positions_history` | Append-only position snapshots per watched wallet. |
-| `wallet_activity_events` | Append-only `/activity` stream per watched wallet. |
-| `market_snapshots` | Append-only point-in-time market state (price, liquidity, volume). |
-| `event_snapshots` | Append-only point-in-time event metadata. |
-| `alerts` | Detector output (smart-money / mispricing / whales). |
-| `event_outcome_sum_history` | Append-only Σ-of-outcomes per eligible event per scan. |
+| DB | Table | Purpose |
+|---|---|---|
+| daemon | `alerts` | Detector output across all 8 detectors |
+| daemon | `tracked_wallets` | Smart-money wallets with computed edge/PnL metrics |
+| daemon | `wallet_trades` | Append-only confirmed trade fills per watched wallet |
+| daemon | `wallet_positions_history` | Append-only position snapshots per watched wallet |
+| daemon | `wallet_first_seen` | Cached first-activity metadata for whale-detector age checks |
+| daemon | `wallet_watchlist` | Wallets enrolled in the data-collection pipeline |
+| daemon | `wallet_clusters` / `wallet_cluster_members` | Coordinated-wallet detection output |
+| daemon | `market_cache` | Most-recent gamma snapshot of every active market |
+| daemon | `market_snapshots` / `market_ticks` | Append-only point-in-time market state |
+| daemon | `event_snapshots` | Append-only point-in-time event metadata |
+| daemon | `event_outcome_sum_history` | Append-only Σ-of-outcomes per eligible event per scan |
+| daemon | `paper_trades` | Paper-trading evaluator output with NAV |
+| daemon | `kalshi_markets` / `kalshi_trades` / `kalshi_orderbook_snapshots` | Kalshi Stage 1 ingestion |
+| daemon | `manifold_markets` / `manifold_bets` / `manifold_users` | Manifold Stage 1 ingestion |
+| corpus | `corpus_markets` | Closed-market work queue + backfill state |
+| corpus | `corpus_trades` | Append-only trade rows (REST + on-chain backfill) |
+| corpus | `market_resolutions` | Resolved outcomes per closed market |
+| corpus | `training_examples` | Per-trade rows with features + label for the gate model |
+| corpus | `asset_index` | `asset_id → (condition_id, outcome_side)` lookup for on-chain ingest |
 
 Recommended liquidity floor for analysis: when joining `wallet_trades` or
 `market_snapshots` for downstream studies, filter `liquidity_usd >= 100` to
@@ -116,6 +139,47 @@ the websocket. Useful for cron runs and integration smoke tests.
 
 `status` opens the SQLite database read-only and prints the last 50
 alerts as a Rich table grouped by detector.
+
+### Watchlist + paper trading
+
+```bash
+uv run pscanner watch <addr> [--reason TEXT]   # enroll a wallet
+uv run pscanner unwatch <addr>                 # remove from the watchlist
+uv run pscanner watchlist                      # list enrolled wallets
+
+uv run pscanner paper status                   # NAV + per-wallet PnL +
+                                               # per-source breakdown
+```
+
+### Corpus + ML training
+
+The corpus pipeline builds a dataset of closed-market trades for offline
+analysis and ML training:
+
+```bash
+uv run pscanner corpus backfill                # bulk-pull every closed
+                                               # qualifying market
+uv run pscanner corpus refresh                 # incremental sweep of
+                                               # newly-closed markets
+
+uv run pscanner corpus onchain-backfill        # walk Polygon CTF Exchange
+                                               # OrderFilled events
+uv run pscanner corpus onchain-backfill-targeted  # per-market backfill of
+                                                  # truncated markets
+
+uv run pscanner corpus build-features --rebuild  # (re)build training_examples
+                                                 # from corpus_trades +
+                                                 # market_resolutions
+
+uv run pscanner ml train --device cuda --n-jobs 1  # xgboost gate model
+                                                   # via Optuna
+```
+
+The training pipeline (`pscanner.ml`) optimizes the realized-edge metric
+both at the outer Optuna level and at the inner xgboost early-stopping
+level (#43). The model artifact carries `accepted_categories` metadata so
+inference can gate copy signals on `top_category` membership (#41) — sports
++ esports filter lifts gross edge from ~4% to ~11% on out-of-time data.
 
 ## Develop
 
