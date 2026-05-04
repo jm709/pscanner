@@ -117,6 +117,7 @@ def _before_sleep_log(retry_state: RetryCallState) -> None:
         "subgraph_retry",
         attempt=retry_state.attempt_number,
         status_code=response.status_code,
+        url=str(response.request.url) if response.request else None,
         retry_after=response.headers.get("Retry-After"),
     )
 
