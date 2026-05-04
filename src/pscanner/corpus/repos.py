@@ -495,6 +495,10 @@ class TrainingExample:
     category_diversity: int
     bet_size_usd: float
     bet_size_rel_to_avg: float | None
+    edge_confidence_weighted: float
+    win_rate_confidence_weighted: float
+    is_high_quality_wallet: int
+    bet_size_relative_to_history: float
     side: str
     implied_prob_at_buy: float
     market_category: str
@@ -528,13 +532,15 @@ class TrainingExamplesRepo:
               realized_edge_pp, prior_realized_pnl_usd,
               avg_bet_size_usd, median_bet_size_usd, wallet_age_days,
               seconds_since_last_trade, prior_trades_30d, top_category,
-              category_diversity, bet_size_usd, bet_size_rel_to_avg, side,
-              implied_prob_at_buy, market_category, market_volume_so_far_usd,
+              category_diversity, bet_size_usd, bet_size_rel_to_avg,
+              edge_confidence_weighted, win_rate_confidence_weighted,
+              is_high_quality_wallet, bet_size_relative_to_history,
+              side, implied_prob_at_buy, market_category, market_volume_so_far_usd,
               market_unique_traders_so_far, market_age_seconds,
               time_to_resolution_seconds, last_trade_price, price_volatility_recent,
               label_won
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -580,6 +586,10 @@ def _example_to_row(ex: TrainingExample) -> tuple[object, ...]:
         ex.category_diversity,
         ex.bet_size_usd,
         ex.bet_size_rel_to_avg,
+        ex.edge_confidence_weighted,
+        ex.win_rate_confidence_weighted,
+        ex.is_high_quality_wallet,
+        ex.bet_size_relative_to_history,
         ex.side,
         ex.implied_prob_at_buy,
         ex.market_category,
