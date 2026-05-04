@@ -14,7 +14,7 @@ from pscanner.poly.onchain import OrderFilledEvent
 
 _REQUIRED_KEYS = (
     "transactionHash",
-    "timestamp",
+    "timestamp",  # consumed by iter_market_trades (Task 4), not by the adapter
     "orderHash",
     "maker",
     "taker",
@@ -24,6 +24,25 @@ _REQUIRED_KEYS = (
     "takerAmountFilled",
     "fee",
 )
+
+
+def _parse_int_field(key: str, raw: object) -> int:
+    """Parse a GraphQL BigInt field (string or native int) to Python int."""
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return int(raw)
+        except ValueError as exc:
+            raise ValueError(f"{key} could not be parsed as int: {raw!r}") from exc
+    raise ValueError(f"{key} must be int or str, got {type(raw).__name__}")
+
+
+def _parse_str_field(key: str, raw: object) -> str:
+    """Validate that a GraphQL field is a plain string."""
+    if not isinstance(raw, str):
+        raise ValueError(f"{key} must be str, got {type(raw).__name__}")
+    return raw
 
 
 def subgraph_row_to_event(row: Mapping[str, object]) -> OrderFilledEvent:
@@ -48,18 +67,10 @@ def subgraph_row_to_event(row: Mapping[str, object]) -> OrderFilledEvent:
             raise KeyError(key)
 
     def as_int(key: str) -> int:
-        raw = row[key]
-        if isinstance(raw, int):
-            return raw
-        if isinstance(raw, str):
-            return int(raw)
-        raise ValueError(f"{key} must be int or str, got {type(raw).__name__}")
+        return _parse_int_field(key, row[key])
 
     def as_str(key: str) -> str:
-        raw = row[key]
-        if not isinstance(raw, str):
-            raise ValueError(f"{key} must be str, got {type(raw).__name__}")
-        return raw
+        return _parse_str_field(key, row[key])
 
     return OrderFilledEvent(
         order_hash=as_str("orderHash"),
