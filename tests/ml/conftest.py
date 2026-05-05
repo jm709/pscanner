@@ -35,7 +35,7 @@ def _make_synthetic_examples(
         seed: Numpy RNG seed for reproducibility.
 
     Returns:
-        Polars DataFrame with all 34 ``training_examples`` columns plus
+        Polars DataFrame with all 38 ``training_examples`` columns plus
         ``resolved_at`` (joined from ``market_resolutions``).
     """
     rng = np.random.default_rng(seed)
@@ -90,6 +90,10 @@ def _make_synthetic_examples(
                     "bet_size_rel_to_avg": (
                         float(rng.uniform(0.5, 3.0)) if rng.random() < 0.8 else None
                     ),
+                    "edge_confidence_weighted": float(rng.uniform(0, 1)),
+                    "win_rate_confidence_weighted": float(rng.uniform(0, 1)),
+                    "is_high_quality_wallet": int(rng.integers(0, 2)),
+                    "bet_size_relative_to_history": float(rng.uniform(0.5, 2.0)),
                     "side": side,
                     "implied_prob_at_buy": implied_prob,
                     "market_category": str(rng.choice(["sports", "esports", "thesis", "unknown"])),
