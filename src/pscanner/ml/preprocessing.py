@@ -47,9 +47,9 @@ _INT32_COLS: tuple[str, ...] = (
     "seconds_since_last_trade",
     "prior_trades_30d",
     "category_diversity",
+    "is_high_quality_wallet",
     "market_unique_traders_so_far",
     "market_age_seconds",
-    "time_to_resolution_seconds",
     "label_won",
 )
 
@@ -66,6 +66,9 @@ _FLOAT32_COLS: tuple[str, ...] = (
     "wallet_age_days",
     "bet_size_usd",
     "bet_size_rel_to_avg",
+    "edge_confidence_weighted",
+    "win_rate_confidence_weighted",
+    "bet_size_relative_to_history",
     "implied_prob_at_buy",
     "market_volume_so_far_usd",
     "last_trade_price",
@@ -226,6 +229,13 @@ def load_dataset(db_path: Path) -> pl.DataFrame:
     Returns:
         A Polars DataFrame with the surviving ``training_examples``
         columns plus ``resolved_at``.
+
+    Notes:
+        Low-cardinality string columns (``condition_id``, ``top_category``,
+        ``market_category``, ``side``) are cast to ``pl.Categorical``; integer
+        columns are narrowed to ``pl.Int32`` and float columns to ``pl.Float32``
+        to reduce peak training-pipeline RSS. See ``_CATEGORICAL_CAST_COLS`` /
+        ``_INT32_COLS`` / ``_FLOAT32_COLS`` for the exact column sets.
     """
     conn = sqlite3.connect(str(db_path))
     try:

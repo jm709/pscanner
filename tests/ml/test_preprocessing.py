@@ -12,6 +12,9 @@ import polars as pl
 
 from pscanner.corpus.db import init_corpus_db
 from pscanner.ml.preprocessing import (
+    _CATEGORICAL_CAST_COLS,
+    _FLOAT32_COLS,
+    _INT32_COLS,
     CARRIER_COLS,
     CATEGORICAL_COLS,
     LEAKAGE_COLS,
@@ -149,18 +152,20 @@ def test_temporal_split_partitions_by_resolved_at_percentiles(
 def test_temporal_split_no_market_in_two_splits(
     make_synthetic_examples: Callable[..., pl.DataFrame],
 ) -> None:
+    """A given market lands in exactly one split. Verified via tx_hash uniqueness."""
     df = make_synthetic_examples(n_markets=30, rows_per_market=10)
-    split = temporal_split(df, train_frac=0.6, val_frac=0.2)
+    splits = temporal_split(df, train_frac=0.6, val_frac=0.2)
     # condition_id is dropped from split frames after assignment; verify
-    # disjointness via row-level frame overlap instead.  The three frames
-    # must together cover all rows with no overlapping row indices.
-    total = split.train.height + split.val.height + split.test.height
+    # disjointness via tx_hash, which is unique per row and survives temporal_split.
+    train_hashes = set(splits.train["tx_hash"].to_list())
+    val_hashes = set(splits.val["tx_hash"].to_list())
+    test_hashes = set(splits.test["tx_hash"].to_list())
+    assert train_hashes.isdisjoint(val_hashes), "tx_hash leaked from train into val"
+    assert train_hashes.isdisjoint(test_hashes), "tx_hash leaked from train into test"
+    assert val_hashes.isdisjoint(test_hashes), "tx_hash leaked from val into test"
+    # Row-count sanity: all rows accounted for exactly once.
+    total = splits.train.height + splits.val.height + splits.test.height
     assert total == df.height
-    # No row should appear in two splits — verified by checking that the
-    # frames sum to the full dataset height (unique-row partitioning).
-    assert split.train.height > 0
-    assert split.val.height > 0
-    assert split.test.height > 0
 
 
 def test_temporal_split_train_precedes_val_precedes_test(
@@ -283,6 +288,7 @@ def test_load_dataset_casts_low_cardinality_columns_to_categorical(
     tmp_path: Path,
     make_synthetic_examples: Callable[..., pl.DataFrame],
 ) -> None:
+    """Every column listed in _CATEGORICAL_CAST_COLS lands as Categorical."""
     db_path = tmp_path / "corpus.sqlite3"
     conn = init_corpus_db(db_path)
     try:
@@ -291,16 +297,17 @@ def test_load_dataset_casts_low_cardinality_columns_to_categorical(
     finally:
         conn.close()
     out = load_dataset(db_path)
-    assert out["condition_id"].dtype == pl.Categorical
-    assert out["top_category"].dtype == pl.Categorical
-    assert out["market_category"].dtype == pl.Categorical
-    assert out["side"].dtype == pl.Categorical
+    for col in _CATEGORICAL_CAST_COLS:
+        assert out.schema[col] == pl.Categorical, (
+            f"{col} should be Categorical, got {out.schema[col]}"
+        )
 
 
 def test_load_dataset_casts_numeric_columns_to_int32_float32(
     tmp_path: Path,
     make_synthetic_examples: Callable[..., pl.DataFrame],
 ) -> None:
+    """Every column listed in _INT32_COLS / _FLOAT32_COLS lands at 32-bit."""
     db_path = tmp_path / "corpus.sqlite3"
     conn = init_corpus_db(db_path)
     try:
@@ -309,32 +316,10 @@ def test_load_dataset_casts_numeric_columns_to_int32_float32(
     finally:
         conn.close()
     out = load_dataset(db_path)
-    int32_cols = [
-        "prior_trades_count",
-        "prior_buys_count",
-        "prior_resolved_buys",
-        "prior_wins",
-        "prior_losses",
-        "prior_trades_30d",
-        "category_diversity",
-        "market_unique_traders_so_far",
-        "market_age_seconds",
-        "label_won",
-    ]
-    for col in int32_cols:
-        assert out[col].dtype == pl.Int32, f"{col} expected Int32, got {out[col].dtype}"
-    float32_cols = [
-        "win_rate",
-        "avg_implied_prob_paid",
-        "avg_bet_size_usd",
-        "wallet_age_days",
-        "bet_size_usd",
-        "implied_prob_at_buy",
-        "market_volume_so_far_usd",
-        "last_trade_price",
-    ]
-    for col in float32_cols:
-        assert out[col].dtype == pl.Float32, f"{col} expected Float32, got {out[col].dtype}"
+    for col in _INT32_COLS:
+        assert out.schema[col] == pl.Int32, f"{col} should be Int32, got {out.schema[col]}"
+    for col in _FLOAT32_COLS:
+        assert out.schema[col] == pl.Float32, f"{col} should be Float32, got {out.schema[col]}"
 
 
 def test_temporal_split_drops_condition_id_from_returned_frames(
