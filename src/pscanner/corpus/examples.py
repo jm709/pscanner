@@ -102,22 +102,26 @@ def _example_from_features(
 
 def _maybe_make_example(
     trade: Trade,
-    resolutions_repo: MarketResolutionsRepo,
     provider: StreamingHistoryProvider,
     now_ts: int,
 ) -> TrainingExample | None:
-    """Return a TrainingExample for a resolved BUY, or None to skip."""
-    if trade.bs != "BUY":
-        return None
-    resolution = resolutions_repo.get(trade.condition_id)
+    """Return a TrainingExample for a resolved BUY, or None to skip.
+
+    Caller must guarantee ``trade.bs == "BUY"`` — the loop short-circuits
+    SELL rows before allocating ``Trade``, so this function does not
+    re-check the side.
+
+    Reads resolution status from the provider's in-memory map rather
+    than ``MarketResolutionsRepo`` so the hot path avoids a per-trade
+    SQLite SELECT. The provider is seeded once from
+    ``market_resolutions`` at startup via ``_register_resolutions``.
+    """
+    resolution = provider.get_resolution(trade.condition_id)
     if resolution is None:
         return None
+    _, outcome_yes_won = resolution
     features = compute_features(trade, provider)
-    won = (
-        resolution.outcome_yes_won == 1
-        if trade.outcome_side == "YES"
-        else resolution.outcome_yes_won == 0
-    )
+    won = outcome_yes_won == 1 if trade.outcome_side == "YES" else outcome_yes_won == 0
     return _example_from_features(
         trade=trade,
         features=features,
@@ -155,15 +159,20 @@ def build_features(
 
     Args:
         trades_repo: Source of raw trades (chronological).
-        resolutions_repo: Source of per-market labels.
+        resolutions_repo: Kept for API compat; the per-trade resolution
+            check now reads from the provider's in-memory map (seeded by
+            ``_register_resolutions`` at startup) so the hot loop avoids a
+            per-row SQLite SELECT.
         examples_repo: Sink for materialized rows.
-        markets_conn: Connection used to load corpus_markets metadata.
+        markets_conn: Connection used to load corpus_markets metadata
+            and the one-shot ``market_resolutions`` snapshot.
         now_ts: ``built_at`` for new rows.
         rebuild: If True, drop training_examples before walking.
 
     Returns:
         Number of rows actually written (deduped via INSERT OR IGNORE).
     """
+    del resolutions_repo  # signature kept; reads come from provider/markets_conn
     if rebuild:
         examples_repo.truncate()
 
@@ -178,6 +187,13 @@ def build_features(
         meta = metadata.get(ct.condition_id)
         if meta is None:
             continue
+        # Half the corpus is SELLs; they only need to enter wallet/market
+        # state for recency + volume bookkeeping. Skip the Trade rebuild
+        # (saves the per-row dataclass allocation + the unused
+        # ``category`` lookup) and route through ``observe_sell``.
+        if ct.bs != "BUY":
+            provider.observe_sell(ct)
+            continue
         trade = Trade(
             tx_hash=ct.tx_hash,
             asset_id=ct.asset_id,
@@ -191,7 +207,7 @@ def build_features(
             ts=ct.ts,
             category=meta.category,
         )
-        example = _maybe_make_example(trade, resolutions_repo, provider, now_ts)
+        example = _maybe_make_example(trade, provider, now_ts)
         if example is not None:
             pending_examples.append(example)
         provider.observe(trade)

@@ -40,6 +40,27 @@ class Trade:
     category: str
 
 
+class _TradeFields(Protocol):
+    """Structural shape of the fields ``observe`` reads on the SELL path.
+
+    Both ``Trade`` and ``pscanner.corpus.repos.CorpusTrade`` satisfy this.
+    Used so the ``build-features`` loop can hand ``CorpusTrade`` straight
+    to ``observe`` for SELL rows without rebuilding a ``Trade`` (which
+    would also force allocating the unused ``category`` field).
+    """
+
+    tx_hash: str
+    asset_id: str
+    wallet_address: str
+    condition_id: str
+    outcome_side: str
+    bs: str
+    price: float
+    size: float
+    notional_usd: float
+    ts: int
+
+
 @dataclass(frozen=True)
 class WalletState:
     """Running per-wallet aggregate at some point in time.
@@ -164,11 +185,13 @@ def apply_buy_to_state(state: WalletState, trade: Trade) -> WalletState:
     )
 
 
-def apply_sell_to_state(state: WalletState, trade: Trade) -> WalletState:
+def apply_sell_to_state(state: WalletState, trade: _TradeFields) -> WalletState:
     """Apply a SELL fill to wallet state. Returns a new WalletState.
 
     Sells contribute to total trade count and recency but not to BUY
-    aggregates (avg price paid, bet sizes, win/loss ledger).
+    aggregates (avg price paid, bet sizes, win/loss ledger). Accepts any
+    object with the SELL-relevant fields so callers can pass either
+    ``Trade`` or the bare repo ``CorpusTrade`` without rebuilding.
     """
     return replace(
         state,
@@ -200,7 +223,9 @@ def apply_resolution_to_state(
     )
 
 
-def apply_trade_to_market(state: MarketState, trade: Trade, *, is_new_trader: bool) -> MarketState:
+def apply_trade_to_market(
+    state: MarketState, trade: _TradeFields, *, is_new_trader: bool
+) -> MarketState:
     """Apply a fill to market state (per-market running aggregates).
 
     ``is_new_trader`` is computed by the caller against its own membership
@@ -428,6 +453,15 @@ class StreamingHistoryProvider:
         """Return static metadata for ``condition_id``; raises KeyError if unknown."""
         return self._metadata[condition_id]
 
+    def get_resolution(self, condition_id: str) -> tuple[int, int] | None:
+        """Return ``(resolved_at, outcome_yes_won)`` for a market, or None if unresolved.
+
+        Reads from the in-memory map seeded by ``register_resolution`` so the
+        ``build-features`` hot path can answer "is this market resolved?"
+        without a per-trade SQLite SELECT against ``market_resolutions``.
+        """
+        return self._resolutions.get(condition_id)
+
     def register_resolution(
         self,
         *,
@@ -451,15 +485,14 @@ class StreamingHistoryProvider:
             accum.unscheduled = remaining
 
     def observe(self, trade: Trade) -> None:
-        """Fold a trade into running wallet + market state."""
-        accum = self._wallets.get(trade.wallet_address)
-        if accum is None:
-            accum = _WalletAccumulator(
-                state=empty_wallet_state(first_seen_ts=trade.ts),
-                heap=[],
-                unscheduled=[],
-            )
-            self._wallets[trade.wallet_address] = accum
+        """Fold a trade into running wallet + market state.
+
+        For BUY rows the caller must pass a full ``Trade`` (the
+        ``category`` field feeds ``WalletState.category_counts``). For
+        SELL rows ``observe_sell`` is preferred — it accepts the bare
+        repo dataclass and skips an unnecessary ``Trade`` rebuild.
+        """
+        accum = self._ensure_accumulator(trade)
 
         if trade.bs == "BUY":
             accum.state = apply_buy_to_state(accum.state, trade)
@@ -480,6 +513,34 @@ class StreamingHistoryProvider:
         elif trade.bs == "SELL":
             accum.state = apply_sell_to_state(accum.state, trade)
 
+        self._fold_market_state(trade)
+
+    def observe_sell(self, trade: _TradeFields) -> None:
+        """Fold a SELL fill into wallet + market state.
+
+        Accepts any object with the trade fields used by the SELL path
+        (no ``category`` required). Lets the ``build-features`` loop hand
+        ``CorpusTrade`` directly without rebuilding a ``Trade``.
+
+        Caller must guarantee ``trade.bs == "SELL"`` — BUYs would skip
+        the heap-bookkeeping and silently lose label coverage.
+        """
+        accum = self._ensure_accumulator(trade)
+        accum.state = apply_sell_to_state(accum.state, trade)
+        self._fold_market_state(trade)
+
+    def _ensure_accumulator(self, trade: _TradeFields) -> _WalletAccumulator:
+        accum = self._wallets.get(trade.wallet_address)
+        if accum is None:
+            accum = _WalletAccumulator(
+                state=empty_wallet_state(first_seen_ts=trade.ts),
+                heap=[],
+                unscheduled=[],
+            )
+            self._wallets[trade.wallet_address] = accum
+        return accum
+
+    def _fold_market_state(self, trade: _TradeFields) -> None:
         market = self._markets.get(trade.condition_id)
         if market is None:
             market = empty_market_state(market_age_start_ts=trade.ts)
