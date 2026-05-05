@@ -8,6 +8,7 @@ calibrated against ``implied_prob_at_buy``.
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 from collections.abc import Callable, Mapping
@@ -414,8 +415,12 @@ def run_study(
 
     # Polars frames are no longer needed once the numpy matrices are
     # extracted; release ~3-4 GB before the optuna phase allocates
-    # DMatrix copies.
+    # DMatrix copies.  Explicit gc.collect() because Python's cyclic
+    # collector doesn't always reclaim Polars/Arrow buffers promptly on
+    # its own — post_polars_release was previously identical to
+    # post_build_feature_matrix without it.
     del df, splits, train_df, val_df, test_df
+    gc.collect()
     _log.info("ml.mem", phase="post_polars_release", rss_mb=_rss_mb())
 
     best_iteration, best_params, best_value = _run_optimization_phase(

@@ -23,6 +23,55 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
+# Low-cardinality string columns cast to Categorical at load time.
+# condition_id has ~50K unique values; top_category/market_category/side
+# each have single-digit cardinality.  Categorical storage avoids
+# materialising the full 66-char hex strings (condition_id) or repeated
+# string literals across millions of rows.
+_CATEGORICAL_CAST_COLS: tuple[str, ...] = (
+    "condition_id",
+    "top_category",
+    "market_category",
+    "side",
+)
+
+# Integer columns safe to narrow from Int64 → Int32.  All values are
+# counts / durations that fit comfortably in 32 bits; the resulting numpy
+# matrix is float32 anyway, so the narrowing costs nothing in precision.
+_INT32_COLS: tuple[str, ...] = (
+    "prior_trades_count",
+    "prior_buys_count",
+    "prior_resolved_buys",
+    "prior_wins",
+    "prior_losses",
+    "seconds_since_last_trade",
+    "prior_trades_30d",
+    "category_diversity",
+    "market_unique_traders_so_far",
+    "market_age_seconds",
+    "time_to_resolution_seconds",
+    "label_won",
+)
+
+# Float columns narrowed from Float64 → Float32.  XGBoost and
+# build_feature_matrix both produce float32 output, so keeping float64
+# inputs is pure overhead.
+_FLOAT32_COLS: tuple[str, ...] = (
+    "win_rate",
+    "avg_implied_prob_paid",
+    "realized_edge_pp",
+    "prior_realized_pnl_usd",
+    "avg_bet_size_usd",
+    "median_bet_size_usd",
+    "wallet_age_days",
+    "bet_size_usd",
+    "bet_size_rel_to_avg",
+    "implied_prob_at_buy",
+    "market_volume_so_far_usd",
+    "last_trade_price",
+    "price_volatility_recent",
+)
+
 _NONE_TOKEN = "__none__"  # noqa: S105 -- explicit null sentinel level, not a credential
 
 LEAKAGE_COLS: tuple[str, ...] = (
@@ -140,10 +189,13 @@ def temporal_split(
     train_ids = set(markets["condition_id"].slice(0, n_train).to_list())
     val_ids = set(markets["condition_id"].slice(n_train, n_val).to_list())
     test_ids = set(markets["condition_id"].slice(n_train + n_val, n - n_train - n_val).to_list())
+    # Drop condition_id after assignment — downstream pipeline (encoder,
+    # feature matrix) doesn't need it, and three corpus-scale copies of a
+    # 66-char hex column are significant memory overhead.
     return Split(
-        train=df.filter(pl.col("condition_id").is_in(train_ids)),
-        val=df.filter(pl.col("condition_id").is_in(val_ids)),
-        test=df.filter(pl.col("condition_id").is_in(test_ids)),
+        train=df.filter(pl.col("condition_id").is_in(train_ids)).drop("condition_id"),
+        val=df.filter(pl.col("condition_id").is_in(val_ids)).drop("condition_id"),
+        test=df.filter(pl.col("condition_id").is_in(test_ids)).drop("condition_id"),
     )
 
 
@@ -180,7 +232,7 @@ def load_dataset(db_path: Path) -> pl.DataFrame:
         all_cols = [r[1] for r in conn.execute("PRAGMA table_info(training_examples)").fetchall()]
         keep_cols = [c for c in all_cols if c not in _NEVER_LOAD_COLS]
         select_list = ", ".join(f"te.{c}" for c in keep_cols)
-        return pl.read_database(
+        df = pl.read_database(
             query=(
                 f"SELECT {select_list}, mr.resolved_at "  # noqa: S608 -- col names are derived from PRAGMA, not user input
                 "FROM training_examples te "
@@ -191,6 +243,13 @@ def load_dataset(db_path: Path) -> pl.DataFrame:
         )
     finally:
         conn.close()
+
+    cast_exprs = [
+        *[pl.col(c).cast(pl.Categorical) for c in _CATEGORICAL_CAST_COLS if c in df.columns],
+        *[pl.col(c).cast(pl.Int32) for c in _INT32_COLS if c in df.columns],
+        *[pl.col(c).cast(pl.Float32) for c in _FLOAT32_COLS if c in df.columns],
+    ]
+    return df.with_columns(cast_exprs)
 
 
 def build_feature_matrix(

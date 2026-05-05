@@ -419,6 +419,41 @@ def test_run_study_is_deterministic_under_same_seed(
     assert a["test_logloss"] == b["test_logloss"]
 
 
+def test_run_study_no_regression_on_synthetic_data(
+    tmp_path: Path,
+    make_synthetic_examples: Callable[..., pl.DataFrame],
+) -> None:
+    """Dtype casting and condition_id drop must not break end-to-end training.
+
+    Verifies that the post-#38 pipeline (Categorical casts, int32/float32
+    narrowing, condition_id drop after temporal_split) produces a valid
+    model.json and metrics.json with sensible metric ranges.  The dtype
+    changes are invisible to XGBoost — all inputs are float32 at DMatrix
+    construction regardless — so test_edge should remain in [-1, 1].
+    """
+    df = make_synthetic_examples(n_markets=20, rows_per_market=15, seed=7)
+    output_dir = tmp_path / "run_no_regression"
+    run_study(
+        df=df,
+        output_dir=output_dir,
+        n_trials=2,
+        n_jobs=1,
+        n_min=5,
+        seed=42,
+    )
+    assert (output_dir / "model.json").exists()
+    assert (output_dir / "metrics.json").exists()
+    metrics = json.loads((output_dir / "metrics.json").read_text())
+    # Sanity: metrics must be in valid ranges.
+    assert -1.0 <= metrics["test_edge"] <= 1.0
+    assert 0.0 <= metrics["test_accuracy"] <= 1.0
+    assert metrics["test_logloss"] > 0.0
+    # Split label-won rates must be valid probabilities.
+    for split_name in ("train", "val", "test"):
+        rate = metrics["split_label_won_rate"][split_name]
+        assert 0.0 <= rate <= 1.0, f"{split_name} label_won rate out of range: {rate}"
+
+
 def test_evaluate_on_test_omits_edge_filtered_when_only_one_kwarg_set() -> None:
     """Partial application (one kwarg None) silently skips edge_filtered.
 
