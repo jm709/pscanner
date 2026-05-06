@@ -291,6 +291,7 @@ class CorpusTrade:
     size: float
     notional_usd: float
     ts: int
+    platform: str = "polymarket"
 
 
 class CorpusTradesRepo:
@@ -317,6 +318,7 @@ class CorpusTradesRepo:
                 continue
             rows.append(
                 (
+                    t.platform,
                     t.tx_hash,
                     t.asset_id,
                     t.wallet_address.lower(),
@@ -334,17 +336,19 @@ class CorpusTradesRepo:
         cur = self._conn.executemany(
             """
             INSERT OR IGNORE INTO corpus_trades (
-              tx_hash, asset_id, wallet_address, condition_id,
+              platform, tx_hash, asset_id, wallet_address, condition_id,
               outcome_side, bs, price, size, notional_usd, ts
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
         self._conn.commit()
         return cur.rowcount or 0
 
-    def iter_chronological(self, *, chunk_size: int = 50_000) -> Iterator[CorpusTrade]:
-        """Yield every trade in (ts, tx_hash, asset_id) order.
+    def iter_chronological(
+        self, *, chunk_size: int = 50_000, platform: str = "polymarket"
+    ) -> Iterator[CorpusTrade]:
+        """Yield every trade in (ts, tx_hash, asset_id) order for ``platform``.
 
         Pages via keyset pagination on ``(ts, tx_hash, asset_id)`` so no
         long-lived read cursor is held across yields. This matters in
@@ -358,13 +362,17 @@ class CorpusTradesRepo:
         Tie-breaking on ``(tx_hash, asset_id)`` makes the iteration
         order deterministic for the streaming feature pipeline.
 
-        Performance depends on ``idx_corpus_trades_ts_tx_asset`` covering
-        the full ORDER BY tuple — without it SQLite falls back to a
-        ``USE TEMP B-TREE FOR ORDER BY`` plan and sorts the entire
+        Performance depends on
+        ``idx_corpus_trades_platform_ts_tx_asset`` covering the
+        platform-prefixed ORDER BY tuple — without it SQLite falls back
+        to a ``USE TEMP B-TREE FOR ORDER BY`` plan and sorts the entire
         table per chunk.
 
         Args:
             chunk_size: Rows per page. Default 50,000 (~5MB resident).
+            platform: Platform to scope iteration to. Default
+                ``"polymarket"`` preserves single-platform behavior for
+                existing callers.
         """
         last: tuple[int, str, str] | None = None
         while True:
@@ -374,10 +382,11 @@ class CorpusTradesRepo:
                     SELECT tx_hash, asset_id, wallet_address, condition_id,
                            outcome_side, bs, price, size, notional_usd, ts
                     FROM corpus_trades
+                    WHERE platform = ?
                     ORDER BY ts, tx_hash, asset_id
                     LIMIT ?
                     """,
-                    (chunk_size,),
+                    (platform, chunk_size),
                 ).fetchall()
             else:
                 rows = self._conn.execute(
@@ -385,11 +394,11 @@ class CorpusTradesRepo:
                     SELECT tx_hash, asset_id, wallet_address, condition_id,
                            outcome_side, bs, price, size, notional_usd, ts
                     FROM corpus_trades
-                    WHERE (ts, tx_hash, asset_id) > (?, ?, ?)
+                    WHERE platform = ? AND (ts, tx_hash, asset_id) > (?, ?, ?)
                     ORDER BY ts, tx_hash, asset_id
                     LIMIT ?
                     """,
-                    (last[0], last[1], last[2], chunk_size),
+                    (platform, last[0], last[1], last[2], chunk_size),
                 ).fetchall()
             if not rows:
                 return
@@ -405,6 +414,7 @@ class CorpusTradesRepo:
                     size=row["size"],
                     notional_usd=row["notional_usd"],
                     ts=row["ts"],
+                    platform=platform,
                 )
             tail = rows[-1]
             last = (tail["ts"], tail["tx_hash"], tail["asset_id"])
