@@ -157,23 +157,26 @@ def run_single_trial(
 def fit_winning_model(
     best_params: Mapping[str, object],
     best_iteration: int,
-    X_train: np.ndarray,  # noqa: N803 -- ML matrix convention
-    y_train: np.ndarray,
+    dtrain: xgb.DMatrix,
     seed: int,
     device: str = "cpu",
 ) -> xgb.Booster:
-    """Refit the winning hyperparams on train alone for ``best_iteration+1`` rounds.
+    """Refit the winning hyperparams on ``dtrain`` for ``best_iteration+1`` rounds.
 
     Avoids retraining on ``train + val`` (per the spec): the val set
     has already been used for model selection. Determinism is preserved
     by the shared ``seed`` + ``nthread=1``; this gives the same booster
     the winning trial produced.
 
+    Takes a pre-built ``dtrain`` so the winning-model refit reuses the
+    DMatrix built for the Optuna phase. Callers that hold the source
+    numpy arrays can release them between optimization and refit; the
+    DMatrix carries XGBoost's quantized internal copy.
+
     Args:
         best_params: Optuna's ``study.best_params`` dict.
         best_iteration: From the winning trial's user attrs.
-        X_train: Training feature matrix.
-        y_train: Training labels.
+        dtrain: Pre-built training DMatrix (typically the one Optuna used).
         seed: XGBoost RNG seed.
         device: XGBoost device, ``"cpu"`` or ``"cuda"``.
 
@@ -191,7 +194,6 @@ def fit_winning_model(
             "verbosity": 0,
         }
     )
-    dtrain = xgb.DMatrix(X_train, label=y_train)
     return xgb.train(params, dtrain, num_boost_round=best_iteration + 1)
 
 
@@ -433,8 +435,7 @@ def run_study(
     booster = fit_winning_model(
         best_params=best_params,
         best_iteration=best_iteration,
-        X_train=x_train,
-        y_train=y_train,
+        dtrain=xgb.DMatrix(x_train, label=y_train),
         seed=seed,
         device=device,
     )

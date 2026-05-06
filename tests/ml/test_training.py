@@ -157,11 +157,11 @@ def test_fit_winning_model_returns_booster_with_expected_iterations() -> None:
         "reg_lambda": 1.0,
         "gamma": 0.1,
     }
+    dtrain = xgb.DMatrix(X_train, label=y_train)
     booster = fit_winning_model(
         best_params=params,
         best_iteration=10,
-        X_train=X_train,
-        y_train=y_train,
+        dtrain=dtrain,
         seed=42,
     )
     # 11 trees corresponds to best_iteration + 1.
@@ -183,8 +183,7 @@ def test_evaluate_on_test_returns_metric_dict() -> None:
     booster = fit_winning_model(
         best_params=params,
         best_iteration=20,
-        X_train=X_train,
-        y_train=y_train,
+        dtrain=xgb.DMatrix(X_train, label=y_train),
         seed=42,
     )
     implied_test = np.full(len(y_val), 0.5)
@@ -273,8 +272,7 @@ def _toy_booster(
     booster = fit_winning_model(
         best_params=params,
         best_iteration=20,
-        X_train=X_train,
-        y_train=y_train,
+        dtrain=xgb.DMatrix(X_train, label=y_train),
         seed=seed,
     )
     implied_test = np.full(len(y_val), 0.5)
@@ -301,8 +299,7 @@ def test_evaluate_on_test_returns_edge_filtered_when_categories_provided() -> No
             "gamma": 0.1,
         },
         best_iteration=10,
-        X_train=X_train,
-        y_train=y_train,
+        dtrain=xgb.DMatrix(X_train, label=y_train),
         seed=42,
     )
 
@@ -476,8 +473,7 @@ def test_evaluate_on_test_omits_edge_filtered_when_only_one_kwarg_set() -> None:
             "gamma": 0.1,
         },
         best_iteration=10,
-        X_train=X_train,
-        y_train=y_train,
+        dtrain=xgb.DMatrix(X_train, label=y_train),
         seed=42,
     )
 
