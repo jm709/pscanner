@@ -38,8 +38,8 @@ from pscanner.ml.preprocessing import (
     drop_leakage_cols,
 )
 
-_TRAIN_FRAC = 0.6
-_VAL_FRAC = 0.2
+_TRAIN_FRAC = 0.7
+_VAL_FRAC = 0.15
 
 
 @dataclass(frozen=True)
