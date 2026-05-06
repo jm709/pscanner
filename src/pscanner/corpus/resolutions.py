@@ -45,6 +45,7 @@ async def record_resolutions(
     repo: MarketResolutionsRepo,
     targets: Iterable[tuple[str, str, int]],
     now_ts: int,
+    platform: str = "polymarket",
 ) -> int:
     """Fetch resolutions for the given (condition_id, slug, resolved_at) tuples.
 
@@ -53,6 +54,9 @@ async def record_resolutions(
         repo: ``MarketResolutionsRepo`` to upsert into.
         targets: Iterable of ``(condition_id, market_slug, resolved_at_hint)``.
         now_ts: Unix seconds, recorded as ``recorded_at`` on each row.
+        platform: Platform tag written onto every ``MarketResolution`` row.
+            Defaults to ``"polymarket"`` so the existing call site is
+            unchanged.
 
     Returns:
         Count of resolutions actually written (excludes skipped/disputed).
@@ -74,6 +78,7 @@ async def record_resolutions(
                 outcome_yes_won=yes_won,
                 resolved_at=resolved_at,
                 source="gamma",
+                platform=platform,
             ),
             recorded_at=now_ts,
         )

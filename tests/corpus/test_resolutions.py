@@ -108,3 +108,25 @@ async def test_record_resolutions_skips_disputed(
         now_ts=3_000,
     )
     assert repo.get("c1") is None
+
+
+@pytest.mark.asyncio
+async def test_record_resolutions_records_platform(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """The default ``platform="polymarket"`` is written onto each row."""
+    repo = MarketResolutionsRepo(tmp_corpus_db)
+    fake_gamma = AsyncMock()
+    fake_gamma.get_market_by_slug = AsyncMock(return_value=_market("0xpoly", [0.99, 0.01]))
+
+    written = await record_resolutions(
+        gamma=fake_gamma,
+        repo=repo,
+        targets=[("0xpoly", "poly-slug", 1_500)],
+        now_ts=1_500,
+    )
+    assert written == 1
+    res = repo.get("0xpoly", platform="polymarket")
+    assert res is not None
+    assert res.platform == "polymarket"
+    assert res.outcome_yes_won == 1
