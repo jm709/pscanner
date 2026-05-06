@@ -212,7 +212,10 @@ def test_run_study_writes_all_artifacts(
     )
     assert (output_dir / "model.json").exists()
     assert (output_dir / "preprocessor.json").exists()
-    assert (output_dir / "study.db").exists()
+    assert not (output_dir / "study.db").exists(), (
+        "study.db must not be written — InMemoryStorage replaced RDBStorage to "
+        "avoid the per-trial reload of full study state from SQLite"
+    )
     assert (output_dir / "metrics.json").exists()
     metrics = json.loads((output_dir / "metrics.json").read_text())
     assert "best_params" in metrics
@@ -249,7 +252,6 @@ def test_run_study_n_jobs_2_completes_without_lock_errors(
         n_min=5,
         seed=42,
     )
-    assert (output_dir / "study.db").exists()
     assert (output_dir / "metrics.json").exists()
 
 

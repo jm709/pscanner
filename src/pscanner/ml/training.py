@@ -293,44 +293,36 @@ def _run_optimization_phase(
     dval = xgb.DMatrix(x_val, label=y_val)
     _log.info("ml.mem", phase="post_dmatrix", rss_mb=_rss_mb())
 
-    storage_url = f"sqlite:///{output_dir / 'study.db'}"
-    storage = optuna.storages.RDBStorage(url=storage_url)
-    # Silence optuna's per-trial chatter on stderr while the test suite
-    # is running with filterwarnings=error.
+    # InMemoryStorage avoids the per-trial reload of the full study history
+    # that RDBStorage(SQLite) does on every TPESampler.sample(). Each `run`
+    # uses a fresh output_dir; resume isn't a documented feature here, so
+    # there's no reason to leave a study.db artifact on disk.
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    try:
-        study = optuna.create_study(
-            direction="maximize",
-            sampler=optuna.samplers.TPESampler(seed=seed),
-            pruner=optuna.pruners.MedianPruner(),
-            storage=storage,
-            study_name="copy_trade_gate",
-        )
-        study.optimize(
-            lambda t: run_single_trial(
-                trial=t,
-                dtrain=dtrain,
-                dval=dval,
-                y_val=y_val,
-                implied_prob_val=implied_val,
-                n_min=n_min,
-                seed=seed,
-                device=device,
-            ),
-            n_trials=n_trials,
-            n_jobs=n_jobs,
-        )
+    study = optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(seed=seed),
+        pruner=optuna.pruners.MedianPruner(),
+        storage=optuna.storages.InMemoryStorage(),
+        study_name="copy_trade_gate",
+    )
+    study.optimize(
+        lambda t: run_single_trial(
+            trial=t,
+            dtrain=dtrain,
+            dval=dval,
+            y_val=y_val,
+            implied_prob_val=implied_val,
+            n_min=n_min,
+            seed=seed,
+            device=device,
+        ),
+        n_trials=n_trials,
+        n_jobs=n_jobs,
+    )
 
-        best_iteration = int(study.best_trial.user_attrs["best_iteration"])
-        best_params = dict(study.best_params)
-        best_value = float(study.best_value)
-    finally:
-        # Release SQLAlchemy connection pool so the SQLite file isn't
-        # left open across pytest teardown (would trip filterwarnings=error
-        # via ResourceWarning -> PytestUnraisableExceptionWarning).
-        storage.remove_session()
-        storage.engine.dispose()
-
+    best_iteration = int(study.best_trial.user_attrs["best_iteration"])
+    best_params = dict(study.best_params)
+    best_value = float(study.best_value)
     return best_iteration, best_params, best_value
 
 
