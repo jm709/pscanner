@@ -356,3 +356,46 @@ def test_streaming_pipeline_matches_eager_baseline(
     # quantization changes but are bounded.
     assert abs(metrics["test_accuracy"] - baseline["test_accuracy"]) < 0.05
     assert abs(metrics["test_logloss"] - baseline["test_logloss"]) < 0.10
+
+
+def test_split_iter_handles_null_to_float_transition_within_chunk(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """Regression: nullable column with all-None leading rows + a real float
+    later in the same chunk used to crash ``_encode_chunk``.
+
+    Polars's default ``infer_schema_length=100`` typed an all-null leading
+    section as ``pl.Null``, then raised ``ComputeError`` on the first real
+    float. The fix passes an explicit schema to ``pl.DataFrame``. Synthetic
+    fixtures with ``chunk_size <= 100`` don't trip the boundary; production
+    runs at chunk_size=100_000 hit it the moment a chunk had >100 leading
+    NULLs in a nullable column.
+
+    100 markets x 2 rows places te.id 1-120 in train (markets 0-59).
+    UPDATEs force the mixed-type pattern within a single chunk.
+    """
+    db_path = make_synthetic_examples_db(n_markets=100, rows_per_market=2, seed=0)
+
+    conn = _sqlite3.connect(str(db_path))
+    try:
+        conn.execute("UPDATE training_examples SET win_rate = NULL WHERE id BETWEEN 1 AND 100")
+        conn.execute("UPDATE training_examples SET win_rate = 0.5 WHERE id BETWEEN 101 AND 120")
+        conn.commit()
+    finally:
+        conn.close()
+
+    with open_dataset(db_path, chunk_size=200) as ds:
+        assert ds.encoder is not None
+        it = _SplitIter(
+            db_path=ds._db_path,
+            condition_ids=ds._train_markets,
+            encoder=ds.encoder,
+            kept_cols=ds._kept_cols,
+            chunk_size=200,
+        )
+        chunks = list(iter(it))
+
+    assert len(chunks) == 1
+    x, _y, _implied = chunks[0]
+    assert x.shape[0] == 120
+    assert x.dtype.name == "float32"
