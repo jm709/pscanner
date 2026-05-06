@@ -16,7 +16,6 @@ from pathlib import Path
 
 import numpy as np
 import optuna
-import polars as pl
 import structlog
 import xgboost as xgb
 
@@ -250,22 +249,6 @@ def evaluate_on_test(
             n_min=n_min,
         )
     return result
-
-
-def _extract_top_category(df: pl.DataFrame) -> np.ndarray:
-    """Return ``top_category`` values as a numpy string array.
-
-    Null entries become the empty string ``""`` so ``np.isin`` comparisons
-    against real category names always return ``False`` for them.
-
-    Args:
-        df: A Polars DataFrame that still has the ``top_category`` column
-            (i.e. before the leakage-drop or one-hot encoding step).
-
-    Returns:
-        1D numpy array of dtype ``object`` (Python str), one entry per row.
-    """
-    return df["top_category"].fill_null("").to_numpy()
 
 
 def _run_optimization_phase(
