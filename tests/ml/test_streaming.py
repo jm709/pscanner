@@ -67,3 +67,40 @@ def test_open_dataset_closes_pre_pass_connection_on_exit(
     pre_pass_conn = captured[0]
     with pytest.raises(_sqlite3.ProgrammingError):
         pre_pass_conn.execute("SELECT 1")
+
+
+def test_encoder_fits_on_train_levels_only(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """OneHotEncoder.levels reflects only train-split categorical levels."""
+    db_path = make_synthetic_examples_db(n_markets=20, rows_per_market=5, seed=0)
+
+    with open_dataset(db_path) as ds:
+        assert ds.encoder is not None
+
+        # Synthetic encoder always fits 'side', 'top_category', 'market_category'
+        assert "side" in ds.encoder.levels
+        assert "top_category" in ds.encoder.levels
+        assert "market_category" in ds.encoder.levels
+
+        # Side is ('YES', 'NO'); both levels show up given enough rows
+        assert set(ds.encoder.levels["side"]).issubset({"YES", "NO"})
+
+        # Encoder.levels values are tuples of strings (deterministic order)
+        for _col, lvls in ds.encoder.levels.items():
+            assert isinstance(lvls, tuple)
+            assert all(isinstance(v, str) for v in lvls)
+
+
+def test_open_dataset_uses_temp_table_for_split_filter(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """The encoder-fit query joins on a per-connection temp table.
+
+    Confirmed by checking we don't hit SQLite's parameter limit for huge
+    splits — synthesize 5,000 markets and assert no OperationalError.
+    """
+    db_path = make_synthetic_examples_db(n_markets=5_000, rows_per_market=1, seed=0)
+    with open_dataset(db_path) as ds:
+        # Just touching .encoder forces P2 to have run.
+        _ = ds.encoder

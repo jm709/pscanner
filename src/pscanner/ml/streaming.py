@@ -21,6 +21,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import polars as pl
+
+from pscanner.ml.preprocessing import (
+    CATEGORICAL_COLS,
+    OneHotEncoder,
+)
+
 _TRAIN_FRAC = 0.6
 _VAL_FRAC = 0.2
 
@@ -39,6 +46,7 @@ class StreamingDataset:
     _train_markets: frozenset[str] = field(default_factory=frozenset)
     _val_markets: frozenset[str] = field(default_factory=frozenset)
     _test_markets: frozenset[str] = field(default_factory=frozenset)
+    encoder: OneHotEncoder | None = None
 
 
 def _partition_markets(
@@ -61,6 +69,52 @@ def _partition_markets(
     return train, val, test
 
 
+def _populate_temp_table(
+    conn: sqlite3.Connection,
+    table_name: str,
+    condition_ids: frozenset[str],
+) -> None:
+    """Create + populate a per-connection TEMP TABLE for split-membership joins.
+
+    Used in place of an ``IN (?, ?, ...)`` parameterized query so the
+    SQLite ``SQLITE_MAX_VARIABLE_NUMBER`` limit (32766 in 3.32+) doesn't
+    bite as the corpus grows. Cost: ~10K INSERTs at startup, < 100 ms.
+    """
+    conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+    conn.execute(f"CREATE TEMP TABLE {table_name} (condition_id TEXT PRIMARY KEY)")
+    conn.executemany(
+        f"INSERT INTO {table_name} VALUES (?)",  # noqa: S608 -- table_name is a module-internal literal
+        [(cid,) for cid in condition_ids],
+    )
+
+
+def _fit_encoder_on_train(
+    conn: sqlite3.Connection,
+    train_markets: frozenset[str],
+) -> OneHotEncoder:
+    """Run P2: fit a OneHotEncoder on the train split's categorical levels.
+
+    SELECTs DISTINCT side, top_category, market_category from training_examples
+    joined on the _p2_train temp table.
+    """
+    _populate_temp_table(conn, "_p2_train", train_markets)
+    rows = conn.execute(
+        "SELECT DISTINCT side, top_category, market_category "
+        "FROM training_examples te "
+        "JOIN _p2_train tm USING (condition_id)"
+    ).fetchall()
+    df = pl.DataFrame(
+        rows,
+        schema={
+            "side": pl.String,
+            "top_category": pl.String,
+            "market_category": pl.String,
+        },
+        orient="row",
+    )
+    return OneHotEncoder.fit(df, columns=CATEGORICAL_COLS)
+
+
 @contextmanager
 def open_dataset(
     db_path: Path,
@@ -80,12 +134,14 @@ def open_dataset(
     conn = sqlite3.connect(str(db_path))
     try:
         train, val, test = _partition_markets(conn)
+        encoder = _fit_encoder_on_train(conn, train)
         ds = StreamingDataset(
             _db_path=db_path,
             _chunk_size=chunk_size,
             _train_markets=train,
             _val_markets=val,
             _test_markets=test,
+            encoder=encoder,
         )
         yield ds
     finally:
