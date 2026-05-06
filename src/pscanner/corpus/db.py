@@ -14,7 +14,8 @@ from pathlib import Path
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS corpus_markets (
-      platform TEXT NOT NULL CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
+      platform TEXT NOT NULL DEFAULT 'polymarket'
+        CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
       condition_id TEXT NOT NULL,
       event_slug TEXT NOT NULL,
       category TEXT,
@@ -38,7 +39,8 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_corpus_markets_volume ON corpus_markets(total_volume_usd DESC)",
     """
     CREATE TABLE IF NOT EXISTS corpus_trades (
-      platform TEXT NOT NULL CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
+      platform TEXT NOT NULL DEFAULT 'polymarket'
+        CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
       tx_hash TEXT NOT NULL,
       asset_id TEXT NOT NULL,
       wallet_address TEXT NOT NULL,
@@ -63,7 +65,8 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     "ON corpus_trades(platform, ts, tx_hash, asset_id)",
     """
     CREATE TABLE IF NOT EXISTS market_resolutions (
-      platform TEXT NOT NULL CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
+      platform TEXT NOT NULL DEFAULT 'polymarket'
+        CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
       condition_id TEXT NOT NULL,
       winning_outcome_index INTEGER NOT NULL,
       outcome_yes_won INTEGER NOT NULL,
@@ -75,7 +78,8 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
     """
     CREATE TABLE IF NOT EXISTS training_examples (
-      platform TEXT NOT NULL CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
+      platform TEXT NOT NULL DEFAULT 'polymarket'
+        CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
       tx_hash TEXT NOT NULL,
       asset_id TEXT NOT NULL,
       wallet_address TEXT NOT NULL,
@@ -129,7 +133,8 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
     """
     CREATE TABLE IF NOT EXISTS asset_index (
-      platform TEXT NOT NULL CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
+      platform TEXT NOT NULL DEFAULT 'polymarket'
+        CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
       asset_id TEXT NOT NULL,
       condition_id TEXT NOT NULL,
       outcome_side TEXT NOT NULL,
@@ -148,7 +153,9 @@ _PRAGMAS: tuple[str, ...] = (
 
 _MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE corpus_markets ADD COLUMN market_slug TEXT",
-    # Superseded by ``idx_corpus_trades_ts_tx_asset``, which covers ts-prefix queries.
+    # Superseded by ``idx_corpus_trades_platform_ts_tx_asset``, which covers
+    # platform/ts-prefix queries (the ``ts``-only single-column index it once
+    # replaced is no longer adequate after PR A's platform-aware indexing).
     "DROP INDEX IF EXISTS idx_corpus_trades_ts",
     "ALTER TABLE corpus_markets ADD COLUMN onchain_trades_count INTEGER",
     # Resume cursor for the per-market targeted on-chain backfill: NULL means
