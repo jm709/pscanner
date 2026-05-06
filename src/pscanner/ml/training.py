@@ -358,7 +358,7 @@ def run_study(
     """End-to-end study: preprocess, run Optuna, refit, evaluate, dump.
 
     Mutates ``output_dir`` (created if missing). Writes ``model.json``,
-    ``preprocessor.json``, ``study.db``, ``metrics.json``.
+    ``preprocessor.json``, ``metrics.json``.
 
     Args:
         df: Output of ``load_dataset``.
