@@ -9,7 +9,12 @@ and the live DB never holds corpus tables.
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
+
+import structlog
+
+_log = structlog.get_logger(__name__)
 
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -188,6 +193,9 @@ def _migrate_corpus_markets_add_platform(conn: sqlite3.Connection) -> None:
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='corpus_markets'"
     ).fetchone():
         return
+    start = time.monotonic()
+    row_count = conn.execute("SELECT COUNT(*) AS n FROM corpus_markets").fetchone()[0]
+    _log.info("corpus.migration_started", table="corpus_markets", rows=row_count)
     with conn:
         conn.execute(
             """
@@ -241,6 +249,13 @@ def _migrate_corpus_markets_add_platform(conn: sqlite3.Connection) -> None:
             "CREATE INDEX IF NOT EXISTS idx_corpus_markets_volume "
             "ON corpus_markets(total_volume_usd DESC)"
         )
+    duration_s = time.monotonic() - start
+    _log.info(
+        "corpus.migration_completed",
+        table="corpus_markets",
+        rows=row_count,
+        duration_s=round(duration_s, 2),
+    )
 
 
 def _migrate_corpus_trades_add_platform(conn: sqlite3.Connection) -> None:
@@ -250,6 +265,9 @@ def _migrate_corpus_trades_add_platform(conn: sqlite3.Connection) -> None:
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='corpus_trades'"
     ).fetchone():
         return
+    start = time.monotonic()
+    row_count = conn.execute("SELECT COUNT(*) AS n FROM corpus_trades").fetchone()[0]
+    _log.info("corpus.migration_started", table="corpus_trades", rows=row_count)
     with conn:
         conn.execute(
             """
@@ -296,6 +314,13 @@ def _migrate_corpus_trades_add_platform(conn: sqlite3.Connection) -> None:
             "CREATE INDEX IF NOT EXISTS idx_corpus_trades_platform_ts_tx_asset "
             "ON corpus_trades(platform, ts, tx_hash, asset_id)"
         )
+    duration_s = time.monotonic() - start
+    _log.info(
+        "corpus.migration_completed",
+        table="corpus_trades",
+        rows=row_count,
+        duration_s=round(duration_s, 2),
+    )
 
 
 def _migrate_market_resolutions_add_platform(conn: sqlite3.Connection) -> None:
@@ -305,6 +330,9 @@ def _migrate_market_resolutions_add_platform(conn: sqlite3.Connection) -> None:
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='market_resolutions'"
     ).fetchone():
         return
+    start = time.monotonic()
+    row_count = conn.execute("SELECT COUNT(*) AS n FROM market_resolutions").fetchone()[0]
+    _log.info("corpus.migration_started", table="market_resolutions", rows=row_count)
     with conn:
         conn.execute(
             """
@@ -335,6 +363,13 @@ def _migrate_market_resolutions_add_platform(conn: sqlite3.Connection) -> None:
         )
         conn.execute("DROP TABLE market_resolutions")
         conn.execute("ALTER TABLE market_resolutions__new RENAME TO market_resolutions")
+    duration_s = time.monotonic() - start
+    _log.info(
+        "corpus.migration_completed",
+        table="market_resolutions",
+        rows=row_count,
+        duration_s=round(duration_s, 2),
+    )
 
 
 def _migrate_training_examples_add_platform(conn: sqlite3.Connection) -> None:
@@ -344,6 +379,9 @@ def _migrate_training_examples_add_platform(conn: sqlite3.Connection) -> None:
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='training_examples'"
     ).fetchone():
         return
+    start = time.monotonic()
+    row_count = conn.execute("SELECT COUNT(*) AS n FROM training_examples").fetchone()[0]
+    _log.info("corpus.migration_started", table="training_examples", rows=row_count)
     with conn:
         conn.execute(
             """
@@ -441,6 +479,13 @@ def _migrate_training_examples_add_platform(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_training_examples_label ON training_examples(label_won)"
         )
+    duration_s = time.monotonic() - start
+    _log.info(
+        "corpus.migration_completed",
+        table="training_examples",
+        rows=row_count,
+        duration_s=round(duration_s, 2),
+    )
 
 
 def _migrate_asset_index_add_platform(conn: sqlite3.Connection) -> None:
@@ -450,6 +495,9 @@ def _migrate_asset_index_add_platform(conn: sqlite3.Connection) -> None:
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='asset_index'"
     ).fetchone():
         return
+    start = time.monotonic()
+    row_count = conn.execute("SELECT COUNT(*) AS n FROM asset_index").fetchone()[0]
+    _log.info("corpus.migration_started", table="asset_index", rows=row_count)
     with conn:
         conn.execute(
             """
@@ -479,6 +527,13 @@ def _migrate_asset_index_add_platform(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_asset_index_condition ON asset_index(condition_id)"
         )
+    duration_s = time.monotonic() - start
+    _log.info(
+        "corpus.migration_completed",
+        table="asset_index",
+        rows=row_count,
+        duration_s=round(duration_s, 2),
+    )
 
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:

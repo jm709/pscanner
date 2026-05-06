@@ -197,6 +197,101 @@ def test_corpus_markets_has_onchain_trades_count_column() -> None:
         conn.close()
 
 
+def _assert_corpus_markets_round_trip(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        "SELECT condition_id, event_slug, closed_at, total_volume_usd, "
+        "backfill_state, enumerated_at FROM corpus_markets"
+    ).fetchone()
+    assert row["condition_id"] == "cond1"
+    assert row["event_slug"] == "slug1"
+    assert row["closed_at"] == 1000
+    assert row["total_volume_usd"] == 5_000_000.0
+    assert row["backfill_state"] == "complete"
+    assert row["enumerated_at"] == 999
+
+
+def _assert_corpus_trades_round_trip(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        "SELECT tx_hash, asset_id, wallet_address, condition_id, outcome_side, "
+        "bs, price, size, notional_usd, ts FROM corpus_trades"
+    ).fetchone()
+    assert row["tx_hash"] == "0xtx"
+    assert row["asset_id"] == "asset1"
+    assert row["wallet_address"] == "0xw"
+    assert row["condition_id"] == "cond1"
+    assert row["outcome_side"] == "YES"
+    assert row["bs"] == "BUY"
+    assert row["price"] == 0.5
+    assert row["size"] == 100.0
+    assert row["notional_usd"] == 50.0
+    assert row["ts"] == 1000
+
+
+def _assert_market_resolutions_round_trip(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        "SELECT condition_id, winning_outcome_index, outcome_yes_won, "
+        "resolved_at, source, recorded_at FROM market_resolutions"
+    ).fetchone()
+    assert row["condition_id"] == "cond1"
+    assert row["winning_outcome_index"] == 0
+    assert row["outcome_yes_won"] == 1
+    assert row["resolved_at"] == 1500
+    assert row["source"] == "gamma"
+    assert row["recorded_at"] == 1500
+
+
+def _assert_asset_index_round_trip(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        "SELECT asset_id, condition_id, outcome_side, outcome_index FROM asset_index"
+    ).fetchone()
+    assert row["asset_id"] == "asset1"
+    assert row["condition_id"] == "cond1"
+    assert row["outcome_side"] == "YES"
+    assert row["outcome_index"] == 0
+
+
+def _assert_training_examples_round_trip(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        "SELECT tx_hash, asset_id, wallet_address, condition_id, trade_ts, built_at, "
+        "prior_trades_count, prior_buys_count, prior_resolved_buys, "
+        "prior_wins, prior_losses, wallet_age_days, prior_trades_30d, "
+        "category_diversity, bet_size_usd, "
+        "side, implied_prob_at_buy, market_category, market_volume_so_far_usd, "
+        "market_unique_traders_so_far, market_age_seconds, label_won, "
+        "prior_realized_pnl_usd, edge_confidence_weighted, "
+        "win_rate_confidence_weighted, is_high_quality_wallet, "
+        "bet_size_relative_to_history FROM training_examples"
+    ).fetchone()
+    assert row["tx_hash"] == "0xtx"
+    assert row["asset_id"] == "asset1"
+    assert row["wallet_address"] == "0xw"
+    assert row["condition_id"] == "cond1"
+    assert row["trade_ts"] == 1000
+    assert row["built_at"] == 1500
+    assert row["prior_trades_count"] == 0
+    assert row["prior_buys_count"] == 0
+    assert row["prior_resolved_buys"] == 0
+    assert row["prior_wins"] == 0
+    assert row["prior_losses"] == 0
+    assert row["wallet_age_days"] == 1.0
+    assert row["prior_trades_30d"] == 0
+    assert row["category_diversity"] == 1
+    assert row["bet_size_usd"] == 50.0
+    assert row["side"] == "YES"
+    assert row["implied_prob_at_buy"] == 0.5
+    assert row["market_category"] == "sports"
+    assert row["market_volume_so_far_usd"] == 1000.0
+    assert row["market_unique_traders_so_far"] == 1
+    assert row["market_age_seconds"] == 3600
+    assert row["label_won"] == 1
+    # Schema defaults preserved through the copy.
+    assert row["prior_realized_pnl_usd"] == 0
+    assert row["edge_confidence_weighted"] == 0
+    assert row["win_rate_confidence_weighted"] == 0
+    assert row["is_high_quality_wallet"] == 0
+    assert row["bet_size_relative_to_history"] == 1
+
+
 def test_apply_migrations_adds_platform_to_existing_corpus() -> None:
     """A pre-existing on-disk corpus (old schema) gets migrated in place
     with every existing row backfilled to platform='polymarket'."""
@@ -343,5 +438,15 @@ def test_apply_migrations_adds_platform_to_existing_corpus() -> None:
             assert "id" not in te_cols, "legacy id column must be dropped during migration"
             te_pk = sorted([r[1] for r in te_info if r[5] > 0])
             assert te_pk == ["asset_id", "platform", "tx_hash", "wallet_address"]
+
+            # Round-trip data assertions: every original column value must
+            # survive the table-copy. Catches column-list typos in the
+            # migration's INSERT/SELECT pairs that the platform-only check
+            # would miss.
+            _assert_corpus_markets_round_trip(conn)
+            _assert_corpus_trades_round_trip(conn)
+            _assert_market_resolutions_round_trip(conn)
+            _assert_asset_index_round_trip(conn)
+            _assert_training_examples_round_trip(conn)
         finally:
             conn.close()
