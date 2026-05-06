@@ -17,7 +17,7 @@ from pscanner.ml.training import run_study
 def test_open_dataset_partitions_markets_by_resolved_at(
     make_synthetic_examples_db: Callable[..., Path],
 ) -> None:
-    """Markets are partitioned 60/20/20 by resolved_at, sorted ascending."""
+    """Markets are partitioned 70/15/15 by resolved_at, sorted ascending."""
     db_path = make_synthetic_examples_db(n_markets=20, rows_per_market=5, seed=0)
 
     with open_dataset(db_path) as ds:
@@ -25,10 +25,10 @@ def test_open_dataset_partitions_markets_by_resolved_at(
         val = ds._val_markets
         test = ds._test_markets
 
-    # 20 markets at 60/20/20 = 12/4/4
-    assert len(train) == 12
-    assert len(val) == 4
-    assert len(test) == 4
+    # 20 markets at 70/15/15 = 14/3/3
+    assert len(train) == 14
+    assert len(val) == 3
+    assert len(test) == 3
 
     # Disjoint
     assert train.isdisjoint(val)
@@ -36,13 +36,13 @@ def test_open_dataset_partitions_markets_by_resolved_at(
     assert val.isdisjoint(test)
 
     # Synthetic markets are named 0xmarket{idx:03d} with monotonically
-    # increasing resolved_at, so train must contain idx 0-11, val 12-15,
-    # test 16-19.
+    # increasing resolved_at, so train must contain idx 0-13, val 14-16,
+    # test 17-19.
     assert "0xmarket000" in train
-    assert "0xmarket011" in train
-    assert "0xmarket012" in val
-    assert "0xmarket015" in val
-    assert "0xmarket016" in test
+    assert "0xmarket013" in train
+    assert "0xmarket014" in val
+    assert "0xmarket016" in val
+    assert "0xmarket017" in test
     assert "0xmarket019" in test
 
 
@@ -116,10 +116,10 @@ def test_open_dataset_reports_row_counts(
     db_path = make_synthetic_examples_db(n_markets=20, rows_per_market=5, seed=0)
 
     with open_dataset(db_path) as ds:
-        # 20 markets x 5 rows = 100 total. 60/20/20 split = 60/20/20.
-        assert ds.n_train_rows == 60
-        assert ds.n_val_rows == 20
-        assert ds.n_test_rows == 20
+        # 20 markets x 5 rows = 100 total. 70/15/15 split = 70/15/15.
+        assert ds.n_train_rows == 70
+        assert ds.n_val_rows == 15
+        assert ds.n_test_rows == 15
 
 
 def test_feature_names_excludes_carriers_and_label(
@@ -145,7 +145,7 @@ def test_feature_names_excludes_carriers_and_label(
 def test_split_iter_yields_expected_chunk_count(
     make_synthetic_examples_db: Callable[..., Path],
 ) -> None:
-    """chunk_size=50 over 60 train rows yields 2 chunks (50 + 10)."""
+    """chunk_size=50 over 70 train rows yields 2 chunks (50 + 20)."""
     db_path = make_synthetic_examples_db(n_markets=20, rows_per_market=5, seed=0)
 
     with open_dataset(db_path, chunk_size=50) as ds:
@@ -159,7 +159,7 @@ def test_split_iter_yields_expected_chunk_count(
         )
         chunks = list(iter(it))
 
-    assert len(chunks) == 2  # 60 train rows / 50 = 2 chunks (50 + 10)
+    assert len(chunks) == 2  # 70 train rows / 50 = 2 chunks (50 + 20)
     x0, y0, implied0 = chunks[0]
     assert x0.shape[0] == 50
     assert x0.dtype.name == "float32"
@@ -167,7 +167,7 @@ def test_split_iter_yields_expected_chunk_count(
     assert implied0.shape == (50,)
 
     x1, _, _ = chunks[1]
-    assert x1.shape[0] == 10  # final partial chunk
+    assert x1.shape[0] == 20  # final partial chunk
 
 
 def test_split_iter_x_columns_match_feature_names(
@@ -216,9 +216,9 @@ def test_split_data_iter_passes_chunks_to_input_data(
         while adapter.next(fake_input_data):
             pass
 
-        assert len(captured_chunks) == 2  # 50 + 10 over 60 train rows
+        assert len(captured_chunks) == 2  # 50 + 20 over 70 train rows
         assert captured_chunks[0] == (50, 50)
-        assert captured_chunks[1] == (10, 10)
+        assert captured_chunks[1] == (20, 20)
 
 
 def test_split_data_iter_reset_re_iterates(
@@ -261,7 +261,7 @@ def test_dtrain_returns_quantile_dmatrix_with_expected_shape(
         dtrain = ds.dtrain(device="cpu")
 
     assert isinstance(dtrain, xgb.QuantileDMatrix)
-    assert dtrain.num_row() == ds.n_train_rows == 60
+    assert dtrain.num_row() == ds.n_train_rows == 70
     assert dtrain.num_col() == len(ds.feature_names)
 
 
@@ -275,7 +275,7 @@ def test_dval_returns_quantile_dmatrix_with_expected_shape(
         dval = ds.dval(device="cpu")
 
     assert isinstance(dval, xgb.QuantileDMatrix)
-    assert dval.num_row() == ds.n_val_rows == 20
+    assert dval.num_row() == ds.n_val_rows == 15
     assert dval.num_col() == len(ds.feature_names)
 
 
@@ -288,8 +288,8 @@ def test_val_aux_returns_y_and_implied_prob_arrays(
     with open_dataset(db_path, chunk_size=50) as ds:
         y_val, implied_val = ds.val_aux()
 
-    assert y_val.shape == (20,)
-    assert implied_val.shape == (20,)
+    assert y_val.shape == (15,)
+    assert implied_val.shape == (15,)
     # Labels are 0/1 ints
     assert set(y_val.tolist()).issubset({0, 1})
     # Implied probabilities are in [0, 1]
@@ -371,7 +371,7 @@ def test_split_iter_handles_null_to_float_transition_within_chunk(
     runs at chunk_size=100_000 hit it the moment a chunk had >100 leading
     NULLs in a nullable column.
 
-    100 markets x 2 rows places te.id 1-120 in train (markets 0-59).
+    100 markets x 2 rows places te.id 1-140 in train (markets 0-69).
     UPDATEs force the mixed-type pattern within a single chunk.
     """
     db_path = make_synthetic_examples_db(n_markets=100, rows_per_market=2, seed=0)
@@ -397,5 +397,5 @@ def test_split_iter_handles_null_to_float_transition_within_chunk(
 
     assert len(chunks) == 1
     x, _y, _implied = chunks[0]
-    assert x.shape[0] == 120
+    assert x.shape[0] == 140
     assert x.dtype.name == "float32"

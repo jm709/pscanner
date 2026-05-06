@@ -10,7 +10,7 @@
     "n_min": 5,
     "seed": 42
   },
-  "test_edge": 0.21367319454343517,
-  "test_accuracy": 0.4583333333333333,
-  "test_logloss": 0.7122082720200221
+  "test_edge": 0.15925492804784042,
+  "test_accuracy": 0.33,
+  "test_logloss": 0.779434249997139
 }
