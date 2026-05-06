@@ -386,15 +386,26 @@ def run_study(
     df = drop_leakage_cols(df)
     splits = temporal_split(df)
     encoder = OneHotEncoder.fit(splits.train, columns=CATEGORICAL_COLS)
-    train_df = encoder.transform(splits.train)
-    val_df = encoder.transform(splits.val)
-    test_df = encoder.transform(splits.test)
-    _log.info("ml.mem", phase="post_split_and_encode", rss_mb=_rss_mb())
+    _log.info("ml.mem", phase="post_encoder_fit", rss_mb=_rss_mb())
 
+    # Process splits one at a time. Each encoded Polars frame is released
+    # as soon as its numpy matrices are extracted, so we never hold all
+    # three encoded frames + all three numpy matrices simultaneously.
+    train_df = encoder.transform(splits.train)
     x_train, y_train, _ = build_feature_matrix(train_df)
+    del train_df
+    gc.collect()
+
+    val_df = encoder.transform(splits.val)
     x_val, y_val, implied_val = build_feature_matrix(val_df)
+    del val_df
+    gc.collect()
+
+    test_df = encoder.transform(splits.test)
     x_test, y_test, implied_test = build_feature_matrix(test_df)
     top_category_test = _extract_top_category(splits.test)
+    del test_df, df, splits
+    gc.collect()
     _log.info("ml.mem", phase="post_build_feature_matrix", rss_mb=_rss_mb())
 
     rates = {
@@ -403,16 +414,6 @@ def run_study(
         "test": float(y_test.mean()),
     }
     _log.info("ml.split_label_won_rate", **rates)
-
-    # Polars frames are no longer needed once the numpy matrices are
-    # extracted; release ~3-4 GB before the optuna phase allocates
-    # DMatrix copies.  Explicit gc.collect() because Python's cyclic
-    # collector doesn't always reclaim Polars/Arrow buffers promptly on
-    # its own — post_polars_release was previously identical to
-    # post_build_feature_matrix without it.
-    del df, splits, train_df, val_df, test_df
-    gc.collect()
-    _log.info("ml.mem", phase="post_polars_release", rss_mb=_rss_mb())
 
     best_iteration, best_params, best_value = _run_optimization_phase(
         output_dir=output_dir,
