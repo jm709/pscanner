@@ -157,11 +157,11 @@ def test_fit_winning_model_returns_booster_with_expected_iterations() -> None:
         "reg_lambda": 1.0,
         "gamma": 0.1,
     }
+    dtrain = xgb.DMatrix(X_train, label=y_train)
     booster = fit_winning_model(
         best_params=params,
         best_iteration=10,
-        X_train=X_train,
-        y_train=y_train,
+        dtrain=dtrain,
         seed=42,
     )
     # 11 trees corresponds to best_iteration + 1.
@@ -183,8 +183,7 @@ def test_evaluate_on_test_returns_metric_dict() -> None:
     booster = fit_winning_model(
         best_params=params,
         best_iteration=20,
-        X_train=X_train,
-        y_train=y_train,
+        dtrain=xgb.DMatrix(X_train, label=y_train),
         seed=42,
     )
     implied_test = np.full(len(y_val), 0.5)
@@ -212,7 +211,10 @@ def test_run_study_writes_all_artifacts(
     )
     assert (output_dir / "model.json").exists()
     assert (output_dir / "preprocessor.json").exists()
-    assert (output_dir / "study.db").exists()
+    assert not (output_dir / "study.db").exists(), (
+        "study.db must not be written — InMemoryStorage replaced RDBStorage to "
+        "avoid the per-trial reload of full study state from SQLite"
+    )
     assert (output_dir / "metrics.json").exists()
     metrics = json.loads((output_dir / "metrics.json").read_text())
     assert "best_params" in metrics
@@ -249,7 +251,6 @@ def test_run_study_n_jobs_2_completes_without_lock_errors(
         n_min=5,
         seed=42,
     )
-    assert (output_dir / "study.db").exists()
     assert (output_dir / "metrics.json").exists()
 
 
@@ -271,8 +272,7 @@ def _toy_booster(
     booster = fit_winning_model(
         best_params=params,
         best_iteration=20,
-        X_train=X_train,
-        y_train=y_train,
+        dtrain=xgb.DMatrix(X_train, label=y_train),
         seed=seed,
     )
     implied_test = np.full(len(y_val), 0.5)
@@ -299,8 +299,7 @@ def test_evaluate_on_test_returns_edge_filtered_when_categories_provided() -> No
             "gamma": 0.1,
         },
         best_iteration=10,
-        X_train=X_train,
-        y_train=y_train,
+        dtrain=xgb.DMatrix(X_train, label=y_train),
         seed=42,
     )
 
@@ -474,8 +473,7 @@ def test_evaluate_on_test_omits_edge_filtered_when_only_one_kwarg_set() -> None:
             "gamma": 0.1,
         },
         best_iteration=10,
-        X_train=X_train,
-        y_train=y_train,
+        dtrain=xgb.DMatrix(X_train, label=y_train),
         seed=42,
     )
 
