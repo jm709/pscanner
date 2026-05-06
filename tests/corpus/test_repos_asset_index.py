@@ -106,6 +106,34 @@ def test_backfill_from_corpus_trades_populates_index(tmp_corpus_db: sqlite3.Conn
     )
 
 
+def test_asset_index_isolates_platforms(tmp_corpus_db: sqlite3.Connection) -> None:
+    repo = AssetIndexRepo(tmp_corpus_db)
+    repo.upsert(
+        AssetEntry(
+            asset_id="a1",
+            condition_id="0xpoly",
+            outcome_side="YES",
+            outcome_index=0,
+            platform="polymarket",
+        )
+    )
+    repo.upsert(
+        AssetEntry(
+            asset_id="a1",
+            condition_id="KX-1",
+            outcome_side="YES",
+            outcome_index=0,
+            platform="kalshi",
+        )
+    )
+    poly = repo.get("a1", platform="polymarket")
+    kalshi = repo.get("a1", platform="kalshi")
+    assert poly is not None
+    assert poly.condition_id == "0xpoly"
+    assert kalshi is not None
+    assert kalshi.condition_id == "KX-1"
+
+
 def test_backfill_is_idempotent(tmp_corpus_db: sqlite3.Connection) -> None:
     trades = CorpusTradesRepo(tmp_corpus_db)
     trades.insert_batch(

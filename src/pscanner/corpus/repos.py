@@ -666,6 +666,7 @@ class AssetEntry:
     condition_id: str
     outcome_side: str
     outcome_index: int
+    platform: str = "polymarket"
 
 
 class AssetIndexRepo:
@@ -682,26 +683,32 @@ class AssetIndexRepo:
         self._conn = conn
 
     def upsert(self, entry: AssetEntry) -> None:
-        """Insert or replace the row for `entry.asset_id`."""
+        """Insert or replace the row for `(entry.platform, entry.asset_id)`."""
         self._conn.execute(
             """
-            INSERT INTO asset_index (asset_id, condition_id, outcome_side, outcome_index)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(asset_id) DO UPDATE SET
+            INSERT INTO asset_index (platform, asset_id, condition_id, outcome_side, outcome_index)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(platform, asset_id) DO UPDATE SET
               condition_id = excluded.condition_id,
               outcome_side = excluded.outcome_side,
               outcome_index = excluded.outcome_index
             """,
-            (entry.asset_id, entry.condition_id, entry.outcome_side, entry.outcome_index),
+            (
+                entry.platform,
+                entry.asset_id,
+                entry.condition_id,
+                entry.outcome_side,
+                entry.outcome_index,
+            ),
         )
         self._conn.commit()
 
-    def get(self, asset_id: str) -> AssetEntry | None:
-        """Look up an entry by its `asset_id`, or `None` if not present."""
+    def get(self, asset_id: str, *, platform: str = "polymarket") -> AssetEntry | None:
+        """Look up an entry by `(platform, asset_id)`, or `None` if not present."""
         row = self._conn.execute(
             "SELECT asset_id, condition_id, outcome_side, outcome_index "
-            "FROM asset_index WHERE asset_id = ?",
-            (asset_id,),
+            "FROM asset_index WHERE platform = ? AND asset_id = ?",
+            (platform, asset_id),
         ).fetchone()
         if row is None:
             return None
@@ -710,10 +717,11 @@ class AssetIndexRepo:
             condition_id=row["condition_id"],
             outcome_side=row["outcome_side"],
             outcome_index=row["outcome_index"],
+            platform=platform,
         )
 
-    def backfill_from_corpus_trades(self) -> int:
-        """Populate `asset_index` from existing `corpus_trades` rows.
+    def backfill_from_corpus_trades(self, *, platform: str = "polymarket") -> int:
+        """Populate `asset_index` from existing `corpus_trades` rows for ``platform``.
 
         Each `corpus_trades` row already carries (asset_id, condition_id,
         outcome_side). We derive `outcome_index` from the side: YES -> 0,
@@ -726,9 +734,10 @@ class AssetIndexRepo:
         cursor = self._conn.execute(
             """
             INSERT OR IGNORE INTO asset_index (
-              asset_id, condition_id, outcome_side, outcome_index
+              platform, asset_id, condition_id, outcome_side, outcome_index
             )
             SELECT
+              ?,
               asset_id,
               condition_id,
               outcome_side,
@@ -736,9 +745,11 @@ class AssetIndexRepo:
             FROM (
               SELECT asset_id, condition_id, outcome_side
               FROM corpus_trades
+              WHERE platform = ?
               GROUP BY asset_id
             )
-            """
+            """,
+            (platform, platform),
         )
         inserted = cursor.rowcount
         self._conn.commit()
