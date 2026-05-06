@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3 as _sqlite3
 from collections.abc import Callable
 from pathlib import Path
@@ -10,6 +11,7 @@ import pytest
 import xgboost as xgb
 
 from pscanner.ml.streaming import SplitDataIter, _SplitIter, open_dataset
+from pscanner.ml.training import run_study
 
 
 def test_open_dataset_partitions_markets_by_resolved_at(
@@ -314,3 +316,43 @@ def test_materialize_test_returns_unencoded_top_categories(
     assert test.top_categories.dtype == object
     valid = {"sports", "esports", "thesis", ""}
     assert all(v in valid for v in test.top_categories.tolist())
+
+
+def test_streaming_pipeline_matches_eager_baseline(
+    tmp_path: Path,
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """test_edge from the streaming run matches the eager-path snapshot.
+
+    Tolerance: 0.001 absolute (per #39 DoD). The eager baseline is
+    captured at tests/ml/data/eager_baseline.json — see
+    tests/ml/_capture_eager_baseline.py.
+    """
+    baseline_path = Path(__file__).parent / "data" / "eager_baseline.json"
+    baseline = json.loads(baseline_path.read_text())
+
+    db_path = make_synthetic_examples_db(
+        n_markets=baseline["fixture"]["n_markets"],
+        rows_per_market=baseline["fixture"]["rows_per_market"],
+        seed=baseline["fixture"]["seed"],
+    )
+    output_dir = tmp_path / "streaming_run"
+    run_study(
+        db_path=db_path,
+        output_dir=output_dir,
+        n_trials=baseline["study"]["n_trials"],
+        n_jobs=baseline["study"]["n_jobs"],
+        n_min=baseline["study"]["n_min"],
+        seed=baseline["study"]["seed"],
+    )
+
+    metrics = json.loads((output_dir / "metrics.json").read_text())
+
+    assert abs(metrics["test_edge"] - baseline["test_edge"]) < 0.001, (
+        f"test_edge {metrics['test_edge']} drifted from "
+        f"eager baseline {baseline['test_edge']} by more than 0.001"
+    )
+    # Looser tolerances on the calibration metrics — they shift more under
+    # quantization changes but are bounded.
+    assert abs(metrics["test_accuracy"] - baseline["test_accuracy"]) < 0.05
+    assert abs(metrics["test_logloss"] - baseline["test_logloss"]) < 0.10
