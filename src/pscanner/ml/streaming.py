@@ -16,6 +16,7 @@ Public API:
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable as _Callable
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -23,6 +24,7 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+import xgboost as xgb
 
 from pscanner.ml.preprocessing import (
     _CATEGORICAL_CAST_COLS,
@@ -229,6 +231,37 @@ class _SplitIter:
         df = drop_leakage_cols(df)  # idempotent; no-op when SELECT already excluded them
         df = self.encoder.transform(df)
         return build_feature_matrix(df)
+
+
+class SplitDataIter(xgb.DataIter):
+    """XGBoost ``DataIter`` adapter over a :class:`_SplitIter`.
+
+    ``release_data=True`` lets XGBoost free each chunk after ingestion;
+    in-flight working set per split is one chunk + XGBoost's quantization
+    buffer instead of the full numpy matrix.
+    """
+
+    def __init__(self, source: _SplitIter) -> None:
+        """Wrap *source* in xgboost's DataIter protocol."""
+        super().__init__(release_data=True)
+        self._source = source
+        self._iter: Iterator[tuple[np.ndarray, np.ndarray, np.ndarray]] | None = None
+
+    def next(self, input_data: _Callable[..., None]) -> bool:
+        """Pull one chunk; return False when exhausted."""
+        if self._iter is None:
+            self._iter = iter(self._source)
+        try:
+            x, y, _implied = next(self._iter)
+        except StopIteration:
+            self._iter = None
+            return False
+        input_data(data=x, label=y)
+        return True
+
+    def reset(self) -> None:
+        """Drop the iterator so the next ``next()`` reopens the cursor."""
+        self._iter = None
 
 
 @contextmanager

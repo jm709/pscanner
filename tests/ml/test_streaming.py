@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from pscanner.ml.streaming import _SplitIter, open_dataset
+from pscanner.ml.streaming import SplitDataIter, _SplitIter, open_dataset
 
 
 def test_open_dataset_partitions_markets_by_resolved_at(
@@ -185,3 +185,64 @@ def test_split_iter_x_columns_match_feature_names(
         x, _, _ = next(iter(it))
 
     assert x.shape[1] == len(ds.feature_names)
+
+
+def test_split_data_iter_passes_chunks_to_input_data(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """SplitDataIter feeds each chunk into the input_data callback once."""
+    db_path = make_synthetic_examples_db(n_markets=20, rows_per_market=5, seed=0)
+
+    with open_dataset(db_path, chunk_size=50) as ds:
+        assert ds.encoder is not None
+        source = _SplitIter(
+            db_path=ds._db_path,
+            condition_ids=ds._train_markets,
+            encoder=ds.encoder,
+            kept_cols=ds._kept_cols,
+            chunk_size=50,
+        )
+        adapter = SplitDataIter(source)
+
+        captured_chunks = []
+
+        def fake_input_data(*, data, label):
+            captured_chunks.append((data.shape[0], label.shape[0]))
+
+        # Drive the iterator until it returns False.
+        while adapter.next(fake_input_data):
+            pass
+
+        assert len(captured_chunks) == 2  # 50 + 10 over 60 train rows
+        assert captured_chunks[0] == (50, 50)
+        assert captured_chunks[1] == (10, 10)
+
+
+def test_split_data_iter_reset_re_iterates(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """reset() lets next() iterate the same SplitIter from the start again."""
+    db_path = make_synthetic_examples_db(n_markets=20, rows_per_market=5, seed=0)
+
+    with open_dataset(db_path, chunk_size=50) as ds:
+        assert ds.encoder is not None
+        source = _SplitIter(
+            db_path=ds._db_path,
+            condition_ids=ds._train_markets,
+            encoder=ds.encoder,
+            kept_cols=ds._kept_cols,
+            chunk_size=50,
+        )
+        adapter = SplitDataIter(source)
+
+        first_pass = []
+        while adapter.next(lambda *, data, label: first_pass.append(data.shape[0])):
+            pass
+
+        adapter.reset()
+
+        second_pass = []
+        while adapter.next(lambda *, data, label: second_pass.append(data.shape[0])):
+            pass
+
+        assert first_pass == second_pass
