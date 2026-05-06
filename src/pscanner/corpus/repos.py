@@ -553,6 +553,7 @@ class TrainingExample:
     last_trade_price: float | None
     price_volatility_recent: float | None
     label_won: int
+    platform: str = "polymarket"
 
 
 class TrainingExamplesRepo:
@@ -570,7 +571,7 @@ class TrainingExamplesRepo:
         cur = self._conn.executemany(
             """
             INSERT OR IGNORE INTO training_examples (
-              tx_hash, asset_id, wallet_address, condition_id, trade_ts, built_at,
+              platform, tx_hash, asset_id, wallet_address, condition_id, trade_ts, built_at,
               prior_trades_count, prior_buys_count, prior_resolved_buys,
               prior_wins, prior_losses, win_rate, avg_implied_prob_paid,
               realized_edge_pp, prior_realized_pnl_usd,
@@ -584,28 +585,33 @@ class TrainingExamplesRepo:
               time_to_resolution_seconds, last_trade_price, price_volatility_recent,
               label_won
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
         self._conn.commit()
         return cur.rowcount or 0
 
-    def truncate(self) -> None:
-        """Delete every row in ``training_examples``."""
-        self._conn.execute("DELETE FROM training_examples")
+    def truncate(self, *, platform: str = "polymarket") -> None:
+        """Delete every row in ``training_examples`` for the given platform."""
+        self._conn.execute("DELETE FROM training_examples WHERE platform = ?", (platform,))
         self._conn.commit()
 
-    def existing_keys(self) -> set[tuple[str, str, str]]:
-        """Return the set of (tx_hash, asset_id, wallet_address) seen so far."""
+    def existing_keys(self, *, platform: str = "polymarket") -> set[tuple[str, str, str]]:
+        """Return (tx_hash, asset_id, wallet_address) for the given platform."""
         rows = self._conn.execute(
-            "SELECT tx_hash, asset_id, wallet_address FROM training_examples"
+            """
+            SELECT tx_hash, asset_id, wallet_address
+            FROM training_examples WHERE platform = ?
+            """,
+            (platform,),
         ).fetchall()
         return {(row["tx_hash"], row["asset_id"], row["wallet_address"]) for row in rows}
 
 
 def _example_to_row(ex: TrainingExample) -> tuple[object, ...]:
     return (
+        ex.platform,
         ex.tx_hash,
         ex.asset_id,
         ex.wallet_address,
