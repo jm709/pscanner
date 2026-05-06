@@ -272,10 +272,8 @@ def _extract_top_category(df: pl.DataFrame) -> np.ndarray:
 
 
 def _run_optimization_phase(
-    output_dir: Path,
-    x_train: np.ndarray,
-    y_train: np.ndarray,
-    x_val: np.ndarray,
+    dtrain: xgb.DMatrix,
+    dval: xgb.DMatrix,
     y_val: np.ndarray,
     implied_val: np.ndarray,
     n_trials: int,
@@ -286,18 +284,11 @@ def _run_optimization_phase(
 ) -> tuple[int, dict[str, object], float]:
     """Run the Optuna study and return ``(best_iteration, best_params, best_value)``.
 
-    Built as a separate function so the DMatrices constructed here are
-    released when the function returns, before ``fit_winning_model`` allocates
-    its own.
+    DMatrices are constructed by the caller and passed in so the source
+    numpy arrays can be released before this function runs — Optuna's
+    100-trial loop is the longest phase and benefits most from minimum
+    resident working set.
     """
-    dtrain = xgb.DMatrix(x_train, label=y_train)
-    dval = xgb.DMatrix(x_val, label=y_val)
-    _log.info("ml.mem", phase="post_dmatrix", rss_mb=_rss_mb())
-
-    # InMemoryStorage avoids the per-trial reload of the full study history
-    # that RDBStorage(SQLite) does on every TPESampler.sample(). Each `run`
-    # uses a fresh output_dir; resume isn't a documented feature here, so
-    # there's no reason to leave a study.db artifact on disk.
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     study = optuna.create_study(
         direction="maximize",
@@ -418,11 +409,19 @@ def run_study(
     }
     _log.info("ml.split_label_won_rate", **rates)
 
+    # Build DMatrices up-front so the source numpy arrays can be released
+    # before the 100-trial Optuna phase. XGBoost's DMatrix carries a
+    # quantized internal copy; the float32 source arrays are dead from
+    # this point until evaluate_on_test (which uses x_test, not x_train).
+    dtrain = xgb.DMatrix(x_train, label=y_train)
+    dval = xgb.DMatrix(x_val, label=y_val)
+    del x_train, y_train, x_val
+    gc.collect()
+    _log.info("ml.mem", phase="pre_optuna", rss_mb=_rss_mb())
+
     best_iteration, best_params, best_value = _run_optimization_phase(
-        output_dir=output_dir,
-        x_train=x_train,
-        y_train=y_train,
-        x_val=x_val,
+        dtrain=dtrain,
+        dval=dval,
         y_val=y_val,
         implied_val=implied_val,
         n_trials=n_trials,
@@ -432,13 +431,22 @@ def run_study(
         device=device,
     )
 
+    # Val arrays + dval are dead after optimization; only dtrain survives
+    # for the winning-model refit.
+    del dval, y_val, implied_val
+    gc.collect()
+    _log.info("ml.mem", phase="post_optuna", rss_mb=_rss_mb())
+
     booster = fit_winning_model(
         best_params=best_params,
         best_iteration=best_iteration,
-        dtrain=xgb.DMatrix(x_train, label=y_train),
+        dtrain=dtrain,
         seed=seed,
         device=device,
     )
+    del dtrain
+    gc.collect()
+    _log.info("ml.mem", phase="post_fit_winning", rss_mb=_rss_mb())
     test_metrics = evaluate_on_test(
         booster=booster,
         X_test=x_test,
