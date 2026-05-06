@@ -284,10 +284,9 @@ def _run_optimization_phase(
 ) -> tuple[int, dict[str, object], float]:
     """Run the Optuna study and return ``(best_iteration, best_params, best_value)``.
 
-    Built as a separate function so the shared ``dtrain``/``dval``
-    DMatrices (each a copy of the train/val data) are released back
-    to the allocator at function return, before ``fit_winning_model``
-    and ``evaluate_on_test`` build their own DMatrices.
+    Built as a separate function so the DMatrices constructed here are
+    released when the function returns, before ``fit_winning_model`` allocates
+    its own.
     """
     dtrain = xgb.DMatrix(x_train, label=y_train)
     dval = xgb.DMatrix(x_val, label=y_val)
