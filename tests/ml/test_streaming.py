@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from pscanner.ml.streaming import open_dataset
+from pscanner.ml.streaming import _SplitIter, open_dataset
 
 
 def test_open_dataset_partitions_markets_by_resolved_at(
@@ -137,3 +137,51 @@ def test_feature_names_excludes_carriers_and_label(
         assert "side__YES" in names or "side__NO" in names
         # Non-cat numeric column survives
         assert "implied_prob_at_buy" in names
+
+
+def test_split_iter_yields_expected_chunk_count(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """chunk_size=50 over 60 train rows yields 2 chunks (50 + 10)."""
+    db_path = make_synthetic_examples_db(n_markets=20, rows_per_market=5, seed=0)
+
+    with open_dataset(db_path, chunk_size=50) as ds:
+        assert ds.encoder is not None  # narrow for ty
+        it = _SplitIter(
+            db_path=ds._db_path,
+            condition_ids=ds._train_markets,
+            encoder=ds.encoder,
+            kept_cols=ds._kept_cols,
+            chunk_size=50,
+        )
+        chunks = list(iter(it))
+
+    assert len(chunks) == 2  # 60 train rows / 50 = 2 chunks (50 + 10)
+    x0, y0, implied0 = chunks[0]
+    assert x0.shape[0] == 50
+    assert x0.dtype.name == "float32"
+    assert y0.shape == (50,)
+    assert implied0.shape == (50,)
+
+    x1, _, _ = chunks[1]
+    assert x1.shape[0] == 10  # final partial chunk
+
+
+def test_split_iter_x_columns_match_feature_names(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """The numpy x matrix has exactly len(feature_names) columns."""
+    db_path = make_synthetic_examples_db(n_markets=10, rows_per_market=5, seed=0)
+
+    with open_dataset(db_path, chunk_size=100) as ds:
+        assert ds.encoder is not None
+        it = _SplitIter(
+            db_path=ds._db_path,
+            condition_ids=ds._train_markets,
+            encoder=ds.encoder,
+            kept_cols=ds._kept_cols,
+            chunk_size=100,
+        )
+        x, _, _ = next(iter(it))
+
+    assert x.shape[1] == len(ds.feature_names)

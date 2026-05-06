@@ -21,13 +21,19 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 
 from pscanner.ml.preprocessing import (
+    _CATEGORICAL_CAST_COLS,
+    _FLOAT32_COLS,
+    _INT32_COLS,
     _NEVER_LOAD_COLS,
     CARRIER_COLS,
     CATEGORICAL_COLS,
     OneHotEncoder,
+    build_feature_matrix,
+    drop_leakage_cols,
 )
 
 _TRAIN_FRAC = 0.6
@@ -167,6 +173,62 @@ def _derive_feature_names(
         non_cat.append("resolved_at")
     indicators = [f"{col}__{lvl}" for col, lvls in encoder.levels.items() for lvl in lvls]
     return tuple(c for c in [*non_cat, *indicators] if c not in excluded)
+
+
+@dataclass
+class _SplitIter:
+    """Yields (x, y, implied) numpy tuples per chunk for one split.
+
+    Each iter() opens a fresh sqlite3.Connection (XGBoost's DataIter may
+    iterate from worker threads; sqlite3 connections aren't thread-safe).
+    The connection's TEMP TABLE is populated from condition_ids on first
+    iteration; the connection closes when iteration finishes or raises.
+    """
+
+    db_path: Path
+    condition_ids: frozenset[str]
+    encoder: OneHotEncoder
+    kept_cols: tuple[str, ...]
+    chunk_size: int
+
+    def __iter__(self) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        select_list = ", ".join(f"te.{c}" for c in self.kept_cols)
+        sql = (
+            f"SELECT {select_list}, mr.resolved_at "  # noqa: S608 -- kept_cols derived from PRAGMA
+            "FROM training_examples te "
+            "JOIN market_resolutions mr USING (condition_id) "
+            "JOIN _split_markets sm USING (condition_id) "
+            "ORDER BY te.id"
+        )
+        col_names = (*self.kept_cols, "resolved_at")
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            _populate_temp_table(conn, "_split_markets", self.condition_ids)
+            cursor = conn.execute(sql)
+            while True:
+                rows = cursor.fetchmany(self.chunk_size)
+                if not rows:
+                    return
+                yield self._encode_chunk(rows, col_names)
+        finally:
+            conn.close()
+
+    def _encode_chunk(
+        self,
+        rows: list[tuple[object, ...]],
+        col_names: tuple[str, ...],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        df = pl.DataFrame(rows, schema=list(col_names), orient="row")
+        # Mirror load_dataset's dtype casting (preserved from preprocessing.py).
+        cast_exprs = [
+            *[pl.col(c).cast(pl.Categorical) for c in _CATEGORICAL_CAST_COLS if c in df.columns],
+            *[pl.col(c).cast(pl.Int32) for c in _INT32_COLS if c in df.columns],
+            *[pl.col(c).cast(pl.Float32) for c in _FLOAT32_COLS if c in df.columns],
+        ]
+        df = df.with_columns(cast_exprs)
+        df = drop_leakage_cols(df)  # idempotent; no-op when SELECT already excluded them
+        df = self.encoder.transform(df)
+        return build_feature_matrix(df)
 
 
 @contextmanager
