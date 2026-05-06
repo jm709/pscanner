@@ -75,11 +75,24 @@ class StreamingDataset:
 
     def dtrain(self, *, device: str) -> xgb.QuantileDMatrix:
         """Build a QuantileDMatrix for the train split."""
-        return self._build_dmatrix(self._train_markets, device=device)
+        return self._build_dmatrix(self._train_markets, device=device, ref=None)
 
-    def dval(self, *, device: str) -> xgb.QuantileDMatrix:
-        """Build a QuantileDMatrix for the val split."""
-        return self._build_dmatrix(self._val_markets, device=device)
+    def dval(
+        self,
+        *,
+        device: str,
+        ref: xgb.QuantileDMatrix | None = None,
+    ) -> xgb.QuantileDMatrix:
+        """Build a QuantileDMatrix for the val split.
+
+        Args:
+            device: XGBoost device string (forwarded to booster, not DMatrix).
+            ref: Optional reference DMatrix (typically ``dtrain``). When
+                supplied, XGBoost reuses the quantile cuts from the reference
+                so train and val share the same bin boundaries — required when
+                passing a ``QuantileDMatrix`` as an eval set to ``xgb.train``.
+        """
+        return self._build_dmatrix(self._val_markets, device=device, ref=ref)
 
     def val_aux(self) -> tuple[np.ndarray, np.ndarray]:
         """Return ``(y_val, implied_prob_val)`` numpy arrays.
@@ -169,6 +182,7 @@ class StreamingDataset:
         condition_ids: frozenset[str],
         *,
         device: str,  # forwarded to booster via xgb.train params, not DMatrix constructor
+        ref: xgb.QuantileDMatrix | None,
     ) -> xgb.QuantileDMatrix:
         if self.encoder is None:
             raise RuntimeError("StreamingDataset.encoder is None; was open_dataset used?")
@@ -179,9 +193,10 @@ class StreamingDataset:
             kept_cols=self._kept_cols,
             chunk_size=self._chunk_size,
         )
-        dm = xgb.QuantileDMatrix(SplitDataIter(source), max_bin=256)
-        dm.feature_names = list(self.feature_names)
-        return dm
+        kwargs: dict[str, object] = {"max_bin": 256}
+        if ref is not None:
+            kwargs["ref"] = ref
+        return xgb.QuantileDMatrix(SplitDataIter(source), **kwargs)
 
 
 def _partition_markets(
