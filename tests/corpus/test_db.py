@@ -450,3 +450,66 @@ def test_apply_migrations_adds_platform_to_existing_corpus() -> None:
             _assert_training_examples_round_trip(conn)
         finally:
             conn.close()
+
+
+def test_apply_migrations_is_idempotent_on_already_migrated_db() -> None:
+    """Calling init_corpus_db twice on a migrated DB is a no-op."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "fresh.sqlite3"
+        conn1 = init_corpus_db(db_path)
+        conn1.execute(
+            """
+            INSERT INTO corpus_markets(platform, condition_id, event_slug, closed_at,
+                                       total_volume_usd, backfill_state, enumerated_at)
+              VALUES ('polymarket', 'cond1', 'slug1', 1000, 5000000.0, 'complete', 999)
+            """
+        )
+        conn1.commit()
+        conn1.close()
+        # Second init must not raise and must preserve the row.
+        conn2 = init_corpus_db(db_path)
+        try:
+            count = conn2.execute("SELECT COUNT(*) AS n FROM corpus_markets").fetchone()["n"]
+            assert count == 1
+        finally:
+            conn2.close()
+
+
+def test_check_constraint_rejects_invalid_platform() -> None:
+    """A row with platform NOT IN ('polymarket','kalshi','manifold') is rejected."""
+    conn = init_corpus_db(Path(":memory:"))
+    try:
+        try:
+            conn.execute(
+                """
+                INSERT INTO corpus_markets(platform, condition_id, event_slug, closed_at,
+                                           total_volume_usd, backfill_state, enumerated_at)
+                  VALUES ('nonsense', 'cond1', 'slug1', 1000, 5000000.0, 'complete', 999)
+                """
+            )
+            conn.commit()
+            raise AssertionError("expected CHECK constraint to reject")
+        except sqlite3.IntegrityError:
+            pass
+    finally:
+        conn.close()
+
+
+def test_cross_platform_rows_coexist() -> None:
+    """Same condition_id under different platforms = two distinct rows."""
+    conn = init_corpus_db(Path(":memory:"))
+    try:
+        for platform in ("polymarket", "kalshi", "manifold"):
+            conn.execute(
+                """
+                INSERT INTO corpus_markets(platform, condition_id, event_slug, closed_at,
+                                           total_volume_usd, backfill_state, enumerated_at)
+                  VALUES (?, 'shared-id', 'slug', 1000, 1.0, 'pending', 999)
+                """,
+                (platform,),
+            )
+        conn.commit()
+        rows = conn.execute("SELECT platform FROM corpus_markets ORDER BY platform").fetchall()
+        assert [r["platform"] for r in rows] == ["kalshi", "manifold", "polymarket"]
+    finally:
+        conn.close()
