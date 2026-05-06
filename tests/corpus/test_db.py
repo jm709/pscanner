@@ -53,9 +53,80 @@ def test_init_corpus_db_creates_asset_index_table() -> None:
     try:
         info = conn.execute("PRAGMA table_info(asset_index)").fetchall()
         cols = {row[1] for row in info}
-        assert cols == {"asset_id", "condition_id", "outcome_side", "outcome_index"}
-        pk_cols = [row[1] for row in info if row[5] == 1]
-        assert pk_cols == ["asset_id"]
+        assert cols == {"platform", "asset_id", "condition_id", "outcome_side", "outcome_index"}
+        pk_cols = sorted([row[1] for row in info if row[5] > 0])
+        assert pk_cols == ["asset_id", "platform"]
+    finally:
+        conn.close()
+
+
+def test_init_corpus_db_corpus_markets_has_platform_pk() -> None:
+    conn = init_corpus_db(Path(":memory:"))
+    try:
+        info = conn.execute("PRAGMA table_info(corpus_markets)").fetchall()
+        cols = {row[1] for row in info}
+        assert "platform" in cols
+        platform_row = next(r for r in info if r[1] == "platform")
+        assert platform_row[3] == 1, "platform must be NOT NULL"
+        pk_cols = sorted([row[1] for row in info if row[5] > 0])
+        assert pk_cols == ["condition_id", "platform"]
+    finally:
+        conn.close()
+
+
+def test_init_corpus_db_corpus_trades_has_platform_pk() -> None:
+    conn = init_corpus_db(Path(":memory:"))
+    try:
+        info = conn.execute("PRAGMA table_info(corpus_trades)").fetchall()
+        cols = {row[1] for row in info}
+        assert "platform" in cols
+        platform_row = next(r for r in info if r[1] == "platform")
+        assert platform_row[3] == 1, "platform must be NOT NULL"
+        pk_cols = sorted([row[1] for row in info if row[5] > 0])
+        assert pk_cols == ["asset_id", "platform", "tx_hash", "wallet_address"]
+    finally:
+        conn.close()
+
+
+def test_init_corpus_db_market_resolutions_has_platform_pk() -> None:
+    conn = init_corpus_db(Path(":memory:"))
+    try:
+        info = conn.execute("PRAGMA table_info(market_resolutions)").fetchall()
+        cols = {row[1] for row in info}
+        assert "platform" in cols
+        platform_row = next(r for r in info if r[1] == "platform")
+        assert platform_row[3] == 1, "platform must be NOT NULL"
+        pk_cols = sorted([row[1] for row in info if row[5] > 0])
+        assert pk_cols == ["condition_id", "platform"]
+    finally:
+        conn.close()
+
+
+def test_init_corpus_db_training_examples_has_platform_pk() -> None:
+    conn = init_corpus_db(Path(":memory:"))
+    try:
+        info = conn.execute("PRAGMA table_info(training_examples)").fetchall()
+        cols = {row[1] for row in info}
+        assert "platform" in cols
+        assert "id" not in cols, "legacy id column must be dropped"
+        platform_row = next(r for r in info if r[1] == "platform")
+        assert platform_row[3] == 1, "platform must be NOT NULL"
+        pk_cols = sorted([row[1] for row in info if row[5] > 0])
+        assert pk_cols == ["asset_id", "platform", "tx_hash", "wallet_address"]
+    finally:
+        conn.close()
+
+
+def test_init_corpus_db_asset_index_has_platform_pk() -> None:
+    conn = init_corpus_db(Path(":memory:"))
+    try:
+        info = conn.execute("PRAGMA table_info(asset_index)").fetchall()
+        cols = {row[1] for row in info}
+        assert "platform" in cols
+        platform_row = next(r for r in info if r[1] == "platform")
+        assert platform_row[3] == 1, "platform must be NOT NULL"
+        pk_cols = sorted([row[1] for row in info if row[5] > 0])
+        assert pk_cols == ["asset_id", "platform"]
     finally:
         conn.close()
 
@@ -88,9 +159,9 @@ def test_corpus_trades_unique_key() -> None:
         conn.execute(
             """
             INSERT INTO corpus_trades
-              (tx_hash, asset_id, wallet_address, condition_id,
+              (platform, tx_hash, asset_id, wallet_address, condition_id,
                outcome_side, bs, price, size, notional_usd, ts)
-            VALUES ('0xtx', 'asset1', '0xw', 'cond1',
+            VALUES ('polymarket', '0xtx', 'asset1', '0xw', 'cond1',
                     'YES', 'BUY', 0.5, 100.0, 50.0, 1000)
             """
         )
@@ -99,9 +170,9 @@ def test_corpus_trades_unique_key() -> None:
             conn.execute(
                 """
                 INSERT INTO corpus_trades
-                  (tx_hash, asset_id, wallet_address, condition_id,
+                  (platform, tx_hash, asset_id, wallet_address, condition_id,
                    outcome_side, bs, price, size, notional_usd, ts)
-                VALUES ('0xtx', 'asset1', '0xw', 'cond1',
+                VALUES ('polymarket', '0xtx', 'asset1', '0xw', 'cond1',
                         'YES', 'BUY', 0.5, 100.0, 50.0, 1000)
                 """
             )

@@ -14,7 +14,8 @@ from pathlib import Path
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS corpus_markets (
-      condition_id TEXT PRIMARY KEY,
+      platform TEXT NOT NULL CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
+      condition_id TEXT NOT NULL,
       event_slug TEXT NOT NULL,
       category TEXT,
       closed_at INTEGER NOT NULL,
@@ -27,13 +28,17 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
       enumerated_at INTEGER NOT NULL,
       backfill_started_at INTEGER,
       backfill_completed_at INTEGER,
-      market_slug TEXT
+      market_slug TEXT,
+      onchain_trades_count INTEGER,
+      onchain_processed_at INTEGER,
+      PRIMARY KEY (platform, condition_id)
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_corpus_markets_state ON corpus_markets(backfill_state)",
     "CREATE INDEX IF NOT EXISTS idx_corpus_markets_volume ON corpus_markets(total_volume_usd DESC)",
     """
     CREATE TABLE IF NOT EXISTS corpus_trades (
+      platform TEXT NOT NULL CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
       tx_hash TEXT NOT NULL,
       asset_id TEXT NOT NULL,
       wallet_address TEXT NOT NULL,
@@ -44,30 +49,33 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
       size REAL NOT NULL,
       notional_usd REAL NOT NULL,
       ts INTEGER NOT NULL,
-      UNIQUE(tx_hash, asset_id, wallet_address)
+      PRIMARY KEY (platform, tx_hash, asset_id, wallet_address)
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_corpus_trades_market_ts ON corpus_trades(condition_id, ts)",
     "CREATE INDEX IF NOT EXISTS idx_corpus_trades_wallet_ts ON corpus_trades(wallet_address, ts)",
     # Composite covers chronological keyset pagination
     # (``CorpusTradesRepo.iter_chronological``) without a temp B-tree sort.
-    # The leading ``ts`` column also satisfies any ts-prefix query the old
-    # single-column index served.
-    "CREATE INDEX IF NOT EXISTS idx_corpus_trades_ts_tx_asset "
-    "ON corpus_trades(ts, tx_hash, asset_id)",
+    # The leading ``platform`` column scopes per-platform iteration to a
+    # contiguous index range; the trailing ``ts, tx_hash, asset_id`` columns
+    # satisfy the keyset-tiebreak ordering.
+    "CREATE INDEX IF NOT EXISTS idx_corpus_trades_platform_ts_tx_asset "
+    "ON corpus_trades(platform, ts, tx_hash, asset_id)",
     """
     CREATE TABLE IF NOT EXISTS market_resolutions (
-      condition_id TEXT PRIMARY KEY,
+      platform TEXT NOT NULL CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
+      condition_id TEXT NOT NULL,
       winning_outcome_index INTEGER NOT NULL,
       outcome_yes_won INTEGER NOT NULL,
       resolved_at INTEGER NOT NULL,
       source TEXT NOT NULL,
-      recorded_at INTEGER NOT NULL
+      recorded_at INTEGER NOT NULL,
+      PRIMARY KEY (platform, condition_id)
     )
     """,
     """
     CREATE TABLE IF NOT EXISTS training_examples (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      platform TEXT NOT NULL CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
       tx_hash TEXT NOT NULL,
       asset_id TEXT NOT NULL,
       wallet_address TEXT NOT NULL,
@@ -106,7 +114,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
       last_trade_price REAL,
       price_volatility_recent REAL,
       label_won INTEGER NOT NULL,
-      UNIQUE(tx_hash, asset_id, wallet_address)
+      PRIMARY KEY (platform, tx_hash, asset_id, wallet_address)
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_training_examples_condition ON training_examples(condition_id)",
@@ -121,10 +129,12 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
     """
     CREATE TABLE IF NOT EXISTS asset_index (
-      asset_id TEXT PRIMARY KEY,
+      platform TEXT NOT NULL CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
+      asset_id TEXT NOT NULL,
       condition_id TEXT NOT NULL,
       outcome_side TEXT NOT NULL,
-      outcome_index INTEGER NOT NULL
+      outcome_index INTEGER NOT NULL,
+      PRIMARY KEY (platform, asset_id)
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_asset_index_condition ON asset_index(condition_id)",
