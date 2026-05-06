@@ -328,6 +328,77 @@ def test_build_features_writes_same_examples_with_mixed_buy_sell(
     assert [r["prior_buys_count"] for r in rows] == [0, 1]
 
 
+def test_build_features_threads_platform_to_training_examples(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """build_features writes training_examples rows tagged with the requested platform."""
+    _seed_market_metadata(tmp_corpus_db, "cond1")
+    trades = CorpusTradesRepo(tmp_corpus_db)
+    resolutions = MarketResolutionsRepo(tmp_corpus_db)
+    examples = TrainingExamplesRepo(tmp_corpus_db)
+    trades.insert_batch([_trade(notional_usd=40.0, price=0.4, size=100.0)])
+    resolutions.upsert(
+        MarketResolution(
+            condition_id="cond1",
+            winning_outcome_index=0,
+            outcome_yes_won=1,
+            resolved_at=5_000,
+            source="gamma",
+        ),
+        recorded_at=5_001,
+    )
+
+    written = build_features(
+        trades_repo=trades,
+        resolutions_repo=resolutions,
+        examples_repo=examples,
+        markets_conn=tmp_corpus_db,
+        now_ts=10_000,
+        platform="polymarket",
+    )
+    assert written == 1
+    rows = tmp_corpus_db.execute("SELECT platform FROM training_examples").fetchall()
+    assert [r["platform"] for r in rows] == ["polymarket"]
+
+
+def test_build_features_platform_filter_excludes_other_platform_data(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """Calling build_features with a platform that has no seeded rows produces 0 examples.
+
+    Seeds polymarket trades + market + resolution, then runs build_features
+    with platform='kalshi'. The platform parameter must scope the trade
+    iteration (and any market/resolution lookups) so no rows are emitted.
+    """
+    _seed_market_metadata(tmp_corpus_db, "cond1")
+    trades = CorpusTradesRepo(tmp_corpus_db)
+    resolutions = MarketResolutionsRepo(tmp_corpus_db)
+    examples = TrainingExamplesRepo(tmp_corpus_db)
+    trades.insert_batch([_trade(notional_usd=40.0, price=0.4, size=100.0)])
+    resolutions.upsert(
+        MarketResolution(
+            condition_id="cond1",
+            winning_outcome_index=0,
+            outcome_yes_won=1,
+            resolved_at=5_000,
+            source="gamma",
+        ),
+        recorded_at=5_001,
+    )
+
+    written = build_features(
+        trades_repo=trades,
+        resolutions_repo=resolutions,
+        examples_repo=examples,
+        markets_conn=tmp_corpus_db,
+        now_ts=10_000,
+        platform="kalshi",
+    )
+    assert written == 0
+    count = tmp_corpus_db.execute("SELECT COUNT(*) AS c FROM training_examples").fetchone()["c"]
+    assert count == 0
+
+
 def test_build_features_is_incremental(tmp_corpus_db: sqlite3.Connection) -> None:
     _seed_market_metadata(tmp_corpus_db, "cond1")
     trades = CorpusTradesRepo(tmp_corpus_db)
