@@ -24,6 +24,8 @@ from pathlib import Path
 import polars as pl
 
 from pscanner.ml.preprocessing import (
+    _NEVER_LOAD_COLS,
+    CARRIER_COLS,
     CATEGORICAL_COLS,
     OneHotEncoder,
 )
@@ -47,6 +49,11 @@ class StreamingDataset:
     _val_markets: frozenset[str] = field(default_factory=frozenset)
     _test_markets: frozenset[str] = field(default_factory=frozenset)
     encoder: OneHotEncoder | None = None
+    feature_names: tuple[str, ...] = ()
+    _kept_cols: tuple[str, ...] = ()
+    n_train_rows: int = 0
+    n_val_rows: int = 0
+    n_test_rows: int = 0
 
 
 def _partition_markets(
@@ -115,6 +122,53 @@ def _fit_encoder_on_train(
     return OneHotEncoder.fit(df, columns=CATEGORICAL_COLS)
 
 
+def _count_split_rows(
+    conn: sqlite3.Connection,
+    train: frozenset[str],
+    val: frozenset[str],
+    test: frozenset[str],
+) -> tuple[int, int, int]:
+    """Run P3: COUNT(*) per split via temp tables."""
+    counts = []
+    for label, markets in (("_p3_train", train), ("_p3_val", val), ("_p3_test", test)):
+        _populate_temp_table(conn, label, markets)
+        (n,) = conn.execute(
+            f"SELECT COUNT(*) FROM training_examples te "  # noqa: S608 -- label is a literal
+            f"JOIN {label} sm USING (condition_id)"
+        ).fetchone()
+        counts.append(int(n))
+    return counts[0], counts[1], counts[2]
+
+
+def _kept_columns(conn: sqlite3.Connection) -> tuple[str, ...]:
+    """Return training_examples columns minus _NEVER_LOAD_COLS, in PRAGMA order.
+
+    Equivalent to the SELECT-list construction in the deleted load_dataset.
+    """
+    rows = conn.execute("PRAGMA table_info(training_examples)").fetchall()
+    return tuple(r[1] for r in rows if r[1] not in _NEVER_LOAD_COLS)
+
+
+def _derive_feature_names(
+    kept_cols: tuple[str, ...],
+    encoder: OneHotEncoder,
+) -> tuple[str, ...]:
+    """Compute the post-encoding column list, less carriers and label.
+
+    Mirrors the deleted ``temporal_split`` + ``encoder.transform`` +
+    ``build_feature_matrix`` pipeline analytically. Encoder.transform appends
+    ``{col}__{level}`` indicators for each categorical column and drops the
+    original; non-categorical columns keep their original SELECT order.
+    """
+    excluded = {*CARRIER_COLS, "label_won"}
+    non_cat = [c for c in kept_cols if c not in encoder.levels]
+    # resolved_at gets joined in by the SELECT (not in PRAGMA).
+    if "resolved_at" not in non_cat:
+        non_cat.append("resolved_at")
+    indicators = [f"{col}__{lvl}" for col, lvls in encoder.levels.items() for lvl in lvls]
+    return tuple(c for c in [*non_cat, *indicators] if c not in excluded)
+
+
 @contextmanager
 def open_dataset(
     db_path: Path,
@@ -135,6 +189,8 @@ def open_dataset(
     try:
         train, val, test = _partition_markets(conn)
         encoder = _fit_encoder_on_train(conn, train)
+        n_train, n_val, n_test = _count_split_rows(conn, train, val, test)
+        kept = _kept_columns(conn)
         ds = StreamingDataset(
             _db_path=db_path,
             _chunk_size=chunk_size,
@@ -142,6 +198,11 @@ def open_dataset(
             _val_markets=val,
             _test_markets=test,
             encoder=encoder,
+            feature_names=_derive_feature_names(kept, encoder),
+            _kept_cols=kept,
+            n_train_rows=n_train,
+            n_val_rows=n_val,
+            n_test_rows=n_test,
         )
         yield ds
     finally:

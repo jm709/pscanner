@@ -104,3 +104,36 @@ def test_open_dataset_uses_temp_table_for_split_filter(
     with open_dataset(db_path) as ds:
         # Just touching .encoder forces P2 to have run.
         _ = ds.encoder
+
+
+def test_open_dataset_reports_row_counts(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """n_train_rows, n_val_rows, n_test_rows match SUM of per-split rows."""
+    db_path = make_synthetic_examples_db(n_markets=20, rows_per_market=5, seed=0)
+
+    with open_dataset(db_path) as ds:
+        # 20 markets x 5 rows = 100 total. 60/20/20 split = 60/20/20.
+        assert ds.n_train_rows == 60
+        assert ds.n_val_rows == 20
+        assert ds.n_test_rows == 20
+
+
+def test_feature_names_excludes_carriers_and_label(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """ds.feature_names is the post-encoding column list, less carriers + label."""
+    db_path = make_synthetic_examples_db(n_markets=10, rows_per_market=5, seed=0)
+
+    with open_dataset(db_path) as ds:
+        names = ds.feature_names
+        # Sentinel exclusions
+        assert "condition_id" not in names
+        assert "trade_ts" not in names
+        assert "resolved_at" not in names
+        assert "label_won" not in names
+        # Cat columns are gone, replaced by indicators
+        assert "side" not in names
+        assert "side__YES" in names or "side__NO" in names
+        # Non-cat numeric column survives
+        assert "implied_prob_at_buy" in names
