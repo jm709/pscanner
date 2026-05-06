@@ -409,10 +409,11 @@ def run_study(
     }
     _log.info("ml.split_label_won_rate", **rates)
 
-    # Build DMatrices up-front so the source numpy arrays can be released
-    # before the 100-trial Optuna phase. XGBoost's DMatrix carries a
-    # quantized internal copy; the float32 source arrays are dead from
-    # this point until evaluate_on_test (which uses x_test, not x_train).
+    # Build DMatrices up-front so the train/val feature arrays can be
+    # released before the 100-trial Optuna phase. XGBoost's DMatrix carries
+    # a quantized internal copy. y_val and implied_val survive into Optuna
+    # (the edge metric closure needs them) and are released after the study
+    # returns. x_test stays live for evaluate_on_test.
     dtrain = xgb.DMatrix(x_train, label=y_train)
     dval = xgb.DMatrix(x_val, label=y_val)
     del x_train, y_train, x_val
