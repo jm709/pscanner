@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 
@@ -25,6 +24,7 @@ from pscanner.ml.preprocessing import (
     load_dataset,
     temporal_split,
 )
+from tests.ml.conftest import _seed_db_from_synthetic
 
 
 def test_leakage_cols_lists_documented_drops() -> None:
@@ -191,44 +191,6 @@ def test_temporal_split_60_20_20_proportion(
     assert split.train.height == 18 * 10
     assert split.val.height == 6 * 10
     assert split.test.height == 6 * 10
-
-
-def _seed_db_from_synthetic(
-    conn: sqlite3.Connection,
-    df: pl.DataFrame,
-) -> None:
-    # Populate corpus_markets, market_resolutions, training_examples
-    # from a synthetic Polars frame so load_dataset has matching rows.
-    markets = df.select(["condition_id", "resolved_at"]).unique()
-    for row in markets.iter_rows(named=True):
-        conn.execute(
-            """
-            INSERT INTO corpus_markets (
-              condition_id, event_slug, category, closed_at,
-              total_volume_usd, market_slug, backfill_state, enumerated_at
-            ) VALUES (?, '', 'sports', ?, 1000.0, '', 'complete', ?)
-            """,
-            (row["condition_id"], int(row["resolved_at"]), int(row["resolved_at"]) - 1),
-        )
-        conn.execute(
-            """
-            INSERT INTO market_resolutions (
-              condition_id, winning_outcome_index, outcome_yes_won,
-              resolved_at, source, recorded_at
-            ) VALUES (?, 0, 1, ?, 'gamma', ?)
-            """,
-            (row["condition_id"], int(row["resolved_at"]), int(row["resolved_at"])),
-        )
-    # Drop resolved_at from the example rows (it lives on market_resolutions).
-    examples = df.drop("resolved_at")
-    for row in examples.iter_rows(named=True):
-        cols = ", ".join(row.keys())
-        placeholders = ", ".join(["?"] * len(row))
-        conn.execute(
-            f"INSERT INTO training_examples ({cols}) VALUES ({placeholders})",  # noqa: S608 -- column names are statically derived from synthetic frame
-            tuple(row.values()),
-        )
-    conn.commit()
 
 
 def test_load_dataset_joins_resolved_at(
