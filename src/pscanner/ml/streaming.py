@@ -42,6 +42,16 @@ _TRAIN_FRAC = 0.6
 _VAL_FRAC = 0.2
 
 
+@dataclass(frozen=True)
+class TestSplit:
+    """Materialized test split for ``evaluate_on_test`` + ``analyze_model.py``."""
+
+    x: np.ndarray  # float32, shape (n_test_rows, n_features)
+    y: np.ndarray  # int32 labels
+    implied_prob: np.ndarray  # float32
+    top_categories: np.ndarray  # object (str), unencoded — for per-category breakdowns
+
+
 @dataclass
 class StreamingDataset:
     """Two-pass streaming view over training_examples.
@@ -105,6 +115,54 @@ class StreamingDataset:
             conn.close()
 
         return y, implied
+
+    def materialize_test(self) -> TestSplit:
+        """Stream the test split into pre-allocated numpy arrays.
+
+        Uses the same _SplitIter as dtrain/dval for X/y/implied; pulls
+        the unencoded ``top_category`` column via a parallel SELECT for
+        per-category metrics in evaluate_on_test.
+        """
+        if self.encoder is None:
+            raise RuntimeError("StreamingDataset.encoder is None; was open_dataset used?")
+
+        x = np.empty((self.n_test_rows, len(self.feature_names)), dtype=np.float32)
+        y = np.empty(self.n_test_rows, dtype=np.int32)
+        implied = np.empty(self.n_test_rows, dtype=np.float32)
+
+        source = _SplitIter(
+            db_path=self._db_path,
+            condition_ids=self._test_markets,
+            encoder=self.encoder,
+            kept_cols=self._kept_cols,
+            chunk_size=self._chunk_size,
+        )
+        offset = 0
+        for x_chunk, y_chunk, implied_chunk in iter(source):
+            end = offset + x_chunk.shape[0]
+            x[offset:end] = x_chunk
+            y[offset:end] = y_chunk
+            implied[offset:end] = implied_chunk
+            offset = end
+
+        # Parallel small SELECT for unencoded top_category strings.
+        # Mirrors the deleted _extract_top_category: nulls become "".
+        top_categories = np.empty(self.n_test_rows, dtype=object)
+        sql = (
+            "SELECT COALESCE(te.top_category, '') "
+            "FROM training_examples te "
+            "JOIN _split_markets sm USING (condition_id) "
+            "ORDER BY te.id"
+        )
+        conn = sqlite3.connect(str(self._db_path))
+        try:
+            _populate_temp_table(conn, "_split_markets", self._test_markets)
+            for i, (cat,) in enumerate(conn.execute(sql)):
+                top_categories[i] = cat
+        finally:
+            conn.close()
+
+        return TestSplit(x=x, y=y, implied_prob=implied, top_categories=top_categories)
 
     def _build_dmatrix(
         self,

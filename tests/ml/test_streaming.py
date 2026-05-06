@@ -293,3 +293,24 @@ def test_val_aux_returns_y_and_implied_prob_arrays(
     # Implied probabilities are in [0, 1]
     assert (implied_val >= 0.0).all()
     assert (implied_val <= 1.0).all()
+
+
+def test_materialize_test_returns_unencoded_top_categories(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """TestSplit.top_categories is the raw category strings, parallel to .y."""
+    db_path = make_synthetic_examples_db(n_markets=20, rows_per_market=5, seed=0)
+
+    with open_dataset(db_path, chunk_size=50) as ds:
+        test = ds.materialize_test()
+
+    assert test.x.shape == (ds.n_test_rows, len(ds.feature_names))
+    assert test.x.dtype.name == "float32"
+    assert test.y.shape == (ds.n_test_rows,)
+    assert test.implied_prob.shape == (ds.n_test_rows,)
+    assert test.top_categories.shape == (ds.n_test_rows,)
+    # top_categories is unencoded — strings like "sports" / "esports" / "thesis"
+    # (or empty string for nulls, mirroring _extract_top_category's fill_null).
+    assert test.top_categories.dtype == object
+    valid = {"sports", "esports", "thesis", ""}
+    assert all(v in valid for v in test.top_categories.tolist())
