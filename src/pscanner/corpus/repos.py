@@ -429,6 +429,7 @@ class MarketResolution:
     outcome_yes_won: int  # 1 if YES won, 0 if NO won
     resolved_at: int
     source: str
+    platform: str = "polymarket"
 
 
 class MarketResolutionsRepo:
@@ -443,10 +444,10 @@ class MarketResolutionsRepo:
         self._conn.execute(
             """
             INSERT INTO market_resolutions (
-              condition_id, winning_outcome_index, outcome_yes_won,
+              platform, condition_id, winning_outcome_index, outcome_yes_won,
               resolved_at, source, recorded_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(condition_id) DO UPDATE SET
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(platform, condition_id) DO UPDATE SET
               winning_outcome_index = excluded.winning_outcome_index,
               outcome_yes_won = excluded.outcome_yes_won,
               resolved_at = excluded.resolved_at,
@@ -454,6 +455,7 @@ class MarketResolutionsRepo:
               recorded_at = excluded.recorded_at
             """,
             (
+                resolution.platform,
                 resolution.condition_id,
                 resolution.winning_outcome_index,
                 resolution.outcome_yes_won,
@@ -464,15 +466,16 @@ class MarketResolutionsRepo:
         )
         self._conn.commit()
 
-    def get(self, condition_id: str) -> MarketResolution | None:
-        """Return the resolution for ``condition_id`` or ``None`` if missing."""
+    def get(self, condition_id: str, *, platform: str = "polymarket") -> MarketResolution | None:
+        """Return the resolution for ``(platform, condition_id)`` or ``None``."""
         row = self._conn.execute(
             """
             SELECT condition_id, winning_outcome_index, outcome_yes_won,
                    resolved_at, source
-            FROM market_resolutions WHERE condition_id = ?
+            FROM market_resolutions
+            WHERE platform = ? AND condition_id = ?
             """,
-            (condition_id,),
+            (platform, condition_id),
         ).fetchone()
         if row is None:
             return None
@@ -482,9 +485,12 @@ class MarketResolutionsRepo:
             outcome_yes_won=row["outcome_yes_won"],
             resolved_at=row["resolved_at"],
             source=row["source"],
+            platform=platform,
         )
 
-    def missing_for(self, condition_ids: Iterable[str]) -> list[str]:
+    def missing_for(
+        self, condition_ids: Iterable[str], *, platform: str = "polymarket"
+    ) -> list[str]:
         """Return the subset of ``condition_ids`` without a resolution row."""
         ids = list(condition_ids)
         if not ids:
@@ -493,9 +499,9 @@ class MarketResolutionsRepo:
         rows = self._conn.execute(
             f"""
             SELECT condition_id FROM market_resolutions
-            WHERE condition_id IN ({placeholders})
-            """,  # noqa: S608 — placeholders are fixed in count to len(ids)
-            ids,
+            WHERE platform = ? AND condition_id IN ({placeholders})
+            """,  # noqa: S608 — placeholder count is fixed to len(ids)
+            (platform, *ids),
         ).fetchall()
         present = {row["condition_id"] for row in rows}
         return [cid for cid in ids if cid not in present]
