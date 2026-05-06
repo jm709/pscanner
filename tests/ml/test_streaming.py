@@ -7,6 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+import xgboost as xgb
 
 from pscanner.ml.streaming import SplitDataIter, _SplitIter, open_dataset
 
@@ -246,3 +247,31 @@ def test_split_data_iter_reset_re_iterates(
             pass
 
         assert first_pass == second_pass
+
+
+def test_dtrain_returns_quantile_dmatrix_with_expected_shape(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """dtrain() returns a QuantileDMatrix with num_row=n_train_rows."""
+    db_path = make_synthetic_examples_db(n_markets=20, rows_per_market=5, seed=0)
+
+    with open_dataset(db_path, chunk_size=50) as ds:
+        dtrain = ds.dtrain(device="cpu")
+
+    assert isinstance(dtrain, xgb.QuantileDMatrix)
+    assert dtrain.num_row() == ds.n_train_rows == 60
+    assert dtrain.num_col() == len(ds.feature_names)
+
+
+def test_dval_returns_quantile_dmatrix_with_expected_shape(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """dval() returns a QuantileDMatrix with num_row=n_val_rows."""
+    db_path = make_synthetic_examples_db(n_markets=20, rows_per_market=5, seed=0)
+
+    with open_dataset(db_path, chunk_size=50) as ds:
+        dval = ds.dval(device="cpu")
+
+    assert isinstance(dval, xgb.QuantileDMatrix)
+    assert dval.num_row() == ds.n_val_rows == 20
+    assert dval.num_col() == len(ds.feature_names)

@@ -63,6 +63,33 @@ class StreamingDataset:
     n_val_rows: int = 0
     n_test_rows: int = 0
 
+    def dtrain(self, *, device: str) -> xgb.QuantileDMatrix:
+        """Build a QuantileDMatrix for the train split."""
+        return self._build_dmatrix(self._train_markets, device=device)
+
+    def dval(self, *, device: str) -> xgb.QuantileDMatrix:
+        """Build a QuantileDMatrix for the val split."""
+        return self._build_dmatrix(self._val_markets, device=device)
+
+    def _build_dmatrix(
+        self,
+        condition_ids: frozenset[str],
+        *,
+        device: str,  # forwarded to booster via xgb.train params, not DMatrix constructor
+    ) -> xgb.QuantileDMatrix:
+        if self.encoder is None:
+            raise RuntimeError("StreamingDataset.encoder is None; was open_dataset used?")
+        source = _SplitIter(
+            db_path=self._db_path,
+            condition_ids=condition_ids,
+            encoder=self.encoder,
+            kept_cols=self._kept_cols,
+            chunk_size=self._chunk_size,
+        )
+        dm = xgb.QuantileDMatrix(SplitDataIter(source), max_bin=256)
+        dm.feature_names = list(self.feature_names)
+        return dm
+
 
 def _partition_markets(
     conn: sqlite3.Connection,
