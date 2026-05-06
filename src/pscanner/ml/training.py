@@ -404,7 +404,8 @@ def run_study(
     test_df = encoder.transform(splits.test)
     x_test, y_test, implied_test = build_feature_matrix(test_df)
     top_category_test = _extract_top_category(splits.test)
-    del test_df, df, splits
+    del test_df
+    del df, splits  # raw frames no longer needed after all splits processed
     gc.collect()
     _log.info("ml.mem", phase="post_build_feature_matrix", rss_mb=_rss_mb())
 
