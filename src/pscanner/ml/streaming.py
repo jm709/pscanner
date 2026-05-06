@@ -355,7 +355,7 @@ class _SplitIter:
         rows: list[tuple[object, ...]],
         col_names: tuple[str, ...],
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        df = pl.DataFrame(rows, schema=list(col_names), orient="row")
+        df = pl.DataFrame(rows, schema=_chunk_schema(col_names), orient="row")
         # Mirror load_dataset's dtype casting (preserved from preprocessing.py).
         cast_exprs = [
             *[pl.col(c).cast(pl.Categorical) for c in _CATEGORICAL_CAST_COLS if c in df.columns],
@@ -366,6 +366,33 @@ class _SplitIter:
         df = drop_leakage_cols(df)  # idempotent; no-op when SELECT already excluded them
         df = self.encoder.transform(df)
         return build_feature_matrix(df)
+
+
+def _chunk_schema(col_names: tuple[str, ...]) -> dict[str, pl.DataType]:
+    """Build an explicit Polars schema for a chunked SELECT result.
+
+    Polars's default ``infer_schema_length=100`` mis-types nullable numeric
+    columns as ``pl.Null`` when the first 100 rows of a chunk are all
+    ``None``, then raises ``ComputeError`` on subsequent real values. An
+    explicit schema removes the dependency on row content. Categories
+    mirror preprocessing.py's dtype-cast tuples; ``_encode_chunk``'s
+    ``cast_exprs`` then narrow Int64 → Int32 and Float64 → Float32.
+    """
+    schema: dict[str, pl.DataType] = {}
+    for c in col_names:
+        if c in _INT32_COLS:
+            schema[c] = pl.Int64()
+        elif c in _FLOAT32_COLS:
+            schema[c] = pl.Float64()
+        elif c in _CATEGORICAL_CAST_COLS:
+            schema[c] = pl.String()
+        elif c in ("trade_ts", "resolved_at"):
+            schema[c] = pl.Int64()  # SQLite INTEGER unix timestamps
+        else:
+            # condition_id and any other carrier strings (LEAKAGE_COLS are
+            # already excluded at SELECT time via _NEVER_LOAD_COLS).
+            schema[c] = pl.String()
+    return schema
 
 
 class SplitDataIter(xgb.DataIter):
