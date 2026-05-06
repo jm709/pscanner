@@ -1,0 +1,16 @@
+{
+  "fixture": {
+    "n_markets": 30,
+    "rows_per_market": 20,
+    "seed": 3
+  },
+  "study": {
+    "n_trials": 3,
+    "n_jobs": 1,
+    "n_min": 5,
+    "seed": 42
+  },
+  "test_edge": 0.21367319454343517,
+  "test_accuracy": 0.4583333333333333,
+  "test_logloss": 0.7122082720200221
+}
