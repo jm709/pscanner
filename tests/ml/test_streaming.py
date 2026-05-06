@@ -275,3 +275,21 @@ def test_dval_returns_quantile_dmatrix_with_expected_shape(
     assert isinstance(dval, xgb.QuantileDMatrix)
     assert dval.num_row() == ds.n_val_rows == 20
     assert dval.num_col() == len(ds.feature_names)
+
+
+def test_val_aux_returns_y_and_implied_prob_arrays(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """val_aux() returns (y_val, implied_prob_val) of length n_val_rows."""
+    db_path = make_synthetic_examples_db(n_markets=20, rows_per_market=5, seed=0)
+
+    with open_dataset(db_path, chunk_size=50) as ds:
+        y_val, implied_val = ds.val_aux()
+
+    assert y_val.shape == (20,)
+    assert implied_val.shape == (20,)
+    # Labels are 0/1 ints
+    assert set(y_val.tolist()).issubset({0, 1})
+    # Implied probabilities are in [0, 1]
+    assert (implied_val >= 0.0).all()
+    assert (implied_val <= 1.0).all()

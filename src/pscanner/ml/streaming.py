@@ -71,6 +71,41 @@ class StreamingDataset:
         """Build a QuantileDMatrix for the val split."""
         return self._build_dmatrix(self._val_markets, device=device)
 
+    def val_aux(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return ``(y_val, implied_prob_val)`` numpy arrays.
+
+        Streamed via the same chunked path as ``dval`` but pulls only
+        the two columns the edge-metric closure needs, into pre-allocated
+        arrays sized from the P3 row count. No feature matrix is built.
+        """
+        y = np.empty(self.n_val_rows, dtype=np.int32)
+        implied = np.empty(self.n_val_rows, dtype=np.float32)
+
+        sql = (
+            "SELECT te.label_won, te.implied_prob_at_buy "
+            "FROM training_examples te "
+            "JOIN _split_markets sm USING (condition_id) "
+            "ORDER BY te.id"
+        )
+        conn = sqlite3.connect(str(self._db_path))
+        try:
+            _populate_temp_table(conn, "_split_markets", self._val_markets)
+            cursor = conn.execute(sql)
+            offset = 0
+            while True:
+                rows = cursor.fetchmany(self._chunk_size)
+                if not rows:
+                    break
+                end = offset + len(rows)
+                for i, (label, prob) in enumerate(rows):
+                    y[offset + i] = int(label)
+                    implied[offset + i] = float(prob)
+                offset = end
+        finally:
+            conn.close()
+
+        return y, implied
+
     def _build_dmatrix(
         self,
         condition_ids: frozenset[str],
