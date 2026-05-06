@@ -26,17 +26,10 @@ import json
 from pathlib import Path
 
 import numpy as np
-import polars as pl
 import xgboost as xgb
 
-from pscanner.ml.preprocessing import (
-    CARRIER_COLS,
-    OneHotEncoder,
-    build_feature_matrix,
-    drop_leakage_cols,
-    load_dataset,
-    temporal_split,
-)
+from pscanner.ml.preprocessing import OneHotEncoder
+from pscanner.ml.streaming import open_dataset
 
 _BINARY_DECISION_THRESHOLD = 0.5
 
@@ -142,18 +135,25 @@ def analyze(model_dir: Path, db_path: Path, top_k: int) -> None:
     encoder = OneHotEncoder.from_json({"levels": encoder_payload["encoder"]["levels"]})
 
     print(f"Loading corpus from {db_path}")
-    df = load_dataset(db_path)
-    df = drop_leakage_cols(df)
-    splits = temporal_split(df)
+    with open_dataset(db_path) as ds:
+        if ds.encoder is None:
+            raise RuntimeError("open_dataset did not fit the encoder")
+        # Sanity-check: encoder fit on this corpus should match the
+        # encoder serialized into preprocessor.json. A mismatch implies
+        # the corpus drifted since the model was trained.
+        if ds.encoder.levels != encoder.levels:
+            print(
+                "WARN: encoder levels in corpus differ from preprocessor.json — "
+                "model may be stale relative to the current corpus."
+            )
+        feature_cols = list(ds.feature_names)
+        test = ds.materialize_test()
 
-    test_df: pl.DataFrame = splits.test
-    print(f"Test split: {test_df.height:,} rows, {len(test_df.columns)} columns")
-
-    top_categories = test_df["top_category"].to_list()
-
-    encoded_test = encoder.transform(test_df)
-    feature_cols = [c for c in encoded_test.columns if c not in (*CARRIER_COLS, "label_won")]
-    x_test, y_test, implied_test = build_feature_matrix(encoded_test)
+    x_test = test.x
+    y_test = test.y
+    implied_test = test.implied_prob
+    top_categories = test.top_categories.tolist()
+    print(f"Test split: {x_test.shape[0]:,} rows, {x_test.shape[1]} columns")
     print(f"Feature matrix: {x_test.shape}")
 
     dtest = xgb.DMatrix(x_test, feature_names=feature_cols)

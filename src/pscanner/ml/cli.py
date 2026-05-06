@@ -10,12 +10,7 @@ import argparse
 import datetime
 from pathlib import Path
 
-import structlog
-
-from pscanner.ml.preprocessing import load_dataset
-from pscanner.ml.training import _rss_mb, run_study
-
-_log = structlog.get_logger(__name__)
+from pscanner.ml.training import run_study
 
 
 def build_ml_parser() -> argparse.ArgumentParser:
@@ -58,6 +53,12 @@ def build_ml_parser() -> argparse.ArgumentParser:
         default="cpu",
         help="XGBoost device. ``cuda`` requires an NVIDIA GPU visible to the process.",
     )
+    train.add_argument(
+        "--chunk-size",
+        type=int,
+        default=100_000,
+        help="Rows per chunk fed into xgboost's DataIter (default 100_000)",
+    )
     return parser
 
 
@@ -69,22 +70,15 @@ def _cmd_train(args: argparse.Namespace) -> int:
     else:
         today = datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%d")
         output_dir = Path("models") / f"{today}-copy_trade_gate"
-    df = load_dataset(db_path)
-    _log.info(
-        "ml.dataset_loaded",
-        rows=df.height,
-        cols=len(df.columns),
-        output_dir=str(output_dir),
-        rss_mb=_rss_mb(),
-    )
     run_study(
-        df=df,
+        db_path=db_path,
         output_dir=output_dir,
         n_trials=args.n_trials,
         n_jobs=args.n_jobs,
         n_min=args.n_min,
         seed=args.seed,
         device=args.device,
+        chunk_size=args.chunk_size,
     )
     return 0
 

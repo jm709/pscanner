@@ -4,21 +4,20 @@ Exposes:
 
 * ``LEAKAGE_COLS`` / ``CARRIER_COLS`` / ``CATEGORICAL_COLS`` -- column
   membership constants documented in the design spec.
+* ``_CATEGORICAL_CAST_COLS`` / ``_INT32_COLS`` / ``_FLOAT32_COLS`` /
+  ``_NEVER_LOAD_COLS`` / ``_NONE_TOKEN`` -- dtype-narrowing constants
+  used by the streaming pipeline.
 * ``drop_leakage_cols`` -- pure column removal.
+* ``build_feature_matrix`` -- extract ``(X, y, implied_prob)`` numpy
+  arrays from a preprocessed split DataFrame.
 * ``OneHotEncoder`` -- fit-on-train, transform-each-split. Handles
   the ``__none__`` level for nullable categoricals.
-* ``temporal_split`` -- assigns each ``condition_id`` to one of
-  ``{train, val, test}`` by ``resolved_at`` percentile.
-* ``load_dataset`` -- sqlite3 -> Polars DataFrame, joining
-  ``training_examples`` with ``market_resolutions.resolved_at``.
 """
 
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -152,56 +151,6 @@ class OneHotEncoder:
         return cls(levels={k: tuple(v) for k, v in payload["levels"].items()})
 
 
-@dataclass(frozen=True)
-class Split:
-    """Three-way temporal split of a training-examples DataFrame."""
-
-    train: pl.DataFrame
-    val: pl.DataFrame
-    test: pl.DataFrame
-
-
-def temporal_split(
-    df: pl.DataFrame,
-    train_frac: float = 0.6,
-    val_frac: float = 0.2,
-) -> Split:
-    """Split rows into train/val/test by ``resolved_at`` market percentiles.
-
-    Each ``condition_id`` lands in exactly one split; trades for a market
-    cannot leak across splits. The split key is the market's
-    ``resolved_at``, sorted ascending. Tie-break on ``condition_id``
-    lexically for a stable order.
-
-    Args:
-        df: Polars DataFrame with at least ``condition_id`` and
-            ``resolved_at`` columns.
-        train_frac: Fraction of distinct markets in train.
-        val_frac: Fraction of distinct markets in val. ``test_frac`` is
-            ``1 - train_frac - val_frac``.
-
-    Returns:
-        A ``Split`` with three disjoint DataFrames.
-    """
-    markets = (
-        df.select(["condition_id", "resolved_at"]).unique().sort(["resolved_at", "condition_id"])
-    )
-    n = markets.height
-    n_train = round(train_frac * n)
-    n_val = round(val_frac * n)
-    train_ids = set(markets["condition_id"].slice(0, n_train).to_list())
-    val_ids = set(markets["condition_id"].slice(n_train, n_val).to_list())
-    test_ids = set(markets["condition_id"].slice(n_train + n_val, n - n_train - n_val).to_list())
-    # Drop condition_id after assignment — downstream pipeline (encoder,
-    # feature matrix) doesn't need it, and three corpus-scale copies of a
-    # 66-char hex column are significant memory overhead.
-    return Split(
-        train=df.filter(pl.col("condition_id").is_in(train_ids)).drop("condition_id"),
-        val=df.filter(pl.col("condition_id").is_in(val_ids)).drop("condition_id"),
-        test=df.filter(pl.col("condition_id").is_in(test_ids)).drop("condition_id"),
-    )
-
-
 # Columns excluded at SELECT time so the full-fat DataFrame is never
 # materialized. ``id`` is the autoincrement primary key, useless for
 # training. ``LEAKAGE_COLS`` are dropped downstream by
@@ -209,57 +158,6 @@ def temporal_split(
 # avoids loading ~1+ GB of hex-string columns (tx_hash, asset_id,
 # wallet_address are 42-66 chars x 5M rows each) only to drop them.
 _NEVER_LOAD_COLS: frozenset[str] = frozenset({"id", *LEAKAGE_COLS})
-
-
-def load_dataset(db_path: Path) -> pl.DataFrame:
-    """Load ``training_examples`` joined with ``market_resolutions.resolved_at``.
-
-    Inner join is correct: ``build-features`` only emits rows for
-    markets with a resolutions entry, so the join is row-preserving.
-
-    Excludes ``LEAKAGE_COLS`` (and the internal ``id`` PK) at the SQL
-    SELECT boundary so they are never materialized. At ~5M rows the
-    three hex-string leakage cols (``tx_hash``, ``asset_id``,
-    ``wallet_address``) account for ~1 GB+ of Python/Arrow allocations
-    on their own, which is enough to OOM a 7.6 GB host during load.
-
-    Args:
-        db_path: Path to the corpus SQLite file.
-
-    Returns:
-        A Polars DataFrame with the surviving ``training_examples``
-        columns plus ``resolved_at``.
-
-    Notes:
-        Low-cardinality string columns (``condition_id``, ``top_category``,
-        ``market_category``, ``side``) are cast to ``pl.Categorical``; integer
-        columns are narrowed to ``pl.Int32`` and float columns to ``pl.Float32``
-        to reduce peak training-pipeline RSS. See ``_CATEGORICAL_CAST_COLS`` /
-        ``_INT32_COLS`` / ``_FLOAT32_COLS`` for the exact column sets.
-    """
-    conn = sqlite3.connect(str(db_path))
-    try:
-        all_cols = [r[1] for r in conn.execute("PRAGMA table_info(training_examples)").fetchall()]
-        keep_cols = [c for c in all_cols if c not in _NEVER_LOAD_COLS]
-        select_list = ", ".join(f"te.{c}" for c in keep_cols)
-        df = pl.read_database(
-            query=(
-                f"SELECT {select_list}, mr.resolved_at "  # noqa: S608 -- col names are derived from PRAGMA, not user input
-                "FROM training_examples te "
-                "JOIN market_resolutions mr USING (condition_id)"
-            ),
-            connection=conn,
-            batch_size=100_000,
-        )
-    finally:
-        conn.close()
-
-    cast_exprs = [
-        *[pl.col(c).cast(pl.Categorical) for c in _CATEGORICAL_CAST_COLS if c in df.columns],
-        *[pl.col(c).cast(pl.Int32) for c in _INT32_COLS if c in df.columns],
-        *[pl.col(c).cast(pl.Float32) for c in _FLOAT32_COLS if c in df.columns],
-    ]
-    return df.with_columns(cast_exprs)
 
 
 def build_feature_matrix(

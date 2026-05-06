@@ -16,7 +16,6 @@ from pathlib import Path
 
 import numpy as np
 import optuna
-import polars as pl
 import structlog
 import xgboost as xgb
 
@@ -24,13 +23,10 @@ from pscanner.categories import Category
 from pscanner.ml.metrics import per_decile_edge_breakdown, realized_edge_metric
 from pscanner.ml.preprocessing import (
     CARRIER_COLS,
-    CATEGORICAL_COLS,
     LEAKAGE_COLS,
     OneHotEncoder,
-    build_feature_matrix,
-    drop_leakage_cols,
-    temporal_split,
 )
+from pscanner.ml.streaming import open_dataset
 
 _log = structlog.get_logger(__name__)
 
@@ -255,22 +251,6 @@ def evaluate_on_test(
     return result
 
 
-def _extract_top_category(df: pl.DataFrame) -> np.ndarray:
-    """Return ``top_category`` values as a numpy string array.
-
-    Null entries become the empty string ``""`` so ``np.isin`` comparisons
-    against real category names always return ``False`` for them.
-
-    Args:
-        df: A Polars DataFrame that still has the ``top_category`` column
-            (i.e. before the leakage-drop or one-hot encoding step).
-
-    Returns:
-        1D numpy array of dtype ``object`` (Python str), one entry per row.
-    """
-    return df["top_category"].fill_null("").to_numpy()
-
-
 def _run_optimization_phase(
     dtrain: xgb.DMatrix,
     dval: xgb.DMatrix,
@@ -337,35 +317,43 @@ def _dump_artifacts(
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
 
 
+def _label_rate_from_dmatrix(d: xgb.QuantileDMatrix) -> float:
+    """Read labels off a QuantileDMatrix without re-reading the source.
+
+    XGBoost stores labels internally; ``get_label()`` is cheap.
+    """
+    return float(np.asarray(d.get_label()).mean())
+
+
 def run_study(
-    df: pl.DataFrame,
+    db_path: Path,
     output_dir: Path,
     n_trials: int,
     n_jobs: int,
     n_min: int,
     seed: int,
     device: str = "cpu",
+    chunk_size: int = 100_000,
     accepted_categories: tuple[str, ...] | None = None,
 ) -> None:
-    """End-to-end study: preprocess, run Optuna, refit, evaluate, dump.
+    """End-to-end study: stream corpus, run Optuna, refit, evaluate, dump.
 
     Mutates ``output_dir`` (created if missing). Writes ``model.json``,
     ``preprocessor.json``, ``metrics.json``.
 
     Args:
-        df: Output of ``load_dataset``.
+        db_path: Path to the corpus SQLite database.
         output_dir: Per-run artifact directory.
         n_trials: Optuna trial budget.
         n_jobs: Parallel trials. Must be >=1.
         n_min: Edge-metric anti-overfit guard threshold.
         seed: Master RNG seed.
-        device: XGBoost device, ``"cpu"`` or ``"cuda"``. CPU is the
-            default so the test suite stays runnable on hosts without
-            an NVIDIA GPU.
+        device: XGBoost device, ``"cpu"`` or ``"cuda"``.
+        chunk_size: Rows per chunk fed into xgboost's DataIter. Default
+            100_000.
         accepted_categories: Category strings to gate on at inference
-            time. Written to ``preprocessor.json`` as metadata; does
-            NOT filter training data. Defaults to
-            ``_DEFAULT_ACCEPTED_CATEGORIES`` when ``None``.
+            time. Written to ``preprocessor.json`` as metadata; does NOT
+            filter training data.
     """
     resolved_categories = (
         accepted_categories if accepted_categories is not None else _DEFAULT_ACCEPTED_CATEGORIES
@@ -376,85 +364,62 @@ def run_study(
 
     _log.info("ml.mem", phase="run_study_entry", rss_mb=_rss_mb())
 
-    df = drop_leakage_cols(df)
-    splits = temporal_split(df)
-    encoder = OneHotEncoder.fit(splits.train, columns=CATEGORICAL_COLS)
-    _log.info("ml.mem", phase="post_encoder_fit", rss_mb=_rss_mb())
+    with open_dataset(db_path, chunk_size=chunk_size) as ds:
+        encoder = ds.encoder
+        if encoder is None:
+            raise RuntimeError("open_dataset did not fit the encoder")
+        _log.info("ml.mem", phase="post_pre_pass", rss_mb=_rss_mb())
 
-    # Process splits one at a time. Each encoded Polars frame is released
-    # as soon as its numpy matrices are extracted, so we never hold all
-    # three encoded frames + all three numpy matrices simultaneously.
-    train_df = encoder.transform(splits.train)
-    x_train, y_train, _ = build_feature_matrix(train_df)
-    del train_df
-    gc.collect()
+        dtrain = ds.dtrain(device=device)
+        dval = ds.dval(device=device, ref=dtrain)
+        y_val, implied_val = ds.val_aux()
+        _log.info("ml.mem", phase="post_dmatrix", rss_mb=_rss_mb())
 
-    val_df = encoder.transform(splits.val)
-    x_val, y_val, implied_val = build_feature_matrix(val_df)
-    del val_df
-    gc.collect()
+        rates = {
+            "train": _label_rate_from_dmatrix(dtrain),
+            "val": float(np.asarray(y_val).mean()),
+            "test": -1.0,  # populated after materialize_test below
+        }
 
-    test_df = encoder.transform(splits.test)
-    x_test, y_test, implied_test = build_feature_matrix(test_df)
-    top_category_test = _extract_top_category(splits.test)
-    del test_df
-    del df, splits  # raw frames no longer needed after all splits processed
-    gc.collect()
-    _log.info("ml.mem", phase="post_build_feature_matrix", rss_mb=_rss_mb())
+        best_iteration, best_params, best_value = _run_optimization_phase(
+            dtrain=dtrain,
+            dval=dval,
+            y_val=y_val,
+            implied_val=implied_val,
+            n_trials=n_trials,
+            n_jobs=n_jobs,
+            n_min=n_min,
+            seed=seed,
+            device=device,
+        )
 
-    rates = {
-        "train": float(y_train.mean()),
-        "val": float(y_val.mean()),
-        "test": float(y_test.mean()),
-    }
+        del dval, y_val, implied_val
+        gc.collect()
+        _log.info("ml.mem", phase="post_optuna", rss_mb=_rss_mb())
+
+        booster = fit_winning_model(
+            best_params=best_params,
+            best_iteration=best_iteration,
+            dtrain=dtrain,
+            seed=seed,
+            device=device,
+        )
+        del dtrain
+        gc.collect()
+        _log.info("ml.mem", phase="post_fit_winning", rss_mb=_rss_mb())
+
+        test = ds.materialize_test()
+        rates["test"] = float(test.y.mean())
+
     _log.info("ml.split_label_won_rate", **rates)
 
-    # Build DMatrices up-front so the train/val feature arrays can be
-    # released before the 100-trial Optuna phase. XGBoost's DMatrix carries
-    # a quantized internal copy. y_val and implied_val survive into Optuna
-    # (the edge metric closure needs them) and are released after the study
-    # returns. x_test stays live for evaluate_on_test.
-    dtrain = xgb.DMatrix(x_train, label=y_train)
-    dval = xgb.DMatrix(x_val, label=y_val)
-    del x_train, y_train, x_val
-    gc.collect()
-    _log.info("ml.mem", phase="pre_optuna", rss_mb=_rss_mb())
-
-    best_iteration, best_params, best_value = _run_optimization_phase(
-        dtrain=dtrain,
-        dval=dval,
-        y_val=y_val,
-        implied_val=implied_val,
-        n_trials=n_trials,
-        n_jobs=n_jobs,
-        n_min=n_min,
-        seed=seed,
-        device=device,
-    )
-
-    # Val arrays + dval are dead after optimization; only dtrain survives
-    # for the winning-model refit.
-    del dval, y_val, implied_val
-    gc.collect()
-    _log.info("ml.mem", phase="post_optuna", rss_mb=_rss_mb())
-
-    booster = fit_winning_model(
-        best_params=best_params,
-        best_iteration=best_iteration,
-        dtrain=dtrain,
-        seed=seed,
-        device=device,
-    )
-    del dtrain
-    gc.collect()
-    _log.info("ml.mem", phase="post_fit_winning", rss_mb=_rss_mb())
     test_metrics = evaluate_on_test(
         booster=booster,
-        X_test=x_test,
-        y_test=y_test,
-        implied_prob_test=implied_test,
+        X_test=test.x,
+        y_test=test.y,
+        implied_prob_test=test.implied_prob,
         n_min=n_min,
-        top_category_test=top_category_test,
+        top_category_test=test.top_categories,
         accepted_categories=resolved_categories,
     )
 

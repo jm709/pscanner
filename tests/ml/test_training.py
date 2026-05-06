@@ -8,7 +8,6 @@ from pathlib import Path
 
 import numpy as np
 import optuna
-import polars as pl
 import pytest
 import xgboost as xgb
 
@@ -197,12 +196,12 @@ def test_evaluate_on_test_returns_metric_dict() -> None:
 
 def test_run_study_writes_all_artifacts(
     tmp_path: Path,
-    make_synthetic_examples: Callable[..., pl.DataFrame],
+    make_synthetic_examples_db: Callable[..., Path],
 ) -> None:
-    df = make_synthetic_examples(n_markets=20, rows_per_market=15, seed=3)
+    db_path = make_synthetic_examples_db(n_markets=20, rows_per_market=15, seed=3)
     output_dir = tmp_path / "run"
     run_study(
-        df=df,
+        db_path=db_path,
         output_dir=output_dir,
         n_trials=3,
         n_jobs=1,
@@ -239,12 +238,12 @@ def test_run_study_writes_all_artifacts(
 
 def test_run_study_n_jobs_2_completes_without_lock_errors(
     tmp_path: Path,
-    make_synthetic_examples: Callable[..., pl.DataFrame],
+    make_synthetic_examples_db: Callable[..., Path],
 ) -> None:
-    df = make_synthetic_examples(n_markets=20, rows_per_market=15, seed=3)
+    db_path = make_synthetic_examples_db(n_markets=20, rows_per_market=15, seed=3)
     output_dir = tmp_path / "run_parallel"
     run_study(
-        df=df,
+        db_path=db_path,
         output_dir=output_dir,
         n_trials=2,
         n_jobs=2,
@@ -351,12 +350,12 @@ def test_evaluate_on_test_omits_edge_filtered_when_categories_none() -> None:
 
 def test_run_study_writes_accepted_categories_to_preprocessor_json(
     tmp_path: Path,
-    make_synthetic_examples: Callable[..., pl.DataFrame],
+    make_synthetic_examples_db: Callable[..., Path],
 ) -> None:
-    df = make_synthetic_examples(n_markets=20, rows_per_market=15, seed=3)
+    db_path = make_synthetic_examples_db(n_markets=20, rows_per_market=15, seed=3)
     output_dir = tmp_path / "run_cats"
     run_study(
-        df=df,
+        db_path=db_path,
         output_dir=output_dir,
         n_trials=2,
         n_jobs=1,
@@ -370,12 +369,12 @@ def test_run_study_writes_accepted_categories_to_preprocessor_json(
 
 def test_run_study_writes_test_edge_filtered_to_metrics_json(
     tmp_path: Path,
-    make_synthetic_examples: Callable[..., pl.DataFrame],
+    make_synthetic_examples_db: Callable[..., Path],
 ) -> None:
-    df = make_synthetic_examples(n_markets=20, rows_per_market=15, seed=3)
+    db_path = make_synthetic_examples_db(n_markets=20, rows_per_market=15, seed=3)
     output_dir = tmp_path / "run_filtered"
     run_study(
-        df=df,
+        db_path=db_path,
         output_dir=output_dir,
         n_trials=2,
         n_jobs=1,
@@ -392,14 +391,14 @@ def test_run_study_writes_test_edge_filtered_to_metrics_json(
 
 def test_run_study_is_deterministic_under_same_seed(
     tmp_path: Path,
-    make_synthetic_examples: Callable[..., pl.DataFrame],
+    make_synthetic_examples_db: Callable[..., Path],
 ) -> None:
-    df = make_synthetic_examples(n_markets=20, rows_per_market=15, seed=3)
+    db_path = make_synthetic_examples_db(n_markets=20, rows_per_market=15, seed=3)
 
     def run_once(name: str) -> dict[str, object]:
         out = tmp_path / name
         run_study(
-            df=df,
+            db_path=db_path,
             output_dir=out,
             n_trials=3,
             n_jobs=1,  # n_jobs=1 for strict determinism
@@ -420,7 +419,7 @@ def test_run_study_is_deterministic_under_same_seed(
 
 def test_run_study_no_regression_on_synthetic_data(
     tmp_path: Path,
-    make_synthetic_examples: Callable[..., pl.DataFrame],
+    make_synthetic_examples_db: Callable[..., Path],
 ) -> None:
     """Dtype casting and condition_id drop must not break end-to-end training.
 
@@ -430,10 +429,10 @@ def test_run_study_no_regression_on_synthetic_data(
     changes are invisible to XGBoost — all inputs are float32 at DMatrix
     construction regardless — so test_edge should remain in [-1, 1].
     """
-    df = make_synthetic_examples(n_markets=20, rows_per_market=15, seed=7)
+    db_path = make_synthetic_examples_db(n_markets=20, rows_per_market=15, seed=7)
     output_dir = tmp_path / "run_no_regression"
     run_study(
-        df=df,
+        db_path=db_path,
         output_dir=output_dir,
         n_trials=2,
         n_jobs=1,

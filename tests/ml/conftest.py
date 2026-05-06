@@ -7,14 +7,56 @@ Used by preprocessing, training, and CLI tests.
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable
+from pathlib import Path
 
 import numpy as np
 import polars as pl
 import pytest
 
+from pscanner.corpus.db import init_corpus_db
+
 _BASE_RESOLVED_AT = 1_700_000_000
 _DAY_SECONDS = 86_400
+
+
+def _seed_db_from_synthetic(
+    conn: sqlite3.Connection,
+    df: pl.DataFrame,
+) -> None:
+    """Populate corpus_markets, market_resolutions, training_examples from
+    a synthetic-examples Polars frame so load_dataset / open_dataset see
+    matching rows."""
+    markets = df.select(["condition_id", "resolved_at"]).unique()
+    for row in markets.iter_rows(named=True):
+        conn.execute(
+            """
+            INSERT INTO corpus_markets (
+              condition_id, event_slug, category, closed_at,
+              total_volume_usd, market_slug, backfill_state, enumerated_at
+            ) VALUES (?, '', 'sports', ?, 1000.0, '', 'complete', ?)
+            """,
+            (row["condition_id"], int(row["resolved_at"]), int(row["resolved_at"]) - 1),
+        )
+        conn.execute(
+            """
+            INSERT INTO market_resolutions (
+              condition_id, winning_outcome_index, outcome_yes_won,
+              resolved_at, source, recorded_at
+            ) VALUES (?, 0, 1, ?, 'gamma', ?)
+            """,
+            (row["condition_id"], int(row["resolved_at"]), int(row["resolved_at"])),
+        )
+    examples = df.drop("resolved_at")
+    for row in examples.iter_rows(named=True):
+        cols = ", ".join(row.keys())
+        placeholders = ", ".join(["?"] * len(row))
+        conn.execute(
+            f"INSERT INTO training_examples ({cols}) VALUES ({placeholders})",  # noqa: S608 -- column names are statically derived from synthetic frame
+            tuple(row.values()),
+        )
+    conn.commit()
 
 
 def _make_synthetic_examples(
@@ -118,3 +160,30 @@ def _make_synthetic_examples(
 def make_synthetic_examples() -> Callable[..., pl.DataFrame]:
     """Return the synthetic-examples builder."""
     return _make_synthetic_examples
+
+
+@pytest.fixture
+def make_synthetic_examples_db(
+    tmp_path: Path,
+    make_synthetic_examples: Callable[..., pl.DataFrame],
+) -> Callable[..., Path]:
+    """Return a builder: (n_markets, rows_per_market, seed) -> Path to populated SQLite."""
+
+    def _build(
+        *,
+        n_markets: int = 30,
+        rows_per_market: int = 20,
+        seed: int = 0,
+    ) -> Path:
+        df = make_synthetic_examples(
+            n_markets=n_markets, rows_per_market=rows_per_market, seed=seed
+        )
+        db_path = tmp_path / f"corpus_n{n_markets}_r{rows_per_market}_s{seed}.sqlite3"
+        conn = init_corpus_db(db_path)
+        try:
+            _seed_db_from_synthetic(conn, df)
+        finally:
+            conn.close()
+        return db_path
+
+    return _build
