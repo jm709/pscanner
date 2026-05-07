@@ -405,8 +405,22 @@ class MonotoneEvaluatorConfig(_Section):
     min_edge_dollars: float = 0.02
 
 
+class GateModelEvaluatorConfig(_Section):
+    """Tunables for the gate-model paper-trading evaluator (#80).
+
+    Single-leg evaluator. Sizing is constant ``bankroll * position_fraction``
+    matching the project's "constant sizing, infinite paper bankroll"
+    research config. The evaluator does NOT call the booster — the
+    prediction is pre-computed in the alert body by ``GateModelDetector``.
+    """
+
+    enabled: bool = False
+    min_edge_pct: float = 0.01
+    position_fraction: float = 0.005
+
+
 class EvaluatorsConfig(_Section):
-    """Container for the five per-source evaluator configs.
+    """Container for the per-source evaluator configs.
 
     Disabling a source via its ``enabled`` flag prevents that Evaluator
     from being constructed at scheduler boot — no detector code path
@@ -420,6 +434,7 @@ class EvaluatorsConfig(_Section):
     velocity: VelocityEvaluatorConfig = Field(default_factory=VelocityEvaluatorConfig)
     mispricing: MispricingEvaluatorConfig = Field(default_factory=MispricingEvaluatorConfig)
     monotone: MonotoneEvaluatorConfig = Field(default_factory=MonotoneEvaluatorConfig)
+    gate_model: GateModelEvaluatorConfig = Field(default_factory=GateModelEvaluatorConfig)
 
 
 class PaperTradingConfig(_Section):

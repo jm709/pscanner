@@ -9,6 +9,7 @@ from pscanner.config import (
     Config,
     EvaluatorsConfig,
     GateModelConfig,
+    GateModelEvaluatorConfig,
     GateModelMarketFilterConfig,
     MispricingEvaluatorConfig,
     MoveAttributionConfig,
@@ -148,3 +149,16 @@ def test_root_config_aggregates_gate_sections() -> None:
     cfg = Config()
     assert isinstance(cfg.gate_model, GateModelConfig)
     assert isinstance(cfg.gate_model_market_filter, GateModelMarketFilterConfig)
+
+
+def test_gate_model_evaluator_config_defaults() -> None:
+    cfg = GateModelEvaluatorConfig()
+    assert cfg.enabled is False
+    assert cfg.min_edge_pct == 0.01
+    assert cfg.position_fraction == 0.005
+
+
+def test_evaluators_config_aggregates_gate_model() -> None:
+    cfg = EvaluatorsConfig()
+    assert isinstance(cfg.gate_model, GateModelEvaluatorConfig)
+    assert cfg.gate_model.enabled is False
