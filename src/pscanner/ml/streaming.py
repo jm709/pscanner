@@ -243,6 +243,12 @@ def _populate_temp_table(
     Used in place of an ``IN (?, ?, ...)`` parameterized query so the
     SQLite ``SQLITE_MAX_VARIABLE_NUMBER`` limit (32766 in 3.32+) doesn't
     bite as the corpus grows. Cost: ~10K INSERTs at startup, < 100 ms.
+
+    Single-platform note: the table stores ``condition_id`` only because
+    each training run is single-platform. Multi-platform aggregation
+    (future follow-up) needs ``(platform, condition_id)`` tuples here and
+    a corresponding JOIN tightening to ``USING (platform, condition_id)``
+    in ``_SplitIter`` / ``val_aux`` / ``materialize_test``.
     """
     conn.execute(f"DROP TABLE IF EXISTS {table_name}")
     conn.execute(f"CREATE TEMP TABLE {table_name} (condition_id TEXT PRIMARY KEY)")
