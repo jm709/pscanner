@@ -20,6 +20,8 @@ import structlog
 from pscanner.corpus.db import init_corpus_db
 from pscanner.corpus.enumerator import enumerate_closed_markets
 from pscanner.corpus.examples import build_features
+from pscanner.corpus.manifold_enumerator import enumerate_resolved_manifold_markets
+from pscanner.corpus.manifold_walker import walk_manifold_market
 from pscanner.corpus.market_walker import walk_market
 from pscanner.corpus.onchain_backfill import (
     clear_truncation_flags,
@@ -35,6 +37,8 @@ from pscanner.corpus.repos import (
 )
 from pscanner.corpus.resolutions import record_resolutions
 from pscanner.corpus.subgraph_ingest import run_subgraph_backfill
+from pscanner.manifold.client import ManifoldClient
+from pscanner.manifold.ids import ManifoldMarketId
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.onchain_rpc import OnchainRpcClient
@@ -76,6 +80,16 @@ def build_corpus_parser() -> argparse.ArgumentParser:
         "backfill", help="Bulk historical pull of every closed qualifying market"
     )
     _add_db_arg(backfill)
+    backfill.add_argument(
+        "--platform",
+        type=str,
+        choices=["polymarket", "manifold"],
+        default="polymarket",
+        help=(
+            "Platform to ingest. Defaults to polymarket. "
+            "`manifold` runs the Manifold REST enumerator + bet walker."
+        ),
+    )
     refresh = sub.add_parser("refresh", help="Incremental pass for newly-resolved markets")
     _add_db_arg(refresh)
     bf = sub.add_parser("build-features", help="Rebuild training_examples from raw events")
@@ -266,7 +280,14 @@ async def _drain_pending(*, conn: sqlite3.Connection, data: DataClient) -> int:
 
 
 async def _cmd_backfill(args: argparse.Namespace) -> int:
-    """Bulk-pull every closed qualifying market into the corpus."""
+    """Run the corpus backfill for the requested platform."""
+    if args.platform == "manifold":
+        return await _run_manifold_backfill(args)
+    return await _run_polymarket_backfill(args)
+
+
+async def _run_polymarket_backfill(args: argparse.Namespace) -> int:
+    """Bulk-pull every closed qualifying Polymarket market into the corpus."""
     conn = init_corpus_db(Path(args.db))
     try:
         async with AsyncExitStack() as stack:
@@ -279,6 +300,29 @@ async def _cmd_backfill(args: argparse.Namespace) -> int:
                 since_ts=None,
             )
             await _drain_pending(conn=conn, data=data)
+        return 0
+    finally:
+        conn.close()
+
+
+async def _run_manifold_backfill(args: argparse.Namespace) -> int:
+    """Manifold path: enumerate resolved binary markets, then walk each one."""
+    conn = init_corpus_db(Path(args.db))
+    markets_repo = CorpusMarketsRepo(conn)
+    trades_repo = CorpusTradesRepo(conn)
+    now_ts = int(time.time())
+    try:
+        async with ManifoldClient() as client:
+            await enumerate_resolved_manifold_markets(client, markets_repo, now_ts=now_ts)
+            while pending := markets_repo.next_pending(limit=10, platform="manifold"):
+                for market in pending:
+                    await walk_manifold_market(
+                        client,
+                        markets_repo,
+                        trades_repo,
+                        market_id=ManifoldMarketId(market.condition_id),
+                        now_ts=now_ts,
+                    )
         return 0
     finally:
         conn.close()
