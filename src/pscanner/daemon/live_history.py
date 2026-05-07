@@ -14,8 +14,10 @@ providers, which is the parity contract validated by
 
 from __future__ import annotations
 
+import heapq
 import json
 import sqlite3
+from typing import cast
 
 from pscanner.corpus.features import (
     MarketMetadata,
@@ -24,6 +26,7 @@ from pscanner.corpus.features import (
     WalletState,
     _TradeFields,  # re-using the structural Protocol from features
     apply_buy_to_state,
+    apply_resolution_to_state,
     apply_sell_to_state,
     apply_trade_to_market,
     empty_market_state,
@@ -56,25 +59,21 @@ class LiveHistoryProvider:
         """Bind to an open daemon-DB connection and a metadata mapping."""
         self._conn = conn
         self._metadata = metadata
+        self._resolutions: dict[str, tuple[int, int]] = {}
 
     def market_metadata(self, condition_id: str) -> MarketMetadata:
         """Return static metadata for ``condition_id``; raises KeyError if unknown."""
         return self._metadata[condition_id]
 
     def wallet_state(self, wallet_address: str, as_of_ts: int) -> WalletState:
-        """Return the wallet's state at ``as_of_ts``.
-
-        ``as_of_ts`` is used only as the seed ``first_seen_ts`` for an
-        unknown wallet (matching ``StreamingHistoryProvider`` semantics).
-        Resolution drain is implemented in Task 4.
-        """
+        """Return the wallet's state at ``as_of_ts``, draining ready resolutions."""
         row = self._conn.execute(
             "SELECT * FROM wallet_state_live WHERE wallet_address = ?",
             (wallet_address,),
         ).fetchone()
         if row is None:
             return empty_wallet_state(first_seen_ts=as_of_ts)
-        return WalletState(
+        state = WalletState(
             first_seen_ts=row["first_seen_ts"],
             prior_trades_count=row["prior_trades_count"],
             prior_buys_count=row["prior_buys_count"],
@@ -90,6 +89,55 @@ class LiveHistoryProvider:
             bet_size_count=row["bet_size_count"],
             category_counts=dict(json.loads(row["category_counts_json"])),
         )
+        unresolved = list(json.loads(row["unresolved_buys_json"]))
+        new_state, remaining = self._drain_resolved_buys(state, unresolved, as_of_ts)
+        if remaining is not unresolved:
+            self._persist_wallet(wallet_address, new_state, remaining)
+        return new_state
+
+    def _drain_resolved_buys(
+        self,
+        state: WalletState,
+        unresolved: list[dict[str, object]],
+        as_of_ts: int,
+    ) -> tuple[WalletState, list[dict[str, object]]]:
+        """Apply resolutions whose ``resolved_at < as_of_ts`` to ``state``.
+
+        Returns the (possibly mutated) state plus the list of buys still
+        waiting for resolution (or resolved past the ``as_of_ts`` cutoff).
+        """
+        ready: list[tuple[int, int, dict[str, object]]] = []
+        deferred: list[dict[str, object]] = []
+        for idx, buy in enumerate(unresolved):
+            cond_id = cast(str, buy["condition_id"])
+            resolution = self._resolutions.get(cond_id)
+            if resolution is None:
+                deferred.append(buy)
+                continue
+            resolved_at, _ = resolution
+            heapq.heappush(ready, (resolved_at, idx, buy))
+        if not ready:
+            return state, unresolved
+        leftover: list[dict[str, object]] = list(deferred)
+        while ready:
+            resolved_at, _, buy = heapq.heappop(ready)
+            if resolved_at >= as_of_ts:
+                leftover.append(buy)
+                continue
+            cond_id = cast(str, buy["condition_id"])
+            _, yes_won = self._resolutions[cond_id]
+            side_yes = bool(buy["side_yes"])
+            won = (yes_won == 1) if side_yes else (yes_won == 0)
+            size = float(buy["size"])  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+            notional = float(buy["notional_usd"])  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+            payout = size if won else 0.0
+            state = apply_resolution_to_state(
+                state,
+                won=won,
+                notional_usd=notional,
+                payout_usd=payout,
+            )
+        return state, leftover
 
     def market_state(self, condition_id: str, as_of_ts: int) -> MarketState:
         """Return per-market running state.
@@ -267,5 +315,13 @@ class LiveHistoryProvider:
         resolved_at: int,
         outcome_yes_won: int,
     ) -> None:
-        """Record a market's resolution. Implemented in Task 4."""
-        raise NotImplementedError
+        """Record a market's resolution.
+
+        Subsequent ``wallet_state`` queries past ``resolved_at`` drain
+        any unresolved buys against this market for the queried wallet.
+        """
+        self._resolutions[condition_id] = (resolved_at, outcome_yes_won)
+
+    def get_resolution(self, condition_id: str) -> tuple[int, int] | None:
+        """Return ``(resolved_at, outcome_yes_won)`` if known, else ``None``."""
+        return self._resolutions.get(condition_id)
