@@ -13,6 +13,7 @@ from typing import Final
 import structlog
 
 from pscanner.corpus.repos import MarketResolution, MarketResolutionsRepo
+from pscanner.kalshi.client import KalshiClient
 from pscanner.manifold.client import ManifoldClient
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.models import Market
@@ -134,6 +135,77 @@ async def record_manifold_resolutions(
                 resolved_at=resolved_at,
                 source="manifold-rest",
                 platform="manifold",
+            ),
+            recorded_at=now_ts,
+        )
+        written += 1
+    return written
+
+
+async def record_kalshi_resolutions(
+    *,
+    client: KalshiClient,
+    repo: MarketResolutionsRepo,
+    targets: Iterable[tuple[str, int]],
+    now_ts: int,
+) -> int:
+    """Fetch resolution outcomes for settled Kalshi markets.
+
+    For each target, calls ``KalshiClient.get_market(ticker)`` and reads
+    ``market.result``. Writes a ``market_resolutions`` row for ``"yes"``
+    or ``"no"``. Logs and skips for ``"scalar"`` (defensive — should be
+    filtered at enumeration), ``""`` with terminal status (voided / odd
+    state), and any market with ``status == "disputed"`` (contested
+    resolution; the next refresh will pick it up once Kalshi moves it to
+    a clean terminal state).
+
+    Args:
+        client: Open ``KalshiClient``.
+        repo: ``MarketResolutionsRepo`` to upsert into.
+        targets: Iterable of ``(market_ticker, resolved_at_hint)``.
+        now_ts: Unix seconds, recorded as ``recorded_at`` on each row.
+
+    Returns:
+        Count of resolutions actually written (excludes skipped markets).
+    """
+    written = 0
+    for ticker, resolved_at in targets:
+        market = await client.get_market(ticker)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        if market.status == "disputed":
+            _log.warning(
+                "corpus.kalshi_resolution_disputed",
+                market_ticker=ticker,
+                result=market.result,
+            )
+            continue
+        if market.result == "yes":
+            outcome_yes_won = 1
+            winning_outcome_index = 0
+        elif market.result == "no":
+            outcome_yes_won = 0
+            winning_outcome_index = 1
+        elif market.result == "scalar":
+            _log.warning(
+                "corpus.kalshi_resolution_scalar",
+                market_ticker=ticker,
+            )
+            continue
+        else:
+            _log.warning(
+                "corpus.kalshi_resolution_undetermined",
+                market_ticker=ticker,
+                status=market.status,
+                result=market.result,
+            )
+            continue
+        repo.upsert(
+            MarketResolution(
+                condition_id=ticker,
+                winning_outcome_index=winning_outcome_index,
+                outcome_yes_won=outcome_yes_won,
+                resolved_at=resolved_at,
+                source="kalshi-rest",
+                platform="kalshi",
             ),
             recorded_at=now_ts,
         )

@@ -12,9 +12,11 @@ from pscanner.corpus.repos import (
 )
 from pscanner.corpus.resolutions import (
     determine_outcome_yes_won,
+    record_kalshi_resolutions,
     record_manifold_resolutions,
     record_resolutions,
 )
+from pscanner.kalshi.models import KalshiMarket
 from pscanner.manifold.models import ManifoldMarket
 from pscanner.poly.models import Market
 
@@ -217,3 +219,83 @@ async def test_record_manifold_resolutions_skips_mkt_and_cancel(
     assert repo.get("mkt-market", platform="manifold") is None
     assert repo.get("cancel-market", platform="manifold") is None
     assert repo.get("null-market", platform="manifold") is None
+
+
+class _FakeKalshiClient:
+    """Stub returning a fixed KalshiMarket by ticker."""
+
+    def __init__(self, markets: dict[str, KalshiMarket]) -> None:
+        self._markets = markets
+
+    async def get_market(self, ticker: str) -> KalshiMarket:
+        return self._markets[ticker]
+
+
+def _kalshi_market(*, ticker: str, status: str, result: str | None) -> KalshiMarket:
+    payload: dict[str, object] = {
+        "ticker": ticker,
+        "event_ticker": "KX",
+        "title": f"Q for {ticker}",
+        "status": status,
+    }
+    if result is not None:
+        payload["result"] = result
+    return KalshiMarket.model_validate(payload)
+
+
+@pytest.mark.asyncio
+async def test_record_kalshi_resolutions_writes_yes_no(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """YES and NO resolutions land in market_resolutions with platform='kalshi'."""
+    repo = MarketResolutionsRepo(tmp_corpus_db)
+    client = _FakeKalshiClient(
+        {
+            "KX-YES": _kalshi_market(ticker="KX-YES", status="finalized", result="yes"),
+            "KX-NO": _kalshi_market(ticker="KX-NO", status="determined", result="no"),
+        }
+    )
+    written = await record_kalshi_resolutions(
+        client=client,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        repo=repo,
+        targets=[("KX-YES", 1_700_000_000), ("KX-NO", 1_700_000_001)],
+        now_ts=2_000_000_000,
+    )
+    assert written == 2
+    yes_row = repo.get("KX-YES", platform="kalshi")
+    no_row = repo.get("KX-NO", platform="kalshi")
+    assert yes_row is not None
+    assert yes_row.outcome_yes_won == 1
+    assert yes_row.platform == "kalshi"
+    assert yes_row.source == "kalshi-rest"
+    assert no_row is not None
+    assert no_row.outcome_yes_won == 0
+
+
+@pytest.mark.asyncio
+async def test_record_kalshi_resolutions_skips_disputed_undetermined_scalar(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """disputed/undetermined/scalar resolutions are logged + skipped."""
+    repo = MarketResolutionsRepo(tmp_corpus_db)
+    client = _FakeKalshiClient(
+        {
+            "disputed": _kalshi_market(ticker="disputed", status="disputed", result="yes"),
+            "undetermined": _kalshi_market(ticker="undetermined", status="finalized", result=""),
+            "scalar": _kalshi_market(ticker="scalar", status="finalized", result="scalar"),
+        }
+    )
+    written = await record_kalshi_resolutions(
+        client=client,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        repo=repo,
+        targets=[
+            ("disputed", 1_700_000_000),
+            ("undetermined", 1_700_000_001),
+            ("scalar", 1_700_000_002),
+        ],
+        now_ts=2_000_000_000,
+    )
+    assert written == 0
+    assert repo.get("disputed", platform="kalshi") is None
+    assert repo.get("undetermined", platform="kalshi") is None
+    assert repo.get("scalar", platform="kalshi") is None
