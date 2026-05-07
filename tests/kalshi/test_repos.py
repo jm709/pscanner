@@ -165,6 +165,25 @@ def test_markets_repo_cached_at_populated(tmp_db: sqlite3.Connection) -> None:
     assert row.cached_at >= int(time.time()) - 5
 
 
+def test_kalshi_markets_repo_roundtrips_result_field(tmp_db: sqlite3.Connection) -> None:
+    """`upsert` writes the result column; the value survives round-trip."""
+    repo = KalshiMarketsRepo(tmp_db)
+    market = KalshiMarket.model_validate(
+        {
+            "ticker": "KX-1",
+            "event_ticker": "KX",
+            "title": "Q?",
+            "status": "finalized",
+            "result": "yes",
+        }
+    )
+    repo.upsert(market)
+    row = tmp_db.execute(
+        "SELECT result FROM kalshi_markets WHERE ticker = ?", (market.ticker,)
+    ).fetchone()
+    assert row[0] == "yes"
+
+
 # ---------------------------------------------------------------------------
 # KalshiTradesRepo
 # ---------------------------------------------------------------------------
