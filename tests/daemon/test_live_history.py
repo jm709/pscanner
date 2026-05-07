@@ -93,3 +93,31 @@ def test_observe_sell_updates_wallet_and_market_state() -> None:
     assert wallet.prior_trades_count == 2
     assert wallet.prior_buys_count == 1  # SELL doesn't increment buys
     assert market.last_trade_price == pytest.approx(0.55)
+
+
+def test_register_resolution_drains_buy_to_win() -> None:
+    conn = _new_conn()
+    try:
+        provider = LiveHistoryProvider(conn=conn, metadata={})
+        provider.observe(
+            _make_trade(
+                bs="BUY",
+                side="YES",
+                price=0.40,
+                size=100.0,
+                notional_usd=40.0,
+                ts=1_700_000_000,
+            )
+        )
+        provider.register_resolution(
+            condition_id="0xcond",
+            resolved_at=1_700_001_000,
+            outcome_yes_won=1,
+        )
+        wallet = provider.wallet_state("0xabc", as_of_ts=1_700_001_500)
+    finally:
+        conn.close()
+    assert wallet.prior_resolved_buys == 1
+    assert wallet.prior_wins == 1
+    assert wallet.prior_losses == 0
+    assert wallet.realized_pnl_usd == pytest.approx(60.0)  # 100 - 40
