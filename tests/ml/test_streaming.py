@@ -122,6 +122,15 @@ def test_count_split_rows_filters_by_platform(
     assert n_train + n_val + n_test == 30
 
 
+def test_streaming_dataset_stores_platform(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """`StreamingDataset` exposes the platform it was opened for."""
+    db = make_synthetic_examples_db(n_markets=4, rows_per_market=2, seed=0)
+    with open_dataset(db) as ds:
+        assert ds._platform == "polymarket"
+
+
 def test_split_iter_filters_by_platform(
     make_synthetic_examples_db: Callable[..., Path],
 ) -> None:

@@ -72,6 +72,7 @@ class StreamingDataset:
     n_train_rows: int = 0
     n_val_rows: int = 0
     n_test_rows: int = 0
+    _platform: str = "polymarket"
 
     def dtrain(self, *, device: str) -> xgb.QuantileDMatrix:
         """Build a QuantileDMatrix for the train split."""
@@ -108,12 +109,13 @@ class StreamingDataset:
             "SELECT te.label_won, te.implied_prob_at_buy "
             "FROM training_examples te "
             "JOIN _split_markets sm USING (condition_id) "
+            "WHERE te.platform = ? "
             "ORDER BY te.id"
         )
         conn = sqlite3.connect(str(self._db_path))
         try:
             _populate_temp_table(conn, "_split_markets", self._val_markets)
-            cursor = conn.execute(sql)
+            cursor = conn.execute(sql, (self._platform,))
             offset = 0
             while True:
                 rows = cursor.fetchmany(self._chunk_size)
@@ -149,6 +151,7 @@ class StreamingDataset:
             encoder=self.encoder,
             kept_cols=self._kept_cols,
             chunk_size=self._chunk_size,
+            platform=self._platform,
         )
         offset = 0
         for x_chunk, y_chunk, implied_chunk in iter(source):
@@ -167,12 +170,13 @@ class StreamingDataset:
             "SELECT COALESCE(te.top_category, '') "
             "FROM training_examples te "
             "JOIN _split_markets sm USING (condition_id) "
+            "WHERE te.platform = ? "
             "ORDER BY te.id"
         )
         conn = sqlite3.connect(str(self._db_path))
         try:
             _populate_temp_table(conn, "_split_markets", self._test_markets)
-            rows = conn.execute(sql).fetchall()
+            rows = conn.execute(sql, (self._platform,)).fetchall()
         finally:
             conn.close()
         top_categories = np.array([r[0] for r in rows], dtype=object)
@@ -194,6 +198,7 @@ class StreamingDataset:
             encoder=self.encoder,
             kept_cols=self._kept_cols,
             chunk_size=self._chunk_size,
+            platform=self._platform,
         )
         kwargs: dict[str, object] = {"max_bin": 256}
         if ref is not None:
