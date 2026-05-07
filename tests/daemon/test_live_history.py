@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import sqlite3
 from pathlib import Path
 
@@ -10,6 +11,29 @@ import pytest
 from pscanner.corpus.features import Trade
 from pscanner.daemon.live_history import LiveHistoryProvider
 from pscanner.store.db import init_db
+
+
+@dataclasses.dataclass(frozen=True)
+class _FakePosition:
+    condition_id: str
+    side: str  # YES | NO
+    avg_price: float  # implied prob paid
+    size: float  # # shares bought
+    notional_usd: float
+    opened_at: int
+    closed_at: int
+    won: bool
+
+
+class _FakeDataClient:
+    def __init__(self, positions: list[_FakePosition]) -> None:
+        self._positions = positions
+
+    async def get_closed_positions_for_bootstrap(
+        self, address: str, *, limit: int = 500
+    ) -> list[_FakePosition]:
+        del address, limit
+        return list(self._positions)
 
 
 def _new_conn() -> sqlite3.Connection:
@@ -141,4 +165,70 @@ def test_restart_preserves_wallet_state(tmp_path: Path) -> None:
         after = provider2.wallet_state("0xabc", as_of_ts=1_700_000_200)
     finally:
         conn2.close()
+    assert before == after
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_wallet_folds_closed_positions() -> None:
+    conn = _new_conn()
+    try:
+        positions = [
+            _FakePosition(
+                condition_id="0xc1",
+                side="YES",
+                avg_price=0.40,
+                size=100.0,
+                notional_usd=40.0,
+                opened_at=1_699_000_000,
+                closed_at=1_699_500_000,
+                won=True,
+            ),
+            _FakePosition(
+                condition_id="0xc2",
+                side="NO",
+                avg_price=0.20,
+                size=50.0,
+                notional_usd=10.0,
+                opened_at=1_699_000_500,
+                closed_at=1_699_500_500,
+                won=False,
+            ),
+        ]
+        provider = LiveHistoryProvider(conn=conn, metadata={})
+        await provider.bootstrap_wallet("0xabc", data_client=_FakeDataClient(positions))
+        wallet = provider.wallet_state("0xabc", as_of_ts=1_700_000_000)
+    finally:
+        conn.close()
+    assert wallet.prior_buys_count == 2
+    assert wallet.prior_resolved_buys == 2
+    assert wallet.prior_wins == 1
+    assert wallet.prior_losses == 1
+    assert wallet.realized_pnl_usd == pytest.approx(60.0 - 10.0)
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_wallet_is_idempotent_for_known_wallet() -> None:
+    conn = _new_conn()
+    try:
+        provider = LiveHistoryProvider(conn=conn, metadata={})
+        # Seed with a real observed BUY first.
+        provider.observe(_make_trade(bs="BUY", wallet="0xabc", ts=1_700_000_000))
+        before = provider.wallet_state("0xabc", as_of_ts=1_700_000_500)
+        # Now bootstrap should NO-OP (wallet already exists).
+        positions = [
+            _FakePosition(
+                condition_id="0xother",
+                side="YES",
+                avg_price=0.30,
+                size=10.0,
+                notional_usd=3.0,
+                opened_at=1_699_000_000,
+                closed_at=1_699_500_000,
+                won=True,
+            )
+        ]
+        await provider.bootstrap_wallet("0xabc", data_client=_FakeDataClient(positions))
+        after = provider.wallet_state("0xabc", as_of_ts=1_700_000_500)
+    finally:
+        conn.close()
     assert before == after

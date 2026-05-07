@@ -160,6 +160,34 @@ class DataClient:
         items = _ensure_list(payload, endpoint="/positions?closed=true")
         return [ClosedPosition.model_validate(item) for item in items]
 
+    async def get_closed_positions_for_bootstrap(
+        self,
+        address: str,
+        *,
+        limit: int = 500,
+    ) -> list[ClosedPosition]:
+        """Return settled positions suitable for ``LiveHistoryProvider.bootstrap_wallet``.
+
+        Intended to be consumed via the ``BootstrapDataClient`` Protocol from
+        ``pscanner.daemon.live_history``.  The real implementation must return
+        objects that satisfy ``BootstrapPosition`` (i.e. expose ``side``,
+        ``notional_usd``, ``opened_at``, ``closed_at``, ``won`` attributes).
+        ``ClosedPosition`` currently lacks ``side`` / ``notional_usd`` /
+        ``opened_at`` / ``closed_at``; a thin adapter is deferred to the RFC #77
+        daemon-wiring commit that first calls this in production.
+
+        Args:
+            address: 0x-prefixed proxy wallet address.
+            limit: Max number of positions to fetch (passed to the API).
+
+        Raises:
+            NotImplementedError: Real adapter deferred to RFC #77 daemon wiring.
+        """
+        del address, limit
+        raise NotImplementedError(
+            "get_closed_positions_for_bootstrap: real adapter deferred to RFC #77 daemon wiring"
+        )
+
     async def get_activity(
         self,
         address: str,

@@ -17,7 +17,7 @@ from __future__ import annotations
 import heapq
 import json
 import sqlite3
-from typing import cast
+from typing import Protocol, cast, runtime_checkable
 
 from pscanner.corpus.features import (
     MarketMetadata,
@@ -32,6 +32,34 @@ from pscanner.corpus.features import (
     empty_market_state,
     empty_wallet_state,
 )
+
+
+@runtime_checkable
+class BootstrapPosition(Protocol):
+    """Structural shape of one closed position used by ``bootstrap_wallet``.
+
+    Both Polymarket's ``ClosedPosition`` API model (wrapped) and test fakes
+    satisfy this Protocol.
+    """
+
+    condition_id: str
+    side: str  # "YES" | "NO"
+    avg_price: float
+    size: float
+    notional_usd: float
+    opened_at: int
+    closed_at: int
+    won: bool
+
+
+class BootstrapDataClient(Protocol):
+    """Subset of ``DataClient`` needed to bootstrap an unseen wallet."""
+
+    async def get_closed_positions_for_bootstrap(
+        self, address: str, *, limit: int = 500
+    ) -> list[BootstrapPosition]:
+        """Fetch closed positions for the given wallet address."""
+        ...
 
 
 class LiveHistoryProvider:
@@ -307,6 +335,64 @@ class LiveHistoryProvider:
             ),
         )
         self._conn.commit()
+
+    async def bootstrap_wallet(
+        self,
+        wallet_address: str,
+        *,
+        data_client: BootstrapDataClient,
+        limit: int = 500,
+    ) -> None:
+        """Pre-warm wallet state from ``/positions?user=X&closed=true``.
+
+        Folds historical closed positions into the wallet's running state so
+        subsequent feature reads have prior_resolved_buys / win_rate /
+        realized_pnl populated for previously-unseen wallets.
+
+        Idempotent: no-ops if the wallet already has a row in
+        ``wallet_state_live``.
+
+        Note: positions are folded with ``category=""`` because the offline
+        bootstrap path does not know the market category.  The ``""`` key will
+        appear in ``category_counts`` for bootstrapped wallets; this is
+        acceptable for v1 and the gate-model feature builder ignores the raw
+        category map (it uses ``top_category`` derived from it).
+        """
+        existing = self._conn.execute(
+            "SELECT 1 FROM wallet_state_live WHERE wallet_address = ?",
+            (wallet_address,),
+        ).fetchone()
+        if existing is not None:
+            return
+        positions = await data_client.get_closed_positions_for_bootstrap(
+            wallet_address, limit=limit
+        )
+        positions_sorted = sorted(positions, key=lambda p: p.opened_at)
+        first_seen = positions_sorted[0].opened_at if positions_sorted else 0
+        state = empty_wallet_state(first_seen_ts=first_seen)
+        for position in positions_sorted:
+            buy_trade = Trade(
+                tx_hash=f"bootstrap:{wallet_address}:{position.condition_id}",
+                asset_id=f"{position.condition_id}-{position.side}",
+                wallet_address=wallet_address,
+                condition_id=position.condition_id,
+                outcome_side=position.side,
+                bs="BUY",
+                price=position.avg_price,
+                size=position.size,
+                notional_usd=position.notional_usd,
+                ts=position.opened_at,
+                category="",
+            )
+            state = apply_buy_to_state(state, buy_trade)
+            payout = position.size if position.won else 0.0
+            state = apply_resolution_to_state(
+                state,
+                won=position.won,
+                notional_usd=position.notional_usd,
+                payout_usd=payout,
+            )
+        self._persist_wallet(wallet_address, state, [])
 
     def register_resolution(
         self,
