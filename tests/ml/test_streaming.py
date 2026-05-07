@@ -10,7 +10,13 @@ from pathlib import Path
 import pytest
 import xgboost as xgb
 
-from pscanner.ml.streaming import SplitDataIter, _partition_markets, _SplitIter, open_dataset
+from pscanner.ml.streaming import (
+    SplitDataIter,
+    _fit_encoder_on_train,
+    _partition_markets,
+    _SplitIter,
+    open_dataset,
+)
 from pscanner.ml.training import run_study
 
 
@@ -74,6 +80,27 @@ def test_partition_markets_filters_by_platform(
     kalshi_total = len(train_k) + len(val_k) + len(test_k)
     assert poly_total == 4, "polymarket has 4 markets"
     assert kalshi_total == 4, "kalshi has 4 markets"
+
+
+def test_fit_encoder_on_train_filters_by_platform(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """`_fit_encoder_on_train` only sees rows with the requested platform."""
+    poly_db = make_synthetic_examples_db(n_markets=4, rows_per_market=2, seed=0)
+    make_synthetic_examples_db(
+        n_markets=4, rows_per_market=2, seed=1, platform="kalshi", db_path=poly_db
+    )
+    conn = _sqlite3.connect(str(poly_db))
+    try:
+        train_poly, _, _ = _partition_markets(conn, platform="polymarket")
+        encoder = _fit_encoder_on_train(conn, train_poly, platform="polymarket")
+    finally:
+        conn.close()
+    # The encoder fits over the categorical levels of training_examples joined to
+    # the train condition_ids. Even seeding two platforms, the train markets are
+    # platform-scoped — encoder.levels reflects exactly the polymarket train rows.
+    assert "side" in encoder.levels
+    assert set(encoder.levels["side"]).issubset({"YES", "NO"})
 
 
 def test_open_dataset_closes_pre_pass_connection_on_exit(

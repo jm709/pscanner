@@ -250,17 +250,24 @@ def _populate_temp_table(
 def _fit_encoder_on_train(
     conn: sqlite3.Connection,
     train_markets: frozenset[str],
+    *,
+    platform: str = "polymarket",
 ) -> OneHotEncoder:
     """Run P2: fit a OneHotEncoder on the train split's categorical levels.
 
     SELECTs DISTINCT side, top_category, market_category from training_examples
-    joined on the _p2_train temp table.
+    joined on the _p2_train temp table. Belt-and-suspenders ``WHERE platform = ?``
+    is added because after RFC #35 PR A, two platforms can share the same
+    ``condition_id`` string; the temp-table partition isolates split membership,
+    the platform predicate isolates platform membership.
     """
     _populate_temp_table(conn, "_p2_train", train_markets)
     rows = conn.execute(
         "SELECT DISTINCT side, top_category, market_category "
         "FROM training_examples te "
-        "JOIN _p2_train tm USING (condition_id)"
+        "JOIN _p2_train tm USING (condition_id) "
+        "WHERE te.platform = ?",
+        (platform,),
     ).fetchall()
     df = pl.DataFrame(
         rows,
