@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 from pscanner.ml.cli import build_ml_parser
 
 
@@ -41,3 +43,15 @@ def test_train_subcommand_overrides() -> None:
     assert args.n_jobs == 2
     assert args.db == "./scratch/x.sqlite3"
     assert args.output_dir == "./scratch/out"
+
+
+def test_make_synthetic_examples_db_accepts_platform_kwarg(
+    make_synthetic_examples_db,  # type: ignore[no-untyped-def]
+) -> None:
+    db_path = make_synthetic_examples_db(n_markets=2, rows_per_market=2, seed=0, platform="kalshi")
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute("SELECT DISTINCT platform FROM training_examples").fetchall()
+    finally:
+        conn.close()
+    assert rows == [("kalshi",)]
