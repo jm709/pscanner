@@ -125,15 +125,15 @@ def _dispatch_daemon(
     """Route ``pscanner daemon <subcmd>`` to the matching handler."""
     del config  # daemon ops use --corpus-db/--daemon-db flags directly
     if args.daemon_cmd == "bootstrap-features":
-        return _cmd_daemon_bootstrap(args.corpus_db, args.daemon_db)
+        return _cmd_daemon_bootstrap(args.corpus_db, args.daemon_db, args.platform)
     parser.error(f"unknown daemon subcommand: {args.daemon_cmd}")
     return 2  # unreachable; argparse exits
 
 
-def _cmd_daemon_bootstrap(corpus_db: Path, daemon_db: Path) -> int:
+def _cmd_daemon_bootstrap(corpus_db: Path, daemon_db: Path, platform: str) -> int:
     """Cold-start the live history tables from corpus_trades."""
-    n = run_bootstrap(corpus_db=corpus_db, daemon_db=daemon_db)
-    print(f"bootstrap-features: folded {n} trades")  # noqa: T201
+    n = run_bootstrap(corpus_db=corpus_db, daemon_db=daemon_db, platform=platform)
+    print(f"bootstrap-features: folded {n} trades (platform={platform})")  # noqa: T201
     return 0
 
 
@@ -186,6 +186,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     bootstrap_parser.add_argument("--corpus-db", type=Path, default=Path("data/corpus.sqlite3"))
     bootstrap_parser.add_argument("--daemon-db", type=Path, default=Path("data/pscanner.sqlite3"))
+    bootstrap_parser.add_argument(
+        "--platform",
+        type=str,
+        default="polymarket",
+        choices=("polymarket", "kalshi", "manifold"),
+        help=(
+            "scope the corpus walk to one platform; default polymarket "
+            "(every shipped gate-model artifact is Polymarket-trained)"
+        ),
+    )
 
     corpus = sub.add_parser(
         "corpus",
