@@ -96,3 +96,35 @@ def test_missing_for_returns_unresolved_condition_ids(
     )
     missing = repo.missing_for(["resolved", "unresolved1", "unresolved2"])
     assert set(missing) == {"unresolved1", "unresolved2"}
+
+
+def test_resolutions_repo_isolates_platforms(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    repo = MarketResolutionsRepo(tmp_corpus_db)
+    repo.upsert(
+        MarketResolution(
+            condition_id="0xpoly",
+            winning_outcome_index=0,
+            outcome_yes_won=1,
+            resolved_at=1000,
+            source="gamma",
+            platform="polymarket",
+        ),
+        recorded_at=1000,
+    )
+    repo.upsert(
+        MarketResolution(
+            condition_id="KX-1",
+            winning_outcome_index=0,
+            outcome_yes_won=1,
+            resolved_at=1100,
+            source="kalshi-rest",
+            platform="kalshi",
+        ),
+        recorded_at=1100,
+    )
+    assert repo.get("0xpoly", platform="polymarket") is not None
+    assert repo.get("0xpoly", platform="kalshi") is None
+    assert repo.get("KX-1", platform="kalshi") is not None
+    assert repo.missing_for(["0xpoly", "0xother"], platform="polymarket") == ["0xother"]

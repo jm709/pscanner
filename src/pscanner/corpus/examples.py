@@ -35,10 +35,17 @@ _log = structlog.get_logger(__name__)
 _BATCH_SIZE: Final[int] = 500
 
 
-def _load_market_metadata(conn: sqlite3.Connection) -> dict[str, MarketMetadata]:
-    """Load ``MarketMetadata`` for every row in ``corpus_markets``."""
+def _load_market_metadata(
+    conn: sqlite3.Connection, *, platform: str = "polymarket"
+) -> dict[str, MarketMetadata]:
+    """Load ``MarketMetadata`` for every row in ``corpus_markets`` for ``platform``."""
     rows = conn.execute(
-        "SELECT condition_id, category, closed_at, enumerated_at FROM corpus_markets"
+        """
+        SELECT condition_id, category, closed_at, enumerated_at
+        FROM corpus_markets
+        WHERE platform = ?
+        """,
+        (platform,),
     ).fetchall()
     return {
         row["condition_id"]: MarketMetadata(
@@ -57,6 +64,7 @@ def _example_from_features(
     features: FeatureRow,
     label_won: int,
     now_ts: int,
+    platform: str = "polymarket",
 ) -> TrainingExample:
     return TrainingExample(
         tx_hash=trade.tx_hash,
@@ -65,6 +73,7 @@ def _example_from_features(
         condition_id=trade.condition_id,
         trade_ts=trade.ts,
         built_at=now_ts,
+        platform=platform,
         prior_trades_count=features.prior_trades_count,
         prior_buys_count=features.prior_buys_count,
         prior_resolved_buys=features.prior_resolved_buys,
@@ -104,6 +113,7 @@ def _maybe_make_example(
     trade: Trade,
     provider: StreamingHistoryProvider,
     now_ts: int,
+    platform: str = "polymarket",
 ) -> TrainingExample | None:
     """Return a TrainingExample for a resolved BUY, or None to skip.
 
@@ -127,16 +137,24 @@ def _maybe_make_example(
         features=features,
         label_won=1 if won else 0,
         now_ts=now_ts,
+        platform=platform,
     )
 
 
 def _register_resolutions(
     provider: StreamingHistoryProvider,
     markets_conn: sqlite3.Connection,
+    *,
+    platform: str = "polymarket",
 ) -> None:
-    """Seed the provider with all known market resolutions."""
+    """Seed the provider with all known market resolutions for ``platform``."""
     rows = markets_conn.execute(
-        "SELECT condition_id, resolved_at, outcome_yes_won FROM market_resolutions"
+        """
+        SELECT condition_id, resolved_at, outcome_yes_won
+        FROM market_resolutions
+        WHERE platform = ?
+        """,
+        (platform,),
     ).fetchall()
     for row in rows:
         provider.register_resolution(
@@ -154,6 +172,7 @@ def build_features(
     markets_conn: sqlite3.Connection,
     now_ts: int,
     rebuild: bool = False,
+    platform: str = "polymarket",
 ) -> int:
     """Build the training_examples table from corpus_trades + resolutions.
 
@@ -168,22 +187,27 @@ def build_features(
             and the one-shot ``market_resolutions`` snapshot.
         now_ts: ``built_at`` for new rows.
         rebuild: If True, drop training_examples before walking.
+        platform: Which platform's rows to read and write. Default
+            ``"polymarket"`` preserves the pre-multi-platform behavior
+            for existing callers. Scopes ``corpus_trades``,
+            ``corpus_markets``, ``market_resolutions``, and
+            ``training_examples`` reads/writes to that platform.
 
     Returns:
         Number of rows actually written (deduped via INSERT OR IGNORE).
     """
     del resolutions_repo  # signature kept; reads come from provider/markets_conn
     if rebuild:
-        examples_repo.truncate()
+        examples_repo.truncate(platform=platform)
 
-    metadata = _load_market_metadata(markets_conn)
+    metadata = _load_market_metadata(markets_conn, platform=platform)
     provider = StreamingHistoryProvider(metadata=metadata)
-    _register_resolutions(provider, markets_conn)
+    _register_resolutions(provider, markets_conn, platform=platform)
 
     written = 0
     pending_examples: list[TrainingExample] = []
 
-    for ct in trades_repo.iter_chronological():
+    for ct in trades_repo.iter_chronological(platform=platform):
         meta = metadata.get(ct.condition_id)
         if meta is None:
             continue
@@ -207,7 +231,7 @@ def build_features(
             ts=ct.ts,
             category=meta.category,
         )
-        example = _maybe_make_example(trade, provider, now_ts)
+        example = _maybe_make_example(trade, provider, now_ts, platform=platform)
         if example is not None:
             pending_examples.append(example)
         provider.observe(trade)

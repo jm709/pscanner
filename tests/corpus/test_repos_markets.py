@@ -261,6 +261,41 @@ def test_insert_pending_backfills_market_slug_on_existing_row(
     assert row["backfill_state"] == "complete"  # state preserved
 
 
+def test_repo_isolates_polymarket_and_kalshi(tmp_corpus_db: sqlite3.Connection) -> None:
+    """Inserting markets with different platforms keeps them isolated by `platform` arg."""
+    repo = CorpusMarketsRepo(tmp_corpus_db)
+    repo.insert_pending(
+        CorpusMarket(
+            condition_id="0xpoly",
+            event_slug="poly-event",
+            category=None,
+            closed_at=1000,
+            total_volume_usd=1_000_000.0,
+            enumerated_at=900,
+            market_slug="poly-slug",
+            platform="polymarket",
+        )
+    )
+    repo.insert_pending(
+        CorpusMarket(
+            condition_id="KX-1",
+            event_slug="kx-event",
+            category=None,
+            closed_at=1100,
+            total_volume_usd=2_000_000.0,
+            enumerated_at=950,
+            market_slug="kx-slug",
+            platform="kalshi",
+        )
+    )
+    poly = repo.next_pending(limit=10, platform="polymarket")
+    kalshi = repo.next_pending(limit=10, platform="kalshi")
+    assert [m.condition_id for m in poly] == ["0xpoly"]
+    assert [m.condition_id for m in kalshi] == ["KX-1"]
+    assert all(m.platform == "polymarket" for m in poly)
+    assert all(m.platform == "kalshi" for m in kalshi)
+
+
 def test_insert_pending_backfill_does_not_overwrite_existing_slug(
     tmp_corpus_db: sqlite3.Connection,
 ) -> None:

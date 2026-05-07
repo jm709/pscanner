@@ -21,7 +21,7 @@ def _trade(**kwargs: object) -> CorpusTrade:
         "ts": 1_000,
     }
     base.update(kwargs)
-    return CorpusTrade(**base)  # type: ignore[arg-type]
+    return CorpusTrade(**base)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
 
 
 def test_insert_batch_persists_trades(tmp_corpus_db: sqlite3.Connection) -> None:
@@ -126,3 +126,41 @@ def test_iter_chronological_chunk_boundary_handles_ties(
     )
     pairs = [(t.tx_hash, t.asset_id) for t in repo.iter_chronological(chunk_size=2)]
     assert pairs == [("0xa", "a"), ("0xa", "b"), ("0xa", "c"), ("0xa", "d")]
+
+
+def test_trades_repo_isolates_platforms(tmp_corpus_db: sqlite3.Connection) -> None:
+    """Insert trades with different platforms; iter_chronological filters correctly."""
+    repo = CorpusTradesRepo(tmp_corpus_db)
+    poly = CorpusTrade(
+        tx_hash="0xtx",
+        asset_id="poly-asset",
+        wallet_address="0xw",
+        condition_id="0xcond",
+        outcome_side="YES",
+        bs="BUY",
+        price=0.5,
+        size=200.0,
+        notional_usd=100.0,
+        ts=1000,
+        platform="polymarket",
+    )
+    kalshi = CorpusTrade(
+        tx_hash="kx-trade-1",
+        asset_id="KX-1-Y",
+        wallet_address="anon",
+        condition_id="KX-1",
+        outcome_side="YES",
+        bs="BUY",
+        price=0.5,
+        size=200.0,
+        notional_usd=100.0,
+        ts=1100,
+        platform="kalshi",
+    )
+    assert repo.insert_batch([poly, kalshi]) == 2
+    poly_only = list(repo.iter_chronological(platform="polymarket"))
+    kalshi_only = list(repo.iter_chronological(platform="kalshi"))
+    assert [t.condition_id for t in poly_only] == ["0xcond"]
+    assert [t.condition_id for t in kalshi_only] == ["KX-1"]
+    assert poly_only[0].platform == "polymarket"
+    assert kalshi_only[0].platform == "kalshi"
