@@ -277,14 +277,29 @@ _NOTIONAL_FLOORS: Final[dict[str, float]] = {
 _NOTIONAL_FLOOR_USD: Final[float] = _NOTIONAL_FLOORS["polymarket"]
 
 
+def _canonicalize_wallet_address(platform: str, address: str) -> str:
+    """Normalize a wallet address for storage.
+
+    Polymarket addresses are EVM-derived hex strings — case-insensitive,
+    canonically stored as lowercase to dedupe writes that round-trip through
+    different sources. Manifold ``user_id`` and any future platform-native
+    identifier types are case-sensitive opaque hashes; preserve them verbatim.
+    """
+    if platform == "polymarket":
+        return address.lower()
+    return address
+
+
 @dataclass(frozen=True)
 class CorpusTrade:
     """One BUY or SELL fill captured by the market-walker.
 
-    Wallet addresses are normalized to lowercase at insert time. ``bs`` is
-    ``BUY`` or ``SELL``; ``outcome_side`` is ``YES`` or ``NO``. ``price``
-    is the implied probability paid (already normalized so YES@0.7 and
-    NO@0.3 are equivalent buys of the same outcome).
+    Polymarket wallet addresses are canonicalized to lowercase at insert
+    time (EVM hex is case-insensitive). Manifold ``user_id`` hashes are
+    case-sensitive and preserved verbatim. ``bs`` is ``BUY`` or ``SELL``;
+    ``outcome_side`` is ``YES`` or ``NO``. ``price`` is the implied
+    probability paid (already normalized so YES@0.7 and NO@0.3 are
+    equivalent buys of the same outcome).
     """
 
     tx_hash: str
@@ -328,7 +343,7 @@ class CorpusTradesRepo:
                     t.platform,
                     t.tx_hash,
                     t.asset_id,
-                    t.wallet_address.lower(),
+                    _canonicalize_wallet_address(t.platform, t.wallet_address),
                     t.condition_id,
                     t.outcome_side,
                     t.bs,
