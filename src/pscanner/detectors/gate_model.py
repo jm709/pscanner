@@ -35,7 +35,7 @@ from pscanner.corpus.features import (
     compute_features,
 )
 from pscanner.detectors.trade_driven import TradeDrivenDetector
-from pscanner.ml.preprocessing import CARRIER_COLS, OneHotEncoder
+from pscanner.ml.preprocessing import CARRIER_COLS, LEAKAGE_COLS, OneHotEncoder
 
 if TYPE_CHECKING:
     from pscanner.daemon.live_history import LiveHistoryProvider
@@ -104,9 +104,17 @@ class GateModelDetector(TradeDrivenDetector):
         ``pscanner.ml.streaming._derive_feature_names`` to set the ordering;
         we replicate it here without needing the corpus DB. ``FeatureRow``
         is the schema source of truth.
+
+        ``LEAKAGE_COLS`` (notably ``time_to_resolution_seconds``) are
+        excluded at training time via ``_NEVER_LOAD_COLS`` in
+        :mod:`pscanner.ml.preprocessing`, so the live feature row must
+        also drop them — otherwise the inference DMatrix has one extra
+        column the booster never saw, and xgboost's column-index matching
+        (``QuantileDMatrix`` doesn't carry feature names) silently
+        mis-aligns every prediction.
         """
         levels = self._encoder.levels
-        excluded = {*CARRIER_COLS, "label_won"}
+        excluded = {*CARRIER_COLS, *LEAKAGE_COLS, "label_won"}
         non_cat = [f.name for f in dataclasses.fields(FeatureRow) if f.name not in levels]
         indicators = [f"{col}__{lvl}" for col, lvls in levels.items() for lvl in lvls]
         return tuple(c for c in [*non_cat, *indicators] if c not in excluded)

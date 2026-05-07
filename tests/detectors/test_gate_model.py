@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sqlite3
 from pathlib import Path
@@ -13,9 +14,11 @@ from structlog.testing import capture_logs
 
 from pscanner.alerts.sink import AlertSink
 from pscanner.config import GateModelConfig
-from pscanner.corpus.features import MarketMetadata
+from pscanner.corpus.features import FeatureRow, MarketMetadata
 from pscanner.daemon.live_history import LiveHistoryProvider
 from pscanner.detectors.gate_model import GateModelDetector
+from pscanner.ml.preprocessing import LEAKAGE_COLS, OneHotEncoder
+from pscanner.ml.streaming import _derive_feature_names
 from pscanner.poly.ids import AssetId, ConditionId, EventId, MarketId
 from pscanner.store.db import init_db
 from pscanner.store.repo import AlertsRepo, CachedMarket, MarketCacheRepo, WalletTrade
@@ -348,3 +351,62 @@ def test_resolve_outcome_side_via_market_cache(tmp_path: Path) -> None:
     assert yes_side == "YES"
     assert no_side == "NO"
     assert unknown_side == ""
+
+
+def test_feature_cols_parity_against_training_derive_feature_names(tmp_path: Path) -> None:
+    """Detector's ``_feature_cols`` must equal the training pipeline's order.
+
+    The training pipeline computes feature_names via
+    ``pscanner.ml.streaming._derive_feature_names`` from ``kept_cols`` (the
+    PRAGMA-derived list of ``training_examples`` columns minus
+    ``_NEVER_LOAD_COLS``). The detector replicates this analytically from
+    ``FeatureRow`` fields. Any drift would feed the booster an off-by-one
+    DMatrix at inference and silently mis-align every prediction —
+    xgboost's QuantileDMatrix doesn't carry feature_names so column-index
+    matching is silent on mismatch.
+    """
+    artifact_dir = tmp_path / "model"
+    _train_dummy_model(artifact_dir)
+    conn = _new_db()
+    try:
+        provider = LiveHistoryProvider(conn=conn, metadata={})
+        detector = GateModelDetector(
+            config=GateModelConfig(enabled=True, artifact_dir=artifact_dir),
+            provider=provider,
+            alerts_repo=AlertsRepo(conn),
+        )
+    finally:
+        conn.close()
+
+    # Build a kept_cols list mirroring what training_examples PRAGMA would
+    # produce after _NEVER_LOAD_COLS is applied: every FeatureRow field +
+    # the carrier columns the build_features pipeline writes alongside
+    # them, MINUS the leakage cols stripped at SELECT time.
+    feature_row_fields = tuple(f.name for f in dataclasses.fields(FeatureRow))
+    extra_cols = ("condition_id", "trade_ts", "resolved_at", "label_won")
+    full_pragma_cols = feature_row_fields + extra_cols
+    kept_cols = tuple(c for c in full_pragma_cols if c not in LEAKAGE_COLS)
+    # Use a richer encoder than the dummy one (to mimic production) so the
+    # parity check covers the indicator-expansion path too.
+    encoder = OneHotEncoder(
+        levels={
+            "side": ("NO", "YES"),
+            "top_category": ("__none__", "esports", "sports", "thesis"),
+            "market_category": ("esports", "sports", "thesis"),
+        }
+    )
+    detector._encoder = encoder
+    detector._feature_cols = detector._derive_feature_cols()
+
+    training_cols = _derive_feature_names(kept_cols, encoder)
+    assert detector._feature_cols == training_cols, (
+        f"feature_cols drift between training and inference\n"
+        f"  training:  {training_cols}\n"
+        f"  inference: {detector._feature_cols}\n"
+        f"  diff training-only: {set(training_cols) - set(detector._feature_cols)}\n"
+        f"  diff inference-only: {set(detector._feature_cols) - set(training_cols)}"
+    )
+    # Sanity: time_to_resolution_seconds is in FeatureRow but must NOT
+    # appear in either side (it's a LEAKAGE_COL).
+    assert "time_to_resolution_seconds" not in training_cols
+    assert "time_to_resolution_seconds" not in detector._feature_cols
