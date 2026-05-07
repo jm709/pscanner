@@ -131,6 +131,21 @@ def test_streaming_dataset_stores_platform(
         assert ds._platform == "polymarket"
 
 
+def test_open_dataset_records_requested_platform(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """`open_dataset(platform=...)` is reflected on the dataset."""
+    db = make_synthetic_examples_db(n_markets=4, rows_per_market=2, seed=0)
+    make_synthetic_examples_db(
+        n_markets=4, rows_per_market=2, seed=1, platform="kalshi", db_path=db
+    )
+    with open_dataset(db, platform="kalshi") as ds:
+        assert ds._platform == "kalshi"
+        # Train markets came from kalshi rows.
+        kalshi_total = ds.n_train_rows + ds.n_val_rows + ds.n_test_rows
+        assert kalshi_total == 8  # 4 markets x 2 rows
+
+
 def test_split_iter_filters_by_platform(
     make_synthetic_examples_db: Callable[..., Path],
 ) -> None:

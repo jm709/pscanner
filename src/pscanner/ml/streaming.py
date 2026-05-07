@@ -468,6 +468,7 @@ def open_dataset(
     db_path: Path,
     *,
     chunk_size: int = 100_000,
+    platform: str = "polymarket",
 ) -> Iterator[StreamingDataset]:
     """Open the corpus for streaming training.
 
@@ -475,15 +476,21 @@ def open_dataset(
         db_path: Path to the corpus SQLite database.
         chunk_size: Rows per chunk fed into xgboost's DataIter. Default
             100_000; see Issue #39 for the memory / overhead trade-off.
+        platform: RFC #35 PR A platform tag. Filters every SELECT against
+            ``training_examples`` and ``market_resolutions`` to rows with
+            this tag. Defaults to ``"polymarket"`` so existing callers
+            (tests, ``scripts/analyze_model.py``, internal callers) see
+            no behavior change. Single-platform-per-run by design;
+            multi-platform aggregation widens this to a sequence type.
 
     Yields:
         A :class:`StreamingDataset` whose pre-scan has completed.
     """
     conn = sqlite3.connect(str(db_path))
     try:
-        train, val, test = _partition_markets(conn)
-        encoder = _fit_encoder_on_train(conn, train)
-        n_train, n_val, n_test = _count_split_rows(conn, train, val, test)
+        train, val, test = _partition_markets(conn, platform=platform)
+        encoder = _fit_encoder_on_train(conn, train, platform=platform)
+        n_train, n_val, n_test = _count_split_rows(conn, train, val, test, platform=platform)
         kept = _kept_columns(conn)
         ds = StreamingDataset(
             _db_path=db_path,
@@ -497,6 +504,7 @@ def open_dataset(
             n_train_rows=n_train,
             n_val_rows=n_val,
             n_test_rows=n_test,
+            _platform=platform,
         )
         yield ds
     finally:
