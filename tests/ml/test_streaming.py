@@ -122,6 +122,34 @@ def test_count_split_rows_filters_by_platform(
     assert n_train + n_val + n_test == 30
 
 
+def test_split_iter_filters_by_platform(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """`_SplitIter` yields only rows with the configured platform."""
+    poly_db = make_synthetic_examples_db(n_markets=10, rows_per_market=3, seed=0)
+    make_synthetic_examples_db(
+        n_markets=10, rows_per_market=3, seed=1, platform="kalshi", db_path=poly_db
+    )
+    with open_dataset(poly_db) as ds:
+        # _SplitIter is constructed inside StreamingDataset; here we instantiate
+        # it directly with the polymarket train markets to verify the platform
+        # field gates the SQL.
+        assert ds.encoder is not None  # narrow for ty
+        iterator = _SplitIter(
+            db_path=ds._db_path,
+            condition_ids=ds._train_markets,
+            encoder=ds.encoder,
+            kept_cols=ds._kept_cols,
+            chunk_size=64,
+            platform="polymarket",
+        )
+        chunks = list(iter(iterator))
+        expected_rows = ds.n_train_rows
+    total_rows = sum(x.shape[0] for x, _, _ in chunks)
+    # The train markets came from polymarket; rows count must equal n_train_rows.
+    assert total_rows == expected_rows
+
+
 def test_open_dataset_closes_pre_pass_connection_on_exit(
     monkeypatch: pytest.MonkeyPatch,
     make_synthetic_examples_db: Callable[..., Path],

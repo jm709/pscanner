@@ -344,6 +344,11 @@ class _SplitIter:
     iterate from worker threads; sqlite3 connections aren't thread-safe).
     The connection's TEMP TABLE is populated from condition_ids on first
     iteration; the connection closes when iteration finishes or raises.
+
+    The ``platform`` field gates both the JOIN to ``market_resolutions``
+    (composite key after RFC #35 PR A) and the ``WHERE te.platform = ?``
+    predicate on ``training_examples``. Defaults to ``"polymarket"`` to
+    preserve existing test fixtures that construct ``_SplitIter`` directly.
     """
 
     db_path: Path
@@ -351,21 +356,24 @@ class _SplitIter:
     encoder: OneHotEncoder
     kept_cols: tuple[str, ...]
     chunk_size: int
+    platform: str = "polymarket"
 
     def __iter__(self) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray]]:
         select_list = ", ".join(f"te.{c}" for c in self.kept_cols)
         sql = (
             f"SELECT {select_list}, mr.resolved_at "  # noqa: S608 -- kept_cols derived from PRAGMA
             "FROM training_examples te "
-            "JOIN market_resolutions mr USING (condition_id) "
+            "JOIN market_resolutions mr "
+            "  ON mr.platform = te.platform AND mr.condition_id = te.condition_id "
             "JOIN _split_markets sm USING (condition_id) "
+            "WHERE te.platform = ? "
             "ORDER BY te.id"
         )
         col_names = (*self.kept_cols, "resolved_at")
         conn = sqlite3.connect(str(self.db_path))
         try:
             _populate_temp_table(conn, "_split_markets", self.condition_ids)
-            cursor = conn.execute(sql)
+            cursor = conn.execute(sql, (self.platform,))
             while True:
                 rows = cursor.fetchmany(self.chunk_size)
                 if not rows:
