@@ -12,6 +12,7 @@ import xgboost as xgb
 
 from pscanner.ml.streaming import (
     SplitDataIter,
+    _count_split_rows,
     _fit_encoder_on_train,
     _partition_markets,
     _SplitIter,
@@ -101,6 +102,24 @@ def test_fit_encoder_on_train_filters_by_platform(
     # platform-scoped — encoder.levels reflects exactly the polymarket train rows.
     assert "side" in encoder.levels
     assert set(encoder.levels["side"]).issubset({"YES", "NO"})
+
+
+def test_count_split_rows_filters_by_platform(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """`_count_split_rows` counts only the requested platform's rows."""
+    poly_db = make_synthetic_examples_db(n_markets=10, rows_per_market=3, seed=0)
+    make_synthetic_examples_db(
+        n_markets=10, rows_per_market=3, seed=1, platform="kalshi", db_path=poly_db
+    )
+    conn = _sqlite3.connect(str(poly_db))
+    try:
+        train, val, test = _partition_markets(conn, platform="polymarket")
+        n_train, n_val, n_test = _count_split_rows(conn, train, val, test, platform="polymarket")
+    finally:
+        conn.close()
+    # Per-platform corpus has 10 markets x 3 rows = 30 rows total.
+    assert n_train + n_val + n_test == 30
 
 
 def test_open_dataset_closes_pre_pass_connection_on_exit(

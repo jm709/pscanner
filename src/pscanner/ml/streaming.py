@@ -286,14 +286,22 @@ def _count_split_rows(
     train: frozenset[str],
     val: frozenset[str],
     test: frozenset[str],
+    *,
+    platform: str = "polymarket",
 ) -> tuple[int, int, int]:
-    """Run P3: COUNT(*) per split via temp tables."""
+    """Run P3: COUNT(*) per split via temp tables.
+
+    ``WHERE te.platform = ?`` is belt-and-suspenders against cross-platform
+    ``condition_id`` collisions (see ``_fit_encoder_on_train`` docstring).
+    """
     counts = []
     for label, markets in (("_p3_train", train), ("_p3_val", val), ("_p3_test", test)):
         _populate_temp_table(conn, label, markets)
         (n,) = conn.execute(
             f"SELECT COUNT(*) FROM training_examples te "  # noqa: S608 -- label is a literal
-            f"JOIN {label} sm USING (condition_id)"
+            f"JOIN {label} sm USING (condition_id) "
+            "WHERE te.platform = ?",
+            (platform,),
         ).fetchone()
         counts.append(int(n))
     return counts[0], counts[1], counts[2]
