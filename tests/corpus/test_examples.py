@@ -50,7 +50,7 @@ def _trade(**kwargs: object) -> CorpusTrade:
         "ts": 1_000,
     }
     base.update(kwargs)
-    return CorpusTrade(**base)  # type: ignore[arg-type]
+    return CorpusTrade(**base)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
 
 
 def test_build_features_skips_when_no_resolution(
