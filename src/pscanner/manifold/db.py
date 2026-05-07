@@ -27,6 +27,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
       total_liquidity REAL NOT NULL DEFAULT 0.0,
       is_resolved INTEGER NOT NULL DEFAULT 0,
       resolution_time INTEGER,
+      resolution TEXT,
       close_time INTEGER,
       raw_json TEXT NOT NULL
     )
@@ -62,14 +63,36 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
 )
 
 
+_MIGRATIONS: tuple[str, ...] = ("ALTER TABLE manifold_markets ADD COLUMN resolution TEXT",)
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """Apply additive ALTER TABLE migrations. Idempotent.
+
+    Each migration is wrapped to swallow ``duplicate column name`` errors
+    so repeated calls on already-migrated DBs are no-ops.
+    """
+    for stmt in _MIGRATIONS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" in str(exc).lower():
+                continue
+            raise
+    conn.commit()
+
+
 def init_manifold_tables(conn: sqlite3.Connection) -> None:
     """Apply all Manifold schema statements to ``conn``.
 
     Idempotent — safe to call on an already-initialised database.
+    Applies additive migrations so existing on-disk databases pick up
+    new columns added in later versions.
 
     Args:
         conn: Open ``sqlite3.Connection`` with WAL mode already set.
     """
     for statement in _SCHEMA_STATEMENTS:
         conn.execute(statement)
+    _apply_migrations(conn)
     conn.commit()
