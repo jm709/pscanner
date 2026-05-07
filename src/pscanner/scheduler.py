@@ -23,6 +23,7 @@ import contextlib
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -36,14 +37,18 @@ from pscanner.alerts.worker_sink import WorkerSink
 from pscanner.collectors.activity import ActivityCollector
 from pscanner.collectors.base import Collector
 from pscanner.collectors.events import EventCollector
+from pscanner.collectors.market_scoped_trades import MarketScopedTradeCollector
 from pscanner.collectors.markets import MarketCollector
 from pscanner.collectors.positions import PositionCollector
 from pscanner.collectors.ticks import MarketTickCollector
 from pscanner.collectors.trades import TradeCollector
 from pscanner.collectors.watchlist import WatchlistRegistry, WatchlistSyncer
 from pscanner.config import Config
+from pscanner.corpus.features import MarketMetadata
+from pscanner.daemon.live_history import LiveHistoryProvider
 from pscanner.detectors.cluster import ClusterDetector
 from pscanner.detectors.convergence import ConvergenceDetector
+from pscanner.detectors.gate_model import GateModelDetector
 from pscanner.detectors.mispricing import MispricingDetector
 from pscanner.detectors.monotone import MonotoneDetector
 from pscanner.detectors.move_attribution import MoveAttributionDetector
@@ -159,6 +164,12 @@ class Scanner:
         self._ticks_repo = MarketTicksRepo(self._db)
         self._clusters_repo = WalletClustersRepo(self._db)
         self._cluster_members_repo = WalletClusterMembersRepo(self._db)
+        self._live_history_provider: LiveHistoryProvider | None = None
+        if self._config.gate_model.enabled:
+            self._live_history_provider = LiveHistoryProvider(
+                conn=self._db,
+                metadata=_load_corpus_metadata(),
+            )
         self._owns_clients = clients is None
         self._clients = clients or self._build_default_clients()
         self._renderer = TerminalRenderer()
@@ -170,6 +181,7 @@ class Scanner:
         self._collectors = self._build_collectors()
         self._detectors = self._build_detectors()
         self._wire_trade_callbacks()
+        self._wire_market_scoped_trade_callbacks()
         self._wire_alert_subscribers()
         self._collectors_stop = asyncio.Event()
         self._closed = False
@@ -192,6 +204,18 @@ class Scanner:
                 detector._sink = self._sink
                 trade_collector.subscribe_new_trade(detector.handle_trade_sync)
                 _LOG.info("scanner.trade_driven_detector_wired", detector=detector.name)
+
+    def _wire_market_scoped_trade_callbacks(self) -> None:
+        """Wire MarketScopedTradeCollector to GateModelDetector callback."""
+        market_scoped = self._collectors.get("market_scoped_trades")
+        gate_detector = self._detectors.get("gate_model")
+        if not isinstance(market_scoped, MarketScopedTradeCollector):
+            return
+        if not isinstance(gate_detector, GateModelDetector):
+            return
+        gate_detector._sink = self._sink
+        market_scoped.subscribe_new_trade(gate_detector.handle_trade_sync)
+        _LOG.info("scanner.gate_model_wired", detector=gate_detector.name)
 
     def _wire_alert_subscribers(self) -> None:
         """Register every alert-driven detector as a subscriber on the sink.
@@ -297,6 +321,12 @@ class Scanner:
                 market_cache=self._market_cache_repo,
                 tick_stream=self._tick_stream,
             )
+        if self._config.gate_model_market_filter.enabled:
+            collectors["market_scoped_trades"] = MarketScopedTradeCollector(
+                config=self._config.gate_model_market_filter,
+                gamma=self._clients.gamma_client,
+                data_client=self._clients.data_client,
+            )
         return collectors
 
     def _build_detectors(self) -> dict[str, Any]:
@@ -360,9 +390,23 @@ class Scanner:
                 data_client=self._clients.data_client,
                 watchlist_repo=self._watchlist_repo,
             )
+        self._maybe_attach_gate_model_detector(detectors)
         self._maybe_attach_paper_trading(detectors)
         self._maybe_attach_velocity_detector(detectors)
         return detectors
+
+    def _maybe_attach_gate_model_detector(self, detectors: dict[str, Any]) -> None:
+        """Attach gate-model detector when gate_model is enabled."""
+        if not self._config.gate_model.enabled:
+            return
+        if self._live_history_provider is None:
+            return
+        detectors["gate_model"] = GateModelDetector(
+            config=self._config.gate_model,
+            provider=self._live_history_provider,
+            alerts_repo=self._alerts_repo,
+            market_cache=self._market_cache_repo,
+        )
 
     def _maybe_attach_paper_trading(self, detectors: dict[str, Any]) -> None:
         """Attach paper-trader and paper-resolver when paper trading is enabled."""
@@ -457,6 +501,23 @@ class Scanner:
         self._detector_sinks["velocity"] = worker
         self._workers.append(worker)
 
+    def preflight(self) -> None:
+        """Run startup checks before entering the run loop.
+
+        When ``gate_model`` is enabled, refuses to start unless
+        ``wallet_state_live`` has been populated via
+        ``pscanner daemon bootstrap-features``.
+        """
+        if not self._config.gate_model.enabled:
+            return
+        row = self._db.execute("SELECT 1 FROM wallet_state_live LIMIT 1").fetchone()
+        if row is None:
+            msg = (
+                "gate_model.enabled=true but wallet_state_live is empty. "
+                "Run `pscanner daemon bootstrap-features` first."
+            )
+            raise RuntimeError(msg)
+
     @property
     def sink(self) -> AlertSink:
         """The shared alert sink (exposed for tests)."""
@@ -478,6 +539,7 @@ class Scanner:
 
         Catches :class:`KeyboardInterrupt` to perform graceful shutdown.
         """
+        self.preflight()
         for worker in self._workers:
             await worker.start()
         try:
@@ -815,3 +877,39 @@ class Scanner:
             await self._clients.data_http.aclose()
         with contextlib.suppress(Exception):
             await self._clients.ticks_ws.close()
+
+
+def _load_corpus_metadata() -> dict[str, MarketMetadata]:
+    """Load corpus_markets metadata for the gate-model detector.
+
+    Reads ``data/corpus.sqlite3`` if it exists; returns an empty dict if
+    not. The dict is consumed by :class:`LiveHistoryProvider` for the
+    ``market_metadata(condition_id)`` lookup that ``compute_features`` uses.
+
+    Empty-dict fallback is acceptable for v1: the detector handles
+    ``KeyError`` from ``market_metadata`` by skipping the trade. Operators
+    running gate_model in production should also have a corpus DB.
+    """
+    corpus_path = Path("data/corpus.sqlite3")
+    if not corpus_path.exists():
+        _LOG.warning("scanner.corpus_db_missing", path=str(corpus_path))
+        return {}
+    out: dict[str, MarketMetadata] = {}
+    with closing(sqlite3.connect(str(corpus_path))) as conn:
+        for row in conn.execute(
+            """
+            SELECT condition_id,
+                   COALESCE(category, ''),
+                   COALESCE(closed_at, 0),
+                   COALESCE(enumerated_at, 0)
+            FROM corpus_markets
+            """
+        ):
+            cond_id, category, closed_at, opened_at = row
+            out[cond_id] = MarketMetadata(
+                condition_id=cond_id,
+                category=category,
+                closed_at=int(closed_at),
+                opened_at=int(opened_at),
+            )
+    return out
