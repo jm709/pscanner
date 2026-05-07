@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 
-_SCHEMA_STATEMENTS: tuple[str, ...] = (
+MANIFOLD_SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS manifold_markets (
       id TEXT PRIMARY KEY,
@@ -92,7 +92,7 @@ def init_manifold_tables(conn: sqlite3.Connection) -> None:
     Args:
         conn: Open ``sqlite3.Connection`` with WAL mode already set.
     """
-    for statement in _SCHEMA_STATEMENTS:
+    for statement in MANIFOLD_SCHEMA_STATEMENTS:
         conn.execute(statement)
     _apply_migrations(conn)
     conn.commit()

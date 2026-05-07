@@ -11,6 +11,7 @@ import sqlite3
 from pathlib import Path
 
 from pscanner.kalshi.db import KALSHI_SCHEMA_STATEMENTS
+from pscanner.manifold.db import MANIFOLD_SCHEMA_STATEMENTS
 
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -266,6 +267,9 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     # Polymarket daemon tables. The CREATE statements are defined in
     # pscanner.kalshi.db to keep platform code co-located.
     *KALSHI_SCHEMA_STATEMENTS,
+    # Manifold tables — registered here for the same reason. The CREATE
+    # statements are defined in pscanner.manifold.db.
+    *MANIFOLD_SCHEMA_STATEMENTS,
 )
 
 _MIGRATIONS: tuple[str, ...] = (
