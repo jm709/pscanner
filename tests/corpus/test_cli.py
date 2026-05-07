@@ -287,3 +287,15 @@ def test_refresh_parser_rejects_unknown_platform() -> None:
     parser = build_corpus_parser()
     with pytest.raises(SystemExit):
         parser.parse_args(["refresh", "--platform", "ftx"])
+
+
+def test_build_features_parser_accepts_platform_manifold() -> None:
+    parser = build_corpus_parser()
+    args = parser.parse_args(["build-features", "--platform", "manifold"])
+    assert args.platform == "manifold"
+
+
+def test_build_features_parser_default_platform_is_polymarket() -> None:
+    parser = build_corpus_parser()
+    args = parser.parse_args(["build-features"])
+    assert args.platform == "polymarket"

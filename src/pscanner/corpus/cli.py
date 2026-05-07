@@ -105,6 +105,13 @@ def build_corpus_parser() -> argparse.ArgumentParser:
     bf = sub.add_parser("build-features", help="Rebuild training_examples from raw events")
     _add_db_arg(bf)
     bf.add_argument("--rebuild", action="store_true", help="Drop and recreate the table")
+    bf.add_argument(
+        "--platform",
+        type=str,
+        choices=["polymarket", "manifold"],
+        default="polymarket",
+        help="Platform whose corpus rows feed the training_examples build.",
+    )
     ob = sub.add_parser(
         "onchain-backfill",
         help="Walk CTF Exchange OrderFilled events and write to corpus_trades",
@@ -427,6 +434,7 @@ async def _cmd_build_features(args: argparse.Namespace) -> int:
             markets_conn=conn,
             now_ts=int(time.time()),
             rebuild=bool(getattr(args, "rebuild", False)),
+            platform=args.platform,
         )
         _log.info("corpus.build_features_done", written=written)
         return 0
