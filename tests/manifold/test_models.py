@@ -163,3 +163,47 @@ def test_user_roundtrip_via_json() -> None:
     user2 = ManifoldUser.model_validate_json(json_str)
     assert user2.id == user.id
     assert user2.username == user.username
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [
+        ("YES", "YES"),
+        ("NO", "NO"),
+        ("MKT", "MKT"),
+        ("CANCEL", "CANCEL"),
+        (None, None),
+    ],
+)
+def test_manifold_market_parses_resolution_field(
+    raw_value: str | None, expected: str | None
+) -> None:
+    """`resolution` round-trips through validation for all four documented values + null."""
+    market = ManifoldMarket.model_validate(
+        {
+            "id": "abc123",
+            "creatorId": "user1",
+            "question": "Will X happen?",
+            "outcomeType": "BINARY",
+            "mechanism": "cpmm-1",
+            "isResolved": True,
+            "resolutionTime": 1_700_000_000,
+            "resolution": raw_value,
+        }
+    )
+    assert market.resolution == expected
+
+
+def test_manifold_market_resolution_defaults_to_none_when_absent() -> None:
+    """Markets that haven't resolved yet omit the field; the model defaults to None."""
+    market = ManifoldMarket.model_validate(
+        {
+            "id": "abc123",
+            "creatorId": "user1",
+            "question": "Will X happen?",
+            "outcomeType": "BINARY",
+            "mechanism": "cpmm-1",
+            "isResolved": False,
+        }
+    )
+    assert market.resolution is None

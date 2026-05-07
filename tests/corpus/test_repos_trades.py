@@ -164,3 +164,110 @@ def test_trades_repo_isolates_platforms(tmp_corpus_db: sqlite3.Connection) -> No
     assert [t.condition_id for t in kalshi_only] == ["KX-1"]
     assert poly_only[0].platform == "polymarket"
     assert kalshi_only[0].platform == "kalshi"
+
+
+def test_insert_batch_uses_polymarket_floor_for_polymarket_rows(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """Polymarket rows below $10 USD are dropped (existing behavior)."""
+    repo = CorpusTradesRepo(tmp_corpus_db)
+    poly = CorpusTrade(
+        tx_hash="0xtx",
+        asset_id="a1",
+        wallet_address="0xw",
+        condition_id="c1",
+        outcome_side="YES",
+        bs="BUY",
+        price=0.5,
+        size=10.0,
+        notional_usd=5.0,
+        ts=1000,
+        platform="polymarket",
+    )
+    assert repo.insert_batch([poly]) == 0
+
+
+def test_insert_batch_uses_manifold_floor_for_manifold_rows(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """Manifold rows below 100 mana are dropped; rows >= 100 mana are kept."""
+    repo = CorpusTradesRepo(tmp_corpus_db)
+    below = CorpusTrade(
+        tx_hash="m-tx-low",
+        asset_id="m1:YES",
+        wallet_address="userA",
+        condition_id="m1",
+        outcome_side="YES",
+        bs="BUY",
+        price=0.5,
+        size=50.0,
+        notional_usd=50.0,
+        ts=1000,
+        platform="manifold",
+    )
+    above = CorpusTrade(
+        tx_hash="m-tx-high",
+        asset_id="m1:YES",
+        wallet_address="userA",
+        condition_id="m1",
+        outcome_side="YES",
+        bs="BUY",
+        price=0.5,
+        size=200.0,
+        notional_usd=200.0,
+        ts=1001,
+        platform="manifold",
+    )
+    assert repo.insert_batch([below, above]) == 1
+
+
+def test_insert_batch_preserves_manifold_user_id_case(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """Manifold user IDs are case-sensitive hashes — must NOT be lowercased."""
+    repo = CorpusTradesRepo(tmp_corpus_db)
+    mixed_case = "igi2zGXsfxYPgB0DJTXVJVmwCOr2"
+    trade = CorpusTrade(
+        tx_hash="m-tx",
+        asset_id="m1:YES",
+        wallet_address=mixed_case,
+        condition_id="m1",
+        outcome_side="YES",
+        bs="BUY",
+        price=0.5,
+        size=200.0,
+        notional_usd=200.0,
+        ts=1000,
+        platform="manifold",
+    )
+    assert repo.insert_batch([trade]) == 1
+    row = tmp_corpus_db.execute(
+        "SELECT wallet_address FROM corpus_trades WHERE tx_hash = ?", (trade.tx_hash,)
+    ).fetchone()
+    assert row["wallet_address"] == mixed_case, "Manifold user IDs must preserve case"
+
+
+def test_insert_batch_lowercases_polymarket_wallet_address(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """Polymarket addresses are case-insensitive — lowercase canonicalization stays."""
+    repo = CorpusTradesRepo(tmp_corpus_db)
+    mixed_case = "0xABCDef1234567890aBcDeF1234567890AbCdEf12"
+    trade = CorpusTrade(
+        tx_hash="0xtx",
+        asset_id="a1",
+        wallet_address=mixed_case,
+        condition_id="c1",
+        outcome_side="YES",
+        bs="BUY",
+        price=0.5,
+        size=200.0,
+        notional_usd=100.0,
+        ts=1000,
+        platform="polymarket",
+    )
+    assert repo.insert_batch([trade]) == 1
+    row = tmp_corpus_db.execute(
+        "SELECT wallet_address FROM corpus_trades WHERE tx_hash = ?", (trade.tx_hash,)
+    ).fetchone()
+    assert row["wallet_address"] == mixed_case.lower()

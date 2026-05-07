@@ -245,3 +245,57 @@ async def test_subgraph_backfill_missing_api_key_exits(
 def test_default_subgraph_id_matches_polymarket_orderbook() -> None:
     """The pinned default must be the verified Polymarket Orderbook subgraph id."""
     assert _DEFAULT_SUBGRAPH_ID == "7fu2DWYK93ePfzB24c2wrP94S3x4LGHUrQxphhoEypyY"
+
+
+def test_backfill_parser_accepts_platform_manifold() -> None:
+    """`pscanner corpus backfill --platform manifold` parses correctly."""
+    parser = build_corpus_parser()
+    args = parser.parse_args(["backfill", "--platform", "manifold"])
+    assert args.platform == "manifold"
+
+
+def test_backfill_parser_default_platform_is_polymarket() -> None:
+    """Backfill's default platform is polymarket (preserves existing behavior)."""
+    parser = build_corpus_parser()
+    args = parser.parse_args(["backfill"])
+    assert args.platform == "polymarket"
+
+
+def test_backfill_parser_rejects_unknown_platform() -> None:
+    """An unknown platform name fails argparse."""
+    parser = build_corpus_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["backfill", "--platform", "ftx"])
+
+
+def test_refresh_parser_accepts_platform_manifold() -> None:
+    """`pscanner corpus refresh --platform manifold` parses correctly."""
+    parser = build_corpus_parser()
+    args = parser.parse_args(["refresh", "--platform", "manifold"])
+    assert args.platform == "manifold"
+
+
+def test_refresh_parser_default_platform_is_polymarket() -> None:
+    """Refresh's default platform is polymarket (preserves existing behavior)."""
+    parser = build_corpus_parser()
+    args = parser.parse_args(["refresh"])
+    assert args.platform == "polymarket"
+
+
+def test_refresh_parser_rejects_unknown_platform() -> None:
+    """An unknown platform name fails argparse."""
+    parser = build_corpus_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["refresh", "--platform", "ftx"])
+
+
+def test_build_features_parser_accepts_platform_manifold() -> None:
+    parser = build_corpus_parser()
+    args = parser.parse_args(["build-features", "--platform", "manifold"])
+    assert args.platform == "manifold"
+
+
+def test_build_features_parser_default_platform_is_polymarket() -> None:
+    parser = build_corpus_parser()
+    args = parser.parse_args(["build-features"])
+    assert args.platform == "polymarket"

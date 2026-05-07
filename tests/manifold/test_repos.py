@@ -149,6 +149,33 @@ def test_markets_iter_chronological_order(mdb: sqlite3.Connection) -> None:
     assert [m.id for m in markets] == ["early", "late"]
 
 
+def test_manifold_markets_repo_roundtrips_resolution(mdb: sqlite3.Connection) -> None:
+    """`insert_or_replace` writes the resolution column; the value survives round-trip."""
+    repo = ManifoldMarketsRepo(mdb)
+    market = ManifoldMarket.model_validate(
+        {
+            "id": "abc123",
+            "creatorId": "user1",
+            "question": "Will X happen?",
+            "outcomeType": "BINARY",
+            "mechanism": "cpmm-1",
+            "isResolved": True,
+            "resolutionTime": 1_700_000_000,
+            "resolution": "YES",
+        }
+    )
+    repo.insert_or_replace(market)
+    # Direct column read.
+    row = mdb.execute(
+        "SELECT resolution FROM manifold_markets WHERE id = ?", (market.id,)
+    ).fetchone()
+    assert row[0] == "YES"
+    # Round-trip via raw_json (covers iter_chronological).
+    fetched = repo.get_by_id(ManifoldMarketId("abc123"))
+    assert fetched is not None
+    assert fetched.resolution == "YES"
+
+
 def test_markets_null_close_time_last(mdb: sqlite3.Connection) -> None:
     repo = ManifoldMarketsRepo(mdb)
     m_with_time = ManifoldMarket.model_validate(

@@ -12,8 +12,10 @@ from pscanner.corpus.repos import (
 )
 from pscanner.corpus.resolutions import (
     determine_outcome_yes_won,
+    record_manifold_resolutions,
     record_resolutions,
 )
+from pscanner.manifold.models import ManifoldMarket
 from pscanner.poly.models import Market
 
 
@@ -130,3 +132,88 @@ async def test_record_resolutions_records_platform(
     assert res is not None
     assert res.platform == "polymarket"
     assert res.outcome_yes_won == 1
+
+
+class _FakeManifoldClient:
+    """Tiny stub that returns a fixed market by id."""
+
+    def __init__(self, markets: dict[str, ManifoldMarket]) -> None:
+        self._markets = markets
+
+    async def get_market(self, market_id: str) -> ManifoldMarket:
+        return self._markets[market_id]
+
+
+def _resolved_manifold_market(*, market_id: str, resolution: str | None) -> ManifoldMarket:
+    return ManifoldMarket.model_validate(
+        {
+            "id": market_id,
+            "creatorId": "creator",
+            "question": f"Question for {market_id}?",
+            "outcomeType": "BINARY",
+            "mechanism": "cpmm-1",
+            "isResolved": True,
+            "resolutionTime": 1_700_000_000,
+            "resolution": resolution,
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_record_manifold_resolutions_writes_yes_no(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """YES and NO resolutions land in market_resolutions with platform='manifold'."""
+    repo = MarketResolutionsRepo(tmp_corpus_db)
+    client = _FakeManifoldClient(
+        {
+            "yes-market": _resolved_manifold_market(market_id="yes-market", resolution="YES"),
+            "no-market": _resolved_manifold_market(market_id="no-market", resolution="NO"),
+        }
+    )
+    written = await record_manifold_resolutions(
+        client=client,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        repo=repo,
+        targets=[("yes-market", 1_700_000_000), ("no-market", 1_700_000_001)],
+        now_ts=2_000_000_000,
+    )
+    assert written == 2
+    yes_row = repo.get("yes-market", platform="manifold")
+    no_row = repo.get("no-market", platform="manifold")
+    assert yes_row is not None
+    assert yes_row.outcome_yes_won == 1
+    assert no_row is not None
+    assert no_row.outcome_yes_won == 0
+    assert yes_row.platform == "manifold"
+    assert yes_row.source == "manifold-rest"
+
+
+@pytest.mark.asyncio
+async def test_record_manifold_resolutions_skips_mkt_and_cancel(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """MKT and CANCEL resolutions are logged + skipped — no market_resolutions row."""
+    repo = MarketResolutionsRepo(tmp_corpus_db)
+    client = _FakeManifoldClient(
+        {
+            "mkt-market": _resolved_manifold_market(market_id="mkt-market", resolution="MKT"),
+            "cancel-market": _resolved_manifold_market(
+                market_id="cancel-market", resolution="CANCEL"
+            ),
+            "null-market": _resolved_manifold_market(market_id="null-market", resolution=None),
+        }
+    )
+    written = await record_manifold_resolutions(
+        client=client,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        repo=repo,
+        targets=[
+            ("mkt-market", 1_700_000_000),
+            ("cancel-market", 1_700_000_001),
+            ("null-market", 1_700_000_002),
+        ],
+        now_ts=2_000_000_000,
+    )
+    assert written == 0
+    assert repo.get("mkt-market", platform="manifold") is None
+    assert repo.get("cancel-market", platform="manifold") is None
+    assert repo.get("null-market", platform="manifold") is None

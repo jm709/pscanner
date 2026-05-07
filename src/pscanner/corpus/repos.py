@@ -268,17 +268,38 @@ class CorpusStateRepo:
         self._conn.commit()
 
 
-_NOTIONAL_FLOOR_USD: Final[float] = 10.0
+_NOTIONAL_FLOORS: Final[dict[str, float]] = {
+    "polymarket": 10.0,
+    "manifold": 100.0,
+    "kalshi": 10.0,  # placeholder; revisit when Kalshi ingestion ships
+}
+# Backward-compat alias for the existing module-private constant.
+_NOTIONAL_FLOOR_USD: Final[float] = _NOTIONAL_FLOORS["polymarket"]
+
+
+def _canonicalize_wallet_address(platform: str, address: str) -> str:
+    """Normalize a wallet address for storage.
+
+    Polymarket addresses are EVM-derived hex strings — case-insensitive,
+    canonically stored as lowercase to dedupe writes that round-trip through
+    different sources. Manifold ``user_id`` and any future platform-native
+    identifier types are case-sensitive opaque hashes; preserve them verbatim.
+    """
+    if platform == "polymarket":
+        return address.lower()
+    return address
 
 
 @dataclass(frozen=True)
 class CorpusTrade:
     """One BUY or SELL fill captured by the market-walker.
 
-    Wallet addresses are normalized to lowercase at insert time. ``bs`` is
-    ``BUY`` or ``SELL``; ``outcome_side`` is ``YES`` or ``NO``. ``price``
-    is the implied probability paid (already normalized so YES@0.7 and
-    NO@0.3 are equivalent buys of the same outcome).
+    Polymarket wallet addresses are canonicalized to lowercase at insert
+    time (EVM hex is case-insensitive). Manifold ``user_id`` hashes are
+    case-sensitive and preserved verbatim. ``bs`` is ``BUY`` or ``SELL``;
+    ``outcome_side`` is ``YES`` or ``NO``. ``price`` is the implied
+    probability paid (already normalized so YES@0.7 and NO@0.3 are
+    equivalent buys of the same outcome).
     """
 
     tx_hash: str
@@ -314,14 +335,15 @@ class CorpusTradesRepo:
         """
         rows = []
         for t in trades:
-            if t.notional_usd < _NOTIONAL_FLOOR_USD:
+            floor = _NOTIONAL_FLOORS.get(t.platform, _NOTIONAL_FLOORS["polymarket"])
+            if t.notional_usd < floor:
                 continue
             rows.append(
                 (
                     t.platform,
                     t.tx_hash,
                     t.asset_id,
-                    t.wallet_address.lower(),
+                    _canonicalize_wallet_address(t.platform, t.wallet_address),
                     t.condition_id,
                     t.outcome_side,
                     t.bs,

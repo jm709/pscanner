@@ -20,6 +20,8 @@ import structlog
 from pscanner.corpus.db import init_corpus_db
 from pscanner.corpus.enumerator import enumerate_closed_markets
 from pscanner.corpus.examples import build_features
+from pscanner.corpus.manifold_enumerator import enumerate_resolved_manifold_markets
+from pscanner.corpus.manifold_walker import walk_manifold_market
 from pscanner.corpus.market_walker import walk_market
 from pscanner.corpus.onchain_backfill import (
     clear_truncation_flags,
@@ -33,8 +35,10 @@ from pscanner.corpus.repos import (
     MarketResolutionsRepo,
     TrainingExamplesRepo,
 )
-from pscanner.corpus.resolutions import record_resolutions
+from pscanner.corpus.resolutions import record_manifold_resolutions, record_resolutions
 from pscanner.corpus.subgraph_ingest import run_subgraph_backfill
+from pscanner.manifold.client import ManifoldClient
+from pscanner.manifold.ids import ManifoldMarketId
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.onchain_rpc import OnchainRpcClient
@@ -76,11 +80,38 @@ def build_corpus_parser() -> argparse.ArgumentParser:
         "backfill", help="Bulk historical pull of every closed qualifying market"
     )
     _add_db_arg(backfill)
+    backfill.add_argument(
+        "--platform",
+        type=str,
+        choices=["polymarket", "manifold"],
+        default="polymarket",
+        help=(
+            "Platform to ingest. Defaults to polymarket. "
+            "`manifold` runs the Manifold REST enumerator + bet walker."
+        ),
+    )
     refresh = sub.add_parser("refresh", help="Incremental pass for newly-resolved markets")
     _add_db_arg(refresh)
+    refresh.add_argument(
+        "--platform",
+        type=str,
+        choices=["polymarket", "manifold"],
+        default="polymarket",
+        help=(
+            "Platform to ingest. Defaults to polymarket. "
+            "`manifold` re-enumerates resolved markets and records resolutions."
+        ),
+    )
     bf = sub.add_parser("build-features", help="Rebuild training_examples from raw events")
     _add_db_arg(bf)
     bf.add_argument("--rebuild", action="store_true", help="Drop and recreate the table")
+    bf.add_argument(
+        "--platform",
+        type=str,
+        choices=["polymarket", "manifold"],
+        default="polymarket",
+        help="Platform whose corpus rows feed the training_examples build.",
+    )
     ob = sub.add_parser(
         "onchain-backfill",
         help="Walk CTF Exchange OrderFilled events and write to corpus_trades",
@@ -266,7 +297,14 @@ async def _drain_pending(*, conn: sqlite3.Connection, data: DataClient) -> int:
 
 
 async def _cmd_backfill(args: argparse.Namespace) -> int:
-    """Bulk-pull every closed qualifying market into the corpus."""
+    """Run the corpus backfill for the requested platform."""
+    if args.platform == "manifold":
+        return await _run_manifold_backfill(args)
+    return await _run_polymarket_backfill(args)
+
+
+async def _run_polymarket_backfill(args: argparse.Namespace) -> int:
+    """Bulk-pull every closed qualifying Polymarket market into the corpus."""
     conn = init_corpus_db(Path(args.db))
     try:
         async with AsyncExitStack() as stack:
@@ -284,8 +322,38 @@ async def _cmd_backfill(args: argparse.Namespace) -> int:
         conn.close()
 
 
+async def _run_manifold_backfill(args: argparse.Namespace) -> int:
+    """Manifold path: enumerate resolved binary markets, then walk each one."""
+    conn = init_corpus_db(Path(args.db))
+    markets_repo = CorpusMarketsRepo(conn)
+    trades_repo = CorpusTradesRepo(conn)
+    now_ts = int(time.time())
+    try:
+        async with ManifoldClient() as client:
+            await enumerate_resolved_manifold_markets(client, markets_repo, now_ts=now_ts)
+            while pending := markets_repo.next_pending(limit=10, platform="manifold"):
+                for market in pending:
+                    await walk_manifold_market(
+                        client,
+                        markets_repo,
+                        trades_repo,
+                        market_id=ManifoldMarketId(market.condition_id),
+                        now_ts=now_ts,
+                    )
+        return 0
+    finally:
+        conn.close()
+
+
 async def _cmd_refresh(args: argparse.Namespace) -> int:
-    """Incremental sweep for newly-closed markets and missing resolutions."""
+    """Run the corpus refresh for the requested platform."""
+    if args.platform == "manifold":
+        return await _run_manifold_refresh(args)
+    return await _run_polymarket_refresh(args)
+
+
+async def _run_polymarket_refresh(args: argparse.Namespace) -> int:
+    """Incremental sweep for newly-closed Polymarket markets and missing resolutions."""
     conn = init_corpus_db(Path(args.db))
     try:
         state = CorpusStateRepo(conn)
@@ -322,6 +390,39 @@ async def _cmd_refresh(args: argparse.Namespace) -> int:
         conn.close()
 
 
+async def _run_manifold_refresh(args: argparse.Namespace) -> int:
+    """Manifold refresh: re-enumerate, then record resolutions for missing markets."""
+    db_path = Path(args.db)
+    conn = init_corpus_db(db_path)
+    markets_repo = CorpusMarketsRepo(conn)
+    resolutions_repo = MarketResolutionsRepo(conn)
+    now_ts = int(time.time())
+    try:
+        async with ManifoldClient() as client:
+            await enumerate_resolved_manifold_markets(client, markets_repo, now_ts=now_ts)
+            rows = conn.execute(
+                "SELECT condition_id, closed_at FROM corpus_markets "
+                "WHERE platform = 'manifold' AND backfill_state = 'complete'"
+            ).fetchall()
+            condition_ids = [row["condition_id"] for row in rows]
+            missing = resolutions_repo.missing_for(condition_ids, platform="manifold")
+            missing_set = set(missing)
+            targets = [
+                (row["condition_id"], int(row["closed_at"]))
+                for row in rows
+                if row["condition_id"] in missing_set
+            ]
+            await record_manifold_resolutions(
+                client=client,
+                repo=resolutions_repo,
+                targets=targets,
+                now_ts=now_ts,
+            )
+    finally:
+        conn.close()
+    return 0
+
+
 async def _cmd_build_features(args: argparse.Namespace) -> int:
     """Rebuild the training_examples table from raw corpus_trades + resolutions."""
     conn = init_corpus_db(Path(args.db))
@@ -333,6 +434,7 @@ async def _cmd_build_features(args: argparse.Namespace) -> int:
             markets_conn=conn,
             now_ts=int(time.time()),
             rebuild=bool(getattr(args, "rebuild", False)),
+            platform=args.platform,
         )
         _log.info("corpus.build_features_done", written=written)
         return 0
