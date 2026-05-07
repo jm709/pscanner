@@ -78,6 +78,17 @@ class GateModelDetector(TradeDrivenDetector):
             model_version=self._model_version,
         )
 
+    def _should_score(self, trade: WalletTrade) -> bool:
+        """Cheap pre-filter that doesn't require model inference.
+
+        Only BUY trades are scored — SELLs are accumulator-only and never
+        produce a ``gate_buy`` alert. The YES/NO outcome side check runs
+        downstream via :class:`MarketCacheRepo` (Task 7); a missing or
+        non-binary asset returns ``""`` from outcome resolution and is
+        skipped at the scoring stage.
+        """
+        return trade.side == "BUY"
+
     async def evaluate(self, trade: WalletTrade) -> None:
-        """Stub for now — pre-screen + scoring + emit land in Tasks 4-6."""
+        """Stub for now — scoring + emit land in Tasks 5-6."""
         del trade
