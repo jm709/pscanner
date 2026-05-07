@@ -113,15 +113,14 @@ def test_init_corpus_db_training_examples_has_platform_unique() -> None:
         platform_row = next(r for r in info if r[1] == "platform")
         assert platform_row[3] == 1, "platform must be NOT NULL"
         pk_cols = sorted([row[1] for row in info if row[5] > 0])
-        assert pk_cols == ["id"], "id stays the PK; cross-platform uniqueness is on the UNIQUE index"
+        assert pk_cols == ["id"], (
+            "id stays the PK; cross-platform uniqueness is on the UNIQUE index"
+        )
         # Verify the UNIQUE constraint covers (platform, tx_hash, asset_id, wallet_address).
         idx_rows = conn.execute("PRAGMA index_list(training_examples)").fetchall()
-        unique_idx = next(
-            row for row in idx_rows if row["unique"] == 1 and row["origin"] == "u"
-        )
+        unique_idx = next(row for row in idx_rows if row["unique"] == 1 and row["origin"] == "u")
         unique_cols = sorted(
-            row[2]
-            for row in conn.execute(f"PRAGMA index_info({unique_idx['name']})").fetchall()
+            row[2] for row in conn.execute(f"PRAGMA index_info({unique_idx['name']})").fetchall()
         )
         assert unique_cols == ["asset_id", "platform", "tx_hash", "wallet_address"]
     finally:
