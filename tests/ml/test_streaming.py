@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 import xgboost as xgb
 
-from pscanner.ml.streaming import SplitDataIter, _SplitIter, open_dataset
+from pscanner.ml.streaming import SplitDataIter, _partition_markets, _SplitIter, open_dataset
 from pscanner.ml.training import run_study
 
 
@@ -44,6 +44,36 @@ def test_open_dataset_partitions_markets_by_resolved_at(
     assert "0xmarket016" in val
     assert "0xmarket017" in test
     assert "0xmarket019" in test
+
+
+def test_partition_markets_filters_by_platform(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """`_partition_markets` returns only the requested platform's condition_ids.
+
+    Without the WHERE-platform filter the totals would be 8 (4 + 4); the
+    per-platform count == 4 proves the filter is in effect. (The synthetic
+    fixture reuses ``0xmarket{idx:03d}`` names regardless of seed so the
+    polymarket and kalshi condition_id strings overlap — that's a fixture
+    artifact, not a real-world condition; in production ``condition_id`` is
+    unique per platform but the composite PK ``(platform, condition_id)``
+    is what makes the filter mandatory.)
+    """
+    poly_db = make_synthetic_examples_db(n_markets=4, rows_per_market=2, seed=0)
+    # Layer kalshi rows on top of the same DB.
+    make_synthetic_examples_db(
+        n_markets=4, rows_per_market=2, seed=1, platform="kalshi", db_path=poly_db
+    )
+    conn = _sqlite3.connect(str(poly_db))
+    try:
+        train_p, val_p, test_p = _partition_markets(conn, platform="polymarket")
+        train_k, val_k, test_k = _partition_markets(conn, platform="kalshi")
+    finally:
+        conn.close()
+    poly_total = len(train_p) + len(val_p) + len(test_p)
+    kalshi_total = len(train_k) + len(val_k) + len(test_k)
+    assert poly_total == 4, "polymarket has 4 markets"
+    assert kalshi_total == 4, "kalshi has 4 markets"
 
 
 def test_open_dataset_closes_pre_pass_connection_on_exit(

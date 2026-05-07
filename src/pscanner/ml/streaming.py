@@ -203,14 +203,21 @@ class StreamingDataset:
 
 def _partition_markets(
     conn: sqlite3.Connection,
+    *,
+    platform: str = "polymarket",
 ) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
     """Run P1: SELECT condition_id, resolved_at FROM market_resolutions ORDER BY...
 
-    Slice the sorted list at 60% / 80% into train, val, test.
+    Slice the sorted list at 70% / 85% into train, val, test. Filters
+    ``market_resolutions`` by ``platform`` so each split is platform-scoped;
+    after RFC #35 PR A, ``condition_id`` is no longer unique across
+    platforms (composite PK), so the filter is required for correctness.
     """
     rows = conn.execute(
         "SELECT condition_id, resolved_at FROM market_resolutions "
-        "ORDER BY resolved_at, condition_id"
+        "WHERE platform = ? "
+        "ORDER BY resolved_at, condition_id",
+        (platform,),
     ).fetchall()
     n = len(rows)
     n_train = round(_TRAIN_FRAC * n)
