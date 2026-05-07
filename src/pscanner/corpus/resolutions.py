@@ -13,6 +13,7 @@ from typing import Final
 import structlog
 
 from pscanner.corpus.repos import MarketResolution, MarketResolutionsRepo
+from pscanner.manifold.client import ManifoldClient
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.models import Market
 
@@ -79,6 +80,60 @@ async def record_resolutions(
                 resolved_at=resolved_at,
                 source="gamma",
                 platform=platform,
+            ),
+            recorded_at=now_ts,
+        )
+        written += 1
+    return written
+
+
+async def record_manifold_resolutions(
+    *,
+    client: ManifoldClient,
+    repo: MarketResolutionsRepo,
+    targets: Iterable[tuple[str, int]],
+    now_ts: int,
+) -> int:
+    """Fetch resolution outcomes for resolved Manifold markets.
+
+    For each target, calls ``ManifoldClient.get_market(market_id)`` and reads
+    the ``resolution`` field. YES/NO produce a ``market_resolutions`` row;
+    MKT, CANCEL, and ``None`` are logged and skipped (no row written, so the
+    inner JOIN in ``build_features`` excludes them from ``training_examples``).
+
+    Args:
+        client: Open ``ManifoldClient``.
+        repo: ``MarketResolutionsRepo`` to upsert into.
+        targets: Iterable of ``(market_id, resolved_at_hint)``.
+        now_ts: Unix seconds, recorded as ``recorded_at`` on each row.
+
+    Returns:
+        Count of resolutions actually written (excludes skipped MKT/CANCEL/null).
+    """
+    written = 0
+    for market_id, resolved_at in targets:
+        market = await client.get_market(market_id)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        if market.resolution == "YES":
+            outcome_yes_won = 1
+            winning_outcome_index = 0
+        elif market.resolution == "NO":
+            outcome_yes_won = 0
+            winning_outcome_index = 1
+        else:
+            _log.warning(
+                "corpus.manifold_resolution_skipped",
+                market_id=market_id,
+                resolution=market.resolution,
+            )
+            continue
+        repo.upsert(
+            MarketResolution(
+                condition_id=market_id,
+                winning_outcome_index=winning_outcome_index,
+                outcome_yes_won=outcome_yes_won,
+                resolved_at=resolved_at,
+                source="manifold-rest",
+                platform="manifold",
             ),
             recorded_at=now_ts,
         )
