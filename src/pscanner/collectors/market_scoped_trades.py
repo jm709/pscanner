@@ -11,6 +11,7 @@ the polling budget comfortably covers the working set at 60s freshness.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -141,10 +142,15 @@ class MarketScopedTradeCollector:
                     tx=trade.transaction_hash,
                 )
 
-    async def run(self, *, clock: Clock | None = None) -> None:
+    async def run(
+        self,
+        stop_event: asyncio.Event,
+        *,
+        clock: Clock | None = None,
+    ) -> None:
         """Long-running loop: refresh market set + poll on cadence."""
         clk = clock or RealClock()
-        while True:
+        while not stop_event.is_set():
             await self.refresh_market_set()
             await self.poll_once()
             await clk.sleep(self._config.poll_interval_seconds)

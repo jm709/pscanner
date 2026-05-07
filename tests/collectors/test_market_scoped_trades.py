@@ -232,7 +232,8 @@ async def test_run_loop_polls_on_cadence() -> None:
     data = _FakeDataClient(by_market={"0xc1": []})
     collector = MarketScopedTradeCollector(config=cfg, gamma=gamma, data_client=data)
     clk = FakeClock()
-    task = asyncio.create_task(collector.run(clock=clk))
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(collector.run(stop_event, clock=clk))
     try:
         await asyncio.sleep(0)
         await clk.advance(30)
