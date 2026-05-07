@@ -83,6 +83,7 @@ from pscanner.store.repo import (
     WatchlistRepo,
 )
 from pscanner.strategies.evaluators import (
+    GateModelEvaluator,
     MispricingEvaluator,
     MonotoneEvaluator,
     MoveAttributionEvaluator,
@@ -466,6 +467,10 @@ class Scanner:
                     config=cfg.velocity,
                     market_cache=self._market_cache_repo,
                 ),
+            )
+        if cfg.gate_model.enabled:
+            evaluators.append(
+                GateModelEvaluator(config=cfg.gate_model),
             )
         return evaluators
 
