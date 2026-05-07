@@ -268,6 +268,20 @@ def test_backfill_parser_rejects_unknown_platform() -> None:
         parser.parse_args(["backfill", "--platform", "ftx"])
 
 
+def test_backfill_parser_accepts_platform_kalshi() -> None:
+    """`pscanner corpus backfill --platform kalshi` parses correctly."""
+    parser = build_corpus_parser()
+    args = parser.parse_args(["backfill", "--platform", "kalshi"])
+    assert args.platform == "kalshi"
+
+
+def test_backfill_parser_default_platform_is_still_polymarket() -> None:
+    """Adding kalshi to choices doesn't change the default."""
+    parser = build_corpus_parser()
+    args = parser.parse_args(["backfill"])
+    assert args.platform == "polymarket"
+
+
 def test_refresh_parser_accepts_platform_manifold() -> None:
     """`pscanner corpus refresh --platform manifold` parses correctly."""
     parser = build_corpus_parser()
