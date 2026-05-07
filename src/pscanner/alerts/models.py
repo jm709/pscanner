@@ -18,6 +18,7 @@ DetectorName = Literal[
     "velocity",
     "cluster",
     "move_attribution",
+    "gate_buy",
 ]
 
 
