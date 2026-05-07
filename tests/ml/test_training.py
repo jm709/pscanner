@@ -367,6 +367,34 @@ def test_run_study_writes_accepted_categories_to_preprocessor_json(
     assert preprocessor["accepted_categories"] == ["sports", "esports"]
 
 
+def test_run_study_accepts_platform_kwarg(
+    make_synthetic_examples_db: Callable[..., Path],
+    tmp_path: Path,
+) -> None:
+    """`run_study` accepts platform kwarg and forwards to open_dataset."""
+    poly_db = make_synthetic_examples_db(n_markets=10, rows_per_market=4, seed=0)
+    make_synthetic_examples_db(
+        n_markets=10, rows_per_market=4, seed=1, platform="kalshi", db_path=poly_db
+    )
+    output_dir = tmp_path / "out"
+    # Smoke-train on kalshi rows only; using a tiny budget so this stays fast.
+    run_study(
+        db_path=poly_db,
+        output_dir=output_dir,
+        n_trials=1,
+        n_jobs=1,
+        n_min=1,
+        seed=0,
+        device="cpu",
+        chunk_size=64,
+        platform="kalshi",
+    )
+    # Read back the artifact and confirm the platform was honored.
+    with (output_dir / "preprocessor.json").open() as fh:
+        cfg = json.load(fh)
+    assert cfg.get("platform") == "kalshi"
+
+
 def test_run_study_writes_test_edge_filtered_to_metrics_json(
     tmp_path: Path,
     make_synthetic_examples_db: Callable[..., Path],
