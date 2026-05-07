@@ -121,3 +121,24 @@ def test_register_resolution_drains_buy_to_win() -> None:
     assert wallet.prior_wins == 1
     assert wallet.prior_losses == 0
     assert wallet.realized_pnl_usd == pytest.approx(60.0)  # 100 - 40
+
+
+def test_restart_preserves_wallet_state(tmp_path: Path) -> None:
+    db_path = tmp_path / "daemon.sqlite3"
+    conn1 = init_db(db_path)
+    try:
+        provider1 = LiveHistoryProvider(conn=conn1, metadata={})
+        provider1.observe(_make_trade(bs="BUY", ts=1_700_000_000, price=0.40))
+        provider1.observe(
+            _make_trade(bs="BUY", ts=1_700_000_100, price=0.45, condition_id="0xcond2")
+        )
+        before = provider1.wallet_state("0xabc", as_of_ts=1_700_000_200)
+    finally:
+        conn1.close()
+    conn2 = init_db(db_path)
+    try:
+        provider2 = LiveHistoryProvider(conn=conn2, metadata={})
+        after = provider2.wallet_state("0xabc", as_of_ts=1_700_000_200)
+    finally:
+        conn2.close()
+    assert before == after
