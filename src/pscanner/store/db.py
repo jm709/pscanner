@@ -266,6 +266,37 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     # Polymarket daemon tables. The CREATE statements are defined in
     # pscanner.kalshi.db to keep platform code co-located.
     *KALSHI_SCHEMA_STATEMENTS,
+    """
+    CREATE TABLE IF NOT EXISTS wallet_state_live (
+      wallet_address TEXT PRIMARY KEY,
+      first_seen_ts INTEGER NOT NULL,
+      prior_trades_count INTEGER NOT NULL DEFAULT 0,
+      prior_buys_count INTEGER NOT NULL DEFAULT 0,
+      prior_resolved_buys INTEGER NOT NULL DEFAULT 0,
+      prior_wins INTEGER NOT NULL DEFAULT 0,
+      prior_losses INTEGER NOT NULL DEFAULT 0,
+      cumulative_buy_price_sum REAL NOT NULL DEFAULT 0,
+      cumulative_buy_count INTEGER NOT NULL DEFAULT 0,
+      realized_pnl_usd REAL NOT NULL DEFAULT 0,
+      last_trade_ts INTEGER,
+      bet_size_sum REAL NOT NULL DEFAULT 0,
+      bet_size_count INTEGER NOT NULL DEFAULT 0,
+      recent_30d_trades_json TEXT NOT NULL DEFAULT '[]',
+      category_counts_json TEXT NOT NULL DEFAULT '{}',
+      unresolved_buys_json TEXT NOT NULL DEFAULT '[]'
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS market_state_live (
+      condition_id TEXT PRIMARY KEY,
+      market_age_start_ts INTEGER NOT NULL,
+      volume_so_far_usd REAL NOT NULL DEFAULT 0,
+      unique_traders_count INTEGER NOT NULL DEFAULT 0,
+      last_trade_price REAL,
+      recent_prices_json TEXT NOT NULL DEFAULT '[]',
+      traders_json TEXT NOT NULL DEFAULT '[]'
+    )
+    """,
 )
 
 _MIGRATIONS: tuple[str, ...] = (
