@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from pscanner.config import (
     ClusterConfig,
     Config,
     EvaluatorsConfig,
+    GateModelConfig,
+    GateModelMarketFilterConfig,
     MispricingEvaluatorConfig,
     MoveAttributionConfig,
     MoveAttributionEvaluatorConfig,
@@ -119,3 +123,28 @@ def test_config_default_monotone_section() -> None:
     assert cfg.monotone.min_event_liquidity_usd == 10000.0
     assert cfg.monotone.min_market_liquidity_usd == 100.0
     assert cfg.monotone.max_market_count == 12
+
+
+def test_gate_model_config_defaults() -> None:
+    cfg = GateModelConfig()
+    assert cfg.enabled is False
+    assert cfg.artifact_dir == Path("models/current")
+    assert cfg.min_pred == 0.7
+    assert cfg.min_edge_pct == 0.01
+    assert cfg.accepted_categories is None
+    assert cfg.queue_max_size == 1024
+
+
+def test_gate_model_market_filter_defaults() -> None:
+    cfg = GateModelMarketFilterConfig()
+    assert cfg.enabled is False
+    assert cfg.accepted_categories == ("esports",)
+    assert cfg.min_volume_24h_usd == 100_000
+    assert cfg.max_markets == 50
+    assert cfg.poll_interval_seconds == 60
+
+
+def test_root_config_aggregates_gate_sections() -> None:
+    cfg = Config()
+    assert isinstance(cfg.gate_model, GateModelConfig)
+    assert isinstance(cfg.gate_model_market_filter, GateModelMarketFilterConfig)
