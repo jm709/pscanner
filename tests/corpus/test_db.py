@@ -103,17 +103,27 @@ def test_init_corpus_db_market_resolutions_has_platform_pk() -> None:
         conn.close()
 
 
-def test_init_corpus_db_training_examples_has_platform_pk() -> None:
+def test_init_corpus_db_training_examples_has_platform_unique() -> None:
     conn = init_corpus_db(Path(":memory:"))
     try:
         info = conn.execute("PRAGMA table_info(training_examples)").fetchall()
         cols = {row[1] for row in info}
         assert "platform" in cols
-        assert "id" not in cols, "legacy id column must be dropped"
+        assert "id" in cols, "legacy id column is preserved for streaming.py ORDER BY"
         platform_row = next(r for r in info if r[1] == "platform")
         assert platform_row[3] == 1, "platform must be NOT NULL"
         pk_cols = sorted([row[1] for row in info if row[5] > 0])
-        assert pk_cols == ["asset_id", "platform", "tx_hash", "wallet_address"]
+        assert pk_cols == ["id"], "id stays the PK; cross-platform uniqueness is on the UNIQUE index"
+        # Verify the UNIQUE constraint covers (platform, tx_hash, asset_id, wallet_address).
+        idx_rows = conn.execute("PRAGMA index_list(training_examples)").fetchall()
+        unique_idx = next(
+            row for row in idx_rows if row["unique"] == 1 and row["origin"] == "u"
+        )
+        unique_cols = sorted(
+            row[2]
+            for row in conn.execute(f"PRAGMA index_info({unique_idx['name']})").fetchall()
+        )
+        assert unique_cols == ["asset_id", "platform", "tx_hash", "wallet_address"]
     finally:
         conn.close()
 
@@ -432,12 +442,14 @@ def test_apply_migrations_adds_platform_to_existing_corpus() -> None:
             info = conn.execute("PRAGMA table_info(corpus_markets)").fetchall()
             pk_cols = sorted([r[1] for r in info if r[5] > 0])
             assert pk_cols == ["condition_id", "platform"]
-            # training_examples must have its legacy `id` column dropped.
+            # training_examples preserves its legacy `id` AUTOINCREMENT PK
+            # (used by ``pscanner.ml.streaming`` for chunk-iteration ORDER BY).
+            # Cross-platform uniqueness is enforced via a UNIQUE index instead.
             te_info = conn.execute("PRAGMA table_info(training_examples)").fetchall()
             te_cols = {r[1] for r in te_info}
-            assert "id" not in te_cols, "legacy id column must be dropped during migration"
+            assert "id" in te_cols, "legacy id column must survive migration"
             te_pk = sorted([r[1] for r in te_info if r[5] > 0])
-            assert te_pk == ["asset_id", "platform", "tx_hash", "wallet_address"]
+            assert te_pk == ["id"], "id stays the PK after migration"
 
             # Round-trip data assertions: every original column value must
             # survive the table-copy. Catches column-list typos in the

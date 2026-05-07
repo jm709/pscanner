@@ -153,11 +153,15 @@ class OneHotEncoder:
 
 # Columns excluded at SELECT time so the full-fat DataFrame is never
 # materialized. ``id`` is the autoincrement primary key, useless for
-# training. ``LEAKAGE_COLS`` are dropped downstream by
-# ``drop_leakage_cols`` anyway -- excluding them at the SQL boundary
-# avoids loading ~1+ GB of hex-string columns (tx_hash, asset_id,
-# wallet_address are 42-66 chars x 5M rows each) only to drop them.
-_NEVER_LOAD_COLS: frozenset[str] = frozenset({"id", *LEAKAGE_COLS})
+# training. ``platform`` is RFC PR A's cross-platform tag; the streaming
+# pipeline doesn't yet filter by platform (a follow-up against
+# ``open_dataset``), so excluding the column at the SQL boundary keeps
+# the feature matrix purely numeric while the corpus is single-platform.
+# ``LEAKAGE_COLS`` are dropped downstream by ``drop_leakage_cols`` anyway
+# -- excluding them at the SQL boundary avoids loading ~1+ GB of
+# hex-string columns (tx_hash, asset_id, wallet_address are 42-66 chars
+# x 5M rows each) only to drop them.
+_NEVER_LOAD_COLS: frozenset[str] = frozenset({"id", "platform", *LEAKAGE_COLS})
 
 
 def build_feature_matrix(

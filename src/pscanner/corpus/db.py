@@ -83,6 +83,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
     """
     CREATE TABLE IF NOT EXISTS training_examples (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
       platform TEXT NOT NULL DEFAULT 'polymarket'
         CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
       tx_hash TEXT NOT NULL,
@@ -123,7 +124,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
       last_trade_price REAL,
       price_volatility_recent REAL,
       label_won INTEGER NOT NULL,
-      PRIMARY KEY (platform, tx_hash, asset_id, wallet_address)
+      UNIQUE (platform, tx_hash, asset_id, wallet_address)
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_training_examples_condition ON training_examples(condition_id)",
@@ -386,6 +387,7 @@ def _migrate_training_examples_add_platform(conn: sqlite3.Connection) -> None:
         conn.execute(
             """
             CREATE TABLE training_examples__new (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
               platform TEXT NOT NULL DEFAULT 'polymarket'
                 CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
               tx_hash TEXT NOT NULL,
@@ -426,16 +428,18 @@ def _migrate_training_examples_add_platform(conn: sqlite3.Connection) -> None:
               last_trade_price REAL,
               price_volatility_recent REAL,
               label_won INTEGER NOT NULL,
-              PRIMARY KEY (platform, tx_hash, asset_id, wallet_address)
+              UNIQUE (platform, tx_hash, asset_id, wallet_address)
             )
             """
         )
-        # Drop the old `id` autoincrement column at copy time. None of the
-        # readers use it (LEAKAGE_COLS / _NEVER_LOAD_COLS already exclude it).
+        # Preserve the legacy `id` autoincrement column — `pscanner.ml.streaming`
+        # uses it as a stable rowid for chunk-iteration ORDER BY. The composite
+        # cross-platform key is enforced via UNIQUE rather than as the PK so id
+        # stays addressable.
         conn.execute(
             """
             INSERT INTO training_examples__new (
-              platform, tx_hash, asset_id, wallet_address, condition_id, trade_ts, built_at,
+              id, platform, tx_hash, asset_id, wallet_address, condition_id, trade_ts, built_at,
               prior_trades_count, prior_buys_count, prior_resolved_buys,
               prior_wins, prior_losses, win_rate, avg_implied_prob_paid,
               realized_edge_pp, prior_realized_pnl_usd,
@@ -450,7 +454,7 @@ def _migrate_training_examples_add_platform(conn: sqlite3.Connection) -> None:
               label_won
             )
             SELECT
-              'polymarket', tx_hash, asset_id, wallet_address, condition_id, trade_ts, built_at,
+              id, 'polymarket', tx_hash, asset_id, wallet_address, condition_id, trade_ts, built_at,
               prior_trades_count, prior_buys_count, prior_resolved_buys,
               prior_wins, prior_losses, win_rate, avg_implied_prob_paid,
               realized_edge_pp, prior_realized_pnl_usd,
