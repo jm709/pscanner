@@ -46,3 +46,6 @@ models/
 .env.*
 !.env.example
 config.toml
+
+# Claude Code subagent worktrees (ephemeral, per-run state)
+.claude/
