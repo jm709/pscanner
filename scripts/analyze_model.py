@@ -126,7 +126,7 @@ def _print_per_category_breakdown(
         print(f"  {cat:<20} {n:>10,} {won_rate:>10.4f} {accuracy:>10.4f} {n_taken:>10,} {edge_str}")
 
 
-def analyze(model_dir: Path, db_path: Path, top_k: int) -> None:
+def analyze(model_dir: Path, db_path: Path, top_k: int, platform: str = "polymarket") -> None:
     """End-to-end analysis: replicate test split, predict, print diagnostics."""
     print(f"Loading model from {model_dir}")
     booster = xgb.Booster()
@@ -134,8 +134,8 @@ def analyze(model_dir: Path, db_path: Path, top_k: int) -> None:
     encoder_payload = json.loads((model_dir / "preprocessor.json").read_text())
     encoder = OneHotEncoder.from_json({"levels": encoder_payload["encoder"]["levels"]})
 
-    print(f"Loading corpus from {db_path}")
-    with open_dataset(db_path) as ds:
+    print(f"Loading corpus from {db_path} (platform={platform})")
+    with open_dataset(db_path, platform=platform) as ds:
         if ds.encoder is None:
             raise RuntimeError("open_dataset did not fit the encoder")
         # Sanity-check: encoder fit on this corpus should match the
@@ -206,13 +206,20 @@ def _parse_args() -> argparse.Namespace:
         default=15,
         help="Number of top features to show in importance breakdowns",
     )
+    parser.add_argument(
+        "--platform",
+        type=str,
+        choices=["polymarket", "kalshi", "manifold"],
+        default="polymarket",
+        help="Filter to rows with this platform tag (matches `pscanner ml train --platform`).",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     """Entry point: parse args, run analysis."""
     args = _parse_args()
-    analyze(Path(args.model), Path(args.db), top_k=args.top_k)
+    analyze(Path(args.model), Path(args.db), top_k=args.top_k, platform=args.platform)
     return 0
 
 
