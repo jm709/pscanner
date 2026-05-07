@@ -303,6 +303,13 @@ def test_refresh_parser_rejects_unknown_platform() -> None:
         parser.parse_args(["refresh", "--platform", "ftx"])
 
 
+def test_refresh_parser_accepts_platform_kalshi() -> None:
+    """`pscanner corpus refresh --platform kalshi` parses correctly."""
+    parser = build_corpus_parser()
+    args = parser.parse_args(["refresh", "--platform", "kalshi"])
+    assert args.platform == "kalshi"
+
+
 def test_build_features_parser_accepts_platform_manifold() -> None:
     parser = build_corpus_parser()
     args = parser.parse_args(["build-features", "--platform", "manifold"])

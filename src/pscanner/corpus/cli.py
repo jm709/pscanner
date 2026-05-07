@@ -37,7 +37,11 @@ from pscanner.corpus.repos import (
     MarketResolutionsRepo,
     TrainingExamplesRepo,
 )
-from pscanner.corpus.resolutions import record_manifold_resolutions, record_resolutions
+from pscanner.corpus.resolutions import (
+    record_kalshi_resolutions,
+    record_manifold_resolutions,
+    record_resolutions,
+)
 from pscanner.corpus.subgraph_ingest import run_subgraph_backfill
 from pscanner.kalshi.client import KalshiClient
 from pscanner.kalshi.ids import KalshiMarketTicker
@@ -100,11 +104,12 @@ def build_corpus_parser() -> argparse.ArgumentParser:
     refresh.add_argument(
         "--platform",
         type=str,
-        choices=["polymarket", "manifold"],
+        choices=["polymarket", "manifold", "kalshi"],
         default="polymarket",
         help=(
             "Platform to ingest. Defaults to polymarket. "
-            "`manifold` re-enumerates resolved markets and records resolutions."
+            "`manifold` re-enumerates resolved markets and records resolutions. "
+            "`kalshi` re-enumerates settled markets and records resolutions."
         ),
     )
     bf = sub.add_parser("build-features", help="Rebuild training_examples from raw events")
@@ -379,6 +384,8 @@ async def _cmd_refresh(args: argparse.Namespace) -> int:
     """Run the corpus refresh for the requested platform."""
     if args.platform == "manifold":
         return await _run_manifold_refresh(args)
+    if args.platform == "kalshi":
+        return await _run_kalshi_refresh(args)
     return await _run_polymarket_refresh(args)
 
 
@@ -443,6 +450,39 @@ async def _run_manifold_refresh(args: argparse.Namespace) -> int:
                 if row["condition_id"] in missing_set
             ]
             await record_manifold_resolutions(
+                client=client,
+                repo=resolutions_repo,
+                targets=targets,
+                now_ts=now_ts,
+            )
+    finally:
+        conn.close()
+    return 0
+
+
+async def _run_kalshi_refresh(args: argparse.Namespace) -> int:
+    """Kalshi refresh: re-enumerate, then record resolutions for missing markets."""
+    db_path = Path(args.db)
+    conn = init_corpus_db(db_path)
+    markets_repo = CorpusMarketsRepo(conn)
+    resolutions_repo = MarketResolutionsRepo(conn)
+    now_ts = int(time.time())
+    try:
+        async with KalshiClient() as client:
+            await enumerate_resolved_kalshi_markets(client, markets_repo, now_ts=now_ts)
+            rows = conn.execute(
+                "SELECT condition_id, closed_at FROM corpus_markets "
+                "WHERE platform = 'kalshi' AND backfill_state = 'complete'"
+            ).fetchall()
+            condition_ids = [row["condition_id"] for row in rows]
+            missing = resolutions_repo.missing_for(condition_ids, platform="kalshi")
+            missing_set = set(missing)
+            targets = [
+                (row["condition_id"], int(row["closed_at"]))
+                for row in rows
+                if row["condition_id"] in missing_set
+            ]
+            await record_kalshi_resolutions(
                 client=client,
                 repo=resolutions_repo,
                 targets=targets,
