@@ -39,7 +39,7 @@ from pscanner.ml.preprocessing import CARRIER_COLS, OneHotEncoder
 
 if TYPE_CHECKING:
     from pscanner.daemon.live_history import LiveHistoryProvider
-    from pscanner.store.repo import AlertsRepo, WalletTrade
+    from pscanner.store.repo import AlertsRepo, MarketCacheRepo, WalletTrade
 
 _LOG = structlog.get_logger(__name__)
 
@@ -55,6 +55,7 @@ class GateModelDetector(TradeDrivenDetector):
         config: GateModelConfig,
         provider: LiveHistoryProvider,
         alerts_repo: AlertsRepo,
+        market_cache: MarketCacheRepo | None = None,
     ) -> None:
         """Load model + preprocessor artifacts and configure category filter.
 
@@ -63,11 +64,16 @@ class GateModelDetector(TradeDrivenDetector):
                 accepted_categories override.
             provider: LiveHistoryProvider for per-wallet and per-market state.
             alerts_repo: AlertsRepo for deduplication and persistence.
+            market_cache: Optional MarketCacheRepo used to map
+                ``trade.asset_id`` to YES/NO outcome side. When omitted,
+                outcome resolution returns ``""`` and every trade is skipped
+                — production wiring always provides one.
         """
         super().__init__()
         self._config = config
         self._provider = provider
         self._alerts_repo = alerts_repo
+        self._market_cache = market_cache
         artifact_dir = config.artifact_dir
         self._booster = xgb.Booster()
         self._booster.load_model(str(artifact_dir / "model.json"))
@@ -192,10 +198,22 @@ class GateModelDetector(TradeDrivenDetector):
     def _resolve_outcome_side(self, trade: WalletTrade) -> str:
         """Map ``WalletTrade.asset_id`` -> ``"YES"`` / ``"NO"``.
 
-        Stub for now — Task 7 wires :class:`MarketCacheRepo`. Tests
-        monkeypatch this method to return a fixed value.
+        Returns ``""`` when no :class:`MarketCacheRepo` is wired, the market
+        is not cached, the asset_id isn't found, or the matched outcome name
+        is neither YES nor NO. The detector treats ``""`` as "skip" so any
+        of these conditions silently drop the trade.
         """
-        del trade
+        if self._market_cache is None:
+            return ""
+        cached = self._market_cache.get_by_condition_id(trade.condition_id)
+        if cached is None:
+            return ""
+        for asset_id, name in zip(cached.asset_ids, cached.outcomes, strict=False):
+            if asset_id == trade.asset_id:
+                upper = name.strip().upper()
+                if upper in ("YES", "NO"):
+                    return upper
+                return ""
         return ""
 
     def _predict_one(self, features: FeatureRow) -> float:

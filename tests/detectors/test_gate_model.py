@@ -16,9 +16,9 @@ from pscanner.config import GateModelConfig
 from pscanner.corpus.features import MarketMetadata
 from pscanner.daemon.live_history import LiveHistoryProvider
 from pscanner.detectors.gate_model import GateModelDetector
-from pscanner.poly.ids import AssetId, ConditionId
+from pscanner.poly.ids import AssetId, ConditionId, EventId, MarketId
 from pscanner.store.db import init_db
-from pscanner.store.repo import AlertsRepo, WalletTrade
+from pscanner.store.repo import AlertsRepo, CachedMarket, MarketCacheRepo, WalletTrade
 
 
 def _train_dummy_model(out_dir: Path) -> None:
@@ -290,3 +290,61 @@ async def test_evaluate_skips_when_category_not_accepted(tmp_path: Path) -> None
     finally:
         conn.close()
     assert recent == []
+
+
+def test_resolve_outcome_side_returns_empty_without_market_cache(tmp_path: Path) -> None:
+    conn = _new_db()
+    try:
+        artifact_dir = tmp_path / "model"
+        _train_dummy_model(artifact_dir)
+        provider = LiveHistoryProvider(conn=conn, metadata={})
+        detector = GateModelDetector(
+            config=GateModelConfig(enabled=True, artifact_dir=artifact_dir),
+            provider=provider,
+            alerts_repo=AlertsRepo(conn),
+        )
+        trade = _make_wallet_trade(condition_id="0xc1", asset_id="0xa1")
+        assert detector._resolve_outcome_side(trade) == ""
+    finally:
+        conn.close()
+
+
+def test_resolve_outcome_side_via_market_cache(tmp_path: Path) -> None:
+    conn = _new_db()
+    try:
+        artifact_dir = tmp_path / "model"
+        _train_dummy_model(artifact_dir)
+        market_cache = MarketCacheRepo(conn)
+        cached = CachedMarket(
+            market_id=MarketId("m1"),
+            event_id=EventId("e1"),
+            title="t",
+            liquidity_usd=1.0,
+            volume_usd=1.0,
+            outcome_prices=[0.5, 0.5],
+            active=True,
+            cached_at=1_700_000_000,
+            condition_id=ConditionId("0xc1"),
+            event_slug=None,
+            outcomes=["Yes", "No"],
+            asset_ids=[AssetId("0xa1"), AssetId("0xa2")],
+        )
+        market_cache.upsert(cached)
+        provider = LiveHistoryProvider(conn=conn, metadata={})
+        detector = GateModelDetector(
+            config=GateModelConfig(enabled=True, artifact_dir=artifact_dir),
+            provider=provider,
+            alerts_repo=AlertsRepo(conn),
+            market_cache=market_cache,
+        )
+        yes_trade = _make_wallet_trade(condition_id="0xc1", asset_id="0xa1")
+        no_trade = _make_wallet_trade(condition_id="0xc1", asset_id="0xa2")
+        unknown = _make_wallet_trade(condition_id="0xc1", asset_id="0xother")
+        yes_side = detector._resolve_outcome_side(yes_trade)
+        no_side = detector._resolve_outcome_side(no_trade)
+        unknown_side = detector._resolve_outcome_side(unknown)
+    finally:
+        conn.close()
+    assert yes_side == "YES"
+    assert no_side == "NO"
+    assert unknown_side == ""
