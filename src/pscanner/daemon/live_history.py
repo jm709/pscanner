@@ -16,18 +16,19 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import TYPE_CHECKING
 
 from pscanner.corpus.features import (
     MarketMetadata,
     MarketState,
+    Trade,
     WalletState,
+    _TradeFields,  # re-using the structural Protocol from features
+    apply_buy_to_state,
+    apply_sell_to_state,
+    apply_trade_to_market,
     empty_market_state,
     empty_wallet_state,
 )
-
-if TYPE_CHECKING:
-    from pscanner.corpus.features import Trade, _TradeFields
 
 
 class LiveHistoryProvider:
@@ -112,12 +113,152 @@ class LiveHistoryProvider:
         )
 
     def observe(self, trade: Trade) -> None:
-        """Fold a trade into running wallet + market state. Implemented in Task 3."""
-        raise NotImplementedError
+        """Fold a trade into running wallet + market state.
+
+        BUY rows update the wallet's running aggregates AND append an
+        unresolved-buy entry to the wallet's serialized list so it can be
+        drained when ``register_resolution`` fires (Task 4).
+        """
+        wallet = self.wallet_state(trade.wallet_address, as_of_ts=trade.ts)
+        unresolved = self._load_unresolved(trade.wallet_address)
+        if trade.bs == "BUY":
+            new_state = apply_buy_to_state(wallet, trade)
+            unresolved.append(
+                {
+                    "condition_id": trade.condition_id,
+                    "notional_usd": trade.notional_usd,
+                    "size": trade.size,
+                    "side_yes": trade.outcome_side == "YES",
+                    "ts": trade.ts,
+                }
+            )
+        elif trade.bs == "SELL":
+            new_state = apply_sell_to_state(wallet, trade)
+        else:
+            return
+        self._persist_wallet(trade.wallet_address, new_state, unresolved)
+        self._observe_market(trade)
 
     def observe_sell(self, trade: _TradeFields) -> None:
-        """Fold a SELL fill into wallet + market state. Implemented in Task 3."""
-        raise NotImplementedError
+        """Fold a SELL fill (no ``category`` required) into wallet + market state."""
+        wallet = self.wallet_state(trade.wallet_address, as_of_ts=trade.ts)
+        new_state = apply_sell_to_state(wallet, trade)
+        unresolved = self._load_unresolved(trade.wallet_address)
+        self._persist_wallet(trade.wallet_address, new_state, unresolved)
+        self._observe_market(trade)
+
+    def _observe_market(self, trade: _TradeFields) -> None:
+        market_row = self._conn.execute(
+            "SELECT * FROM market_state_live WHERE condition_id = ?",
+            (trade.condition_id,),
+        ).fetchone()
+        if market_row is None:
+            current = empty_market_state(market_age_start_ts=trade.ts)
+            traders: set[str] = set()
+        else:
+            current = MarketState(
+                market_age_start_ts=market_row["market_age_start_ts"],
+                volume_so_far_usd=market_row["volume_so_far_usd"],
+                unique_traders_count=market_row["unique_traders_count"],
+                last_trade_price=market_row["last_trade_price"],
+                recent_prices=tuple(json.loads(market_row["recent_prices_json"])),
+            )
+            traders = set(json.loads(market_row["traders_json"]))
+        is_new_trader = trade.wallet_address not in traders
+        if is_new_trader:
+            traders.add(trade.wallet_address)
+        new_state = apply_trade_to_market(current, trade, is_new_trader=is_new_trader)
+        self._persist_market(trade.condition_id, new_state, traders)
+
+    def _load_unresolved(self, wallet_address: str) -> list[dict[str, object]]:
+        row = self._conn.execute(
+            "SELECT unresolved_buys_json FROM wallet_state_live WHERE wallet_address = ?",
+            (wallet_address,),
+        ).fetchone()
+        if row is None:
+            return []
+        return list(json.loads(row["unresolved_buys_json"]))
+
+    def _persist_wallet(
+        self,
+        wallet_address: str,
+        state: WalletState,
+        unresolved: list[dict[str, object]],
+    ) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO wallet_state_live (
+              wallet_address, first_seen_ts, prior_trades_count, prior_buys_count,
+              prior_resolved_buys, prior_wins, prior_losses,
+              cumulative_buy_price_sum, cumulative_buy_count, realized_pnl_usd,
+              last_trade_ts, bet_size_sum, bet_size_count,
+              recent_30d_trades_json, category_counts_json, unresolved_buys_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(wallet_address) DO UPDATE SET
+              first_seen_ts = excluded.first_seen_ts,
+              prior_trades_count = excluded.prior_trades_count,
+              prior_buys_count = excluded.prior_buys_count,
+              prior_resolved_buys = excluded.prior_resolved_buys,
+              prior_wins = excluded.prior_wins,
+              prior_losses = excluded.prior_losses,
+              cumulative_buy_price_sum = excluded.cumulative_buy_price_sum,
+              cumulative_buy_count = excluded.cumulative_buy_count,
+              realized_pnl_usd = excluded.realized_pnl_usd,
+              last_trade_ts = excluded.last_trade_ts,
+              bet_size_sum = excluded.bet_size_sum,
+              bet_size_count = excluded.bet_size_count,
+              recent_30d_trades_json = excluded.recent_30d_trades_json,
+              category_counts_json = excluded.category_counts_json,
+              unresolved_buys_json = excluded.unresolved_buys_json
+            """,
+            (
+                wallet_address,
+                state.first_seen_ts,
+                state.prior_trades_count,
+                state.prior_buys_count,
+                state.prior_resolved_buys,
+                state.prior_wins,
+                state.prior_losses,
+                state.cumulative_buy_price_sum,
+                state.cumulative_buy_count,
+                state.realized_pnl_usd,
+                state.last_trade_ts,
+                state.bet_size_sum,
+                state.bet_size_count,
+                json.dumps(list(state.recent_30d_trades)),
+                json.dumps(state.category_counts),
+                json.dumps(unresolved),
+            ),
+        )
+        self._conn.commit()
+
+    def _persist_market(self, condition_id: str, state: MarketState, traders: set[str]) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO market_state_live (
+              condition_id, market_age_start_ts, volume_so_far_usd,
+              unique_traders_count, last_trade_price, recent_prices_json,
+              traders_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(condition_id) DO UPDATE SET
+              market_age_start_ts = excluded.market_age_start_ts,
+              volume_so_far_usd = excluded.volume_so_far_usd,
+              unique_traders_count = excluded.unique_traders_count,
+              last_trade_price = excluded.last_trade_price,
+              recent_prices_json = excluded.recent_prices_json,
+              traders_json = excluded.traders_json
+            """,
+            (
+                condition_id,
+                state.market_age_start_ts,
+                state.volume_so_far_usd,
+                state.unique_traders_count,
+                state.last_trade_price,
+                json.dumps(list(state.recent_prices)),
+                json.dumps(sorted(traders)),
+            ),
+        )
+        self._conn.commit()
 
     def register_resolution(
         self,
