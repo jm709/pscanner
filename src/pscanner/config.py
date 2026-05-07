@@ -305,6 +305,37 @@ class MoveAttributionConfig(_Section):
     max_contributors_per_burst: int = 50
 
 
+class GateModelConfig(_Section):
+    """Tunables for the gate-model detector (#79).
+
+    Loads ``model.json`` + ``preprocessor.json`` from ``artifact_dir`` once at
+    startup. Daemon must be restarted to pick up a new model artifact (hot
+    reload is a v2 follow-up per RFC #77).
+    """
+
+    enabled: bool = False
+    artifact_dir: Path = Field(default=Path("models/current"))
+    min_pred: float = 0.7
+    min_edge_pct: float = 0.01
+    accepted_categories: tuple[str, ...] | None = None
+    queue_max_size: int = 1024
+
+
+class GateModelMarketFilterConfig(_Section):
+    """Tunables for the market-scoped trade collector (#79).
+
+    Enumerates open markets matching ``accepted_categories`` AND
+    ``volume_24h_usd >= min_volume_24h_usd``, then polls each on a cadence.
+    v1.0 ships esports-only; v1.1 flips the categories tuple.
+    """
+
+    enabled: bool = False
+    accepted_categories: tuple[str, ...] = ("esports",)
+    min_volume_24h_usd: float = 100_000
+    max_markets: int = 50
+    poll_interval_seconds: int = 60
+
+
 class SmartMoneyEvaluatorConfig(_Section):
     """Smart-money copy-trade evaluator tunables.
 
@@ -444,6 +475,10 @@ class Config(BaseModel):
     velocity: VelocityConfig = Field(default_factory=VelocityConfig)
     cluster: ClusterConfig = Field(default_factory=ClusterConfig)
     move_attribution: MoveAttributionConfig = Field(default_factory=MoveAttributionConfig)
+    gate_model: GateModelConfig = Field(default_factory=GateModelConfig)
+    gate_model_market_filter: GateModelMarketFilterConfig = Field(
+        default_factory=GateModelMarketFilterConfig,
+    )
     paper_trading: PaperTradingConfig = Field(default_factory=PaperTradingConfig)
     worker_sink: WorkerSinkConfig = Field(default_factory=WorkerSinkConfig)
 
