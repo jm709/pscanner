@@ -268,7 +268,13 @@ class CorpusStateRepo:
         self._conn.commit()
 
 
-_NOTIONAL_FLOOR_USD: Final[float] = 10.0
+_NOTIONAL_FLOORS: Final[dict[str, float]] = {
+    "polymarket": 10.0,
+    "manifold": 100.0,
+    "kalshi": 10.0,  # placeholder; revisit when Kalshi ingestion ships
+}
+# Backward-compat alias for the existing module-private constant.
+_NOTIONAL_FLOOR_USD: Final[float] = _NOTIONAL_FLOORS["polymarket"]
 
 
 @dataclass(frozen=True)
@@ -314,7 +320,8 @@ class CorpusTradesRepo:
         """
         rows = []
         for t in trades:
-            if t.notional_usd < _NOTIONAL_FLOOR_USD:
+            floor = _NOTIONAL_FLOORS.get(t.platform, _NOTIONAL_FLOORS["polymarket"])
+            if t.notional_usd < floor:
                 continue
             rows.append(
                 (

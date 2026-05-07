@@ -164,3 +164,58 @@ def test_trades_repo_isolates_platforms(tmp_corpus_db: sqlite3.Connection) -> No
     assert [t.condition_id for t in kalshi_only] == ["KX-1"]
     assert poly_only[0].platform == "polymarket"
     assert kalshi_only[0].platform == "kalshi"
+
+
+def test_insert_batch_uses_polymarket_floor_for_polymarket_rows(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """Polymarket rows below $10 USD are dropped (existing behavior)."""
+    repo = CorpusTradesRepo(tmp_corpus_db)
+    poly = CorpusTrade(
+        tx_hash="0xtx",
+        asset_id="a1",
+        wallet_address="0xw",
+        condition_id="c1",
+        outcome_side="YES",
+        bs="BUY",
+        price=0.5,
+        size=10.0,
+        notional_usd=5.0,
+        ts=1000,
+        platform="polymarket",
+    )
+    assert repo.insert_batch([poly]) == 0
+
+
+def test_insert_batch_uses_manifold_floor_for_manifold_rows(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """Manifold rows below 100 mana are dropped; rows >= 100 mana are kept."""
+    repo = CorpusTradesRepo(tmp_corpus_db)
+    below = CorpusTrade(
+        tx_hash="m-tx-low",
+        asset_id="m1:YES",
+        wallet_address="userA",
+        condition_id="m1",
+        outcome_side="YES",
+        bs="BUY",
+        price=0.5,
+        size=50.0,
+        notional_usd=50.0,
+        ts=1000,
+        platform="manifold",
+    )
+    above = CorpusTrade(
+        tx_hash="m-tx-high",
+        asset_id="m1:YES",
+        wallet_address="userA",
+        condition_id="m1",
+        outcome_side="YES",
+        bs="BUY",
+        price=0.5,
+        size=200.0,
+        notional_usd=200.0,
+        ts=1001,
+        platform="manifold",
+    )
+    assert repo.insert_batch([below, above]) == 1
