@@ -42,8 +42,8 @@ class ManifoldMarketsRepo:
             INSERT OR REPLACE INTO manifold_markets (
               id, creator_id, question, outcome_type, mechanism,
               prob_at_last_seen, volume, total_liquidity, is_resolved,
-              resolution_time, close_time, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              resolution_time, resolution, close_time, raw_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 market.id,
@@ -56,6 +56,7 @@ class ManifoldMarketsRepo:
                 market.total_liquidity,
                 int(market.is_resolved),
                 market.resolution_time,
+                market.resolution,
                 market.close_time,
                 market.model_dump_json(by_alias=True),
             ),
