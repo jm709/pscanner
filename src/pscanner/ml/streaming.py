@@ -72,6 +72,7 @@ class StreamingDataset:
     n_train_rows: int = 0
     n_val_rows: int = 0
     n_test_rows: int = 0
+    _platform: str = "polymarket"
 
     def dtrain(self, *, device: str) -> xgb.QuantileDMatrix:
         """Build a QuantileDMatrix for the train split."""
@@ -108,12 +109,13 @@ class StreamingDataset:
             "SELECT te.label_won, te.implied_prob_at_buy "
             "FROM training_examples te "
             "JOIN _split_markets sm USING (condition_id) "
+            "WHERE te.platform = ? "
             "ORDER BY te.id"
         )
         conn = sqlite3.connect(str(self._db_path))
         try:
             _populate_temp_table(conn, "_split_markets", self._val_markets)
-            cursor = conn.execute(sql)
+            cursor = conn.execute(sql, (self._platform,))
             offset = 0
             while True:
                 rows = cursor.fetchmany(self._chunk_size)
@@ -149,6 +151,7 @@ class StreamingDataset:
             encoder=self.encoder,
             kept_cols=self._kept_cols,
             chunk_size=self._chunk_size,
+            platform=self._platform,
         )
         offset = 0
         for x_chunk, y_chunk, implied_chunk in iter(source):
@@ -167,12 +170,13 @@ class StreamingDataset:
             "SELECT COALESCE(te.top_category, '') "
             "FROM training_examples te "
             "JOIN _split_markets sm USING (condition_id) "
+            "WHERE te.platform = ? "
             "ORDER BY te.id"
         )
         conn = sqlite3.connect(str(self._db_path))
         try:
             _populate_temp_table(conn, "_split_markets", self._test_markets)
-            rows = conn.execute(sql).fetchall()
+            rows = conn.execute(sql, (self._platform,)).fetchall()
         finally:
             conn.close()
         top_categories = np.array([r[0] for r in rows], dtype=object)
@@ -194,6 +198,7 @@ class StreamingDataset:
             encoder=self.encoder,
             kept_cols=self._kept_cols,
             chunk_size=self._chunk_size,
+            platform=self._platform,
         )
         kwargs: dict[str, object] = {"max_bin": 256}
         if ref is not None:
@@ -203,14 +208,21 @@ class StreamingDataset:
 
 def _partition_markets(
     conn: sqlite3.Connection,
+    *,
+    platform: str = "polymarket",
 ) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
     """Run P1: SELECT condition_id, resolved_at FROM market_resolutions ORDER BY...
 
-    Slice the sorted list at 60% / 80% into train, val, test.
+    Slice the sorted list at 70% / 85% into train, val, test. Filters
+    ``market_resolutions`` by ``platform`` so each split is platform-scoped;
+    after RFC #35 PR A, ``condition_id`` is no longer unique across
+    platforms (composite PK), so the filter is required for correctness.
     """
     rows = conn.execute(
         "SELECT condition_id, resolved_at FROM market_resolutions "
-        "ORDER BY resolved_at, condition_id"
+        "WHERE platform = ? "
+        "ORDER BY resolved_at, condition_id",
+        (platform,),
     ).fetchall()
     n = len(rows)
     n_train = round(_TRAIN_FRAC * n)
@@ -231,6 +243,12 @@ def _populate_temp_table(
     Used in place of an ``IN (?, ?, ...)`` parameterized query so the
     SQLite ``SQLITE_MAX_VARIABLE_NUMBER`` limit (32766 in 3.32+) doesn't
     bite as the corpus grows. Cost: ~10K INSERTs at startup, < 100 ms.
+
+    Single-platform note: the table stores ``condition_id`` only because
+    each training run is single-platform. Multi-platform aggregation
+    (future follow-up) needs ``(platform, condition_id)`` tuples here and
+    a corresponding JOIN tightening to ``USING (platform, condition_id)``
+    in ``_SplitIter`` / ``val_aux`` / ``materialize_test``.
     """
     conn.execute(f"DROP TABLE IF EXISTS {table_name}")
     conn.execute(f"CREATE TEMP TABLE {table_name} (condition_id TEXT PRIMARY KEY)")
@@ -243,17 +261,24 @@ def _populate_temp_table(
 def _fit_encoder_on_train(
     conn: sqlite3.Connection,
     train_markets: frozenset[str],
+    *,
+    platform: str = "polymarket",
 ) -> OneHotEncoder:
     """Run P2: fit a OneHotEncoder on the train split's categorical levels.
 
     SELECTs DISTINCT side, top_category, market_category from training_examples
-    joined on the _p2_train temp table.
+    joined on the _p2_train temp table. Belt-and-suspenders ``WHERE platform = ?``
+    is added because after RFC #35 PR A, two platforms can share the same
+    ``condition_id`` string; the temp-table partition isolates split membership,
+    the platform predicate isolates platform membership.
     """
     _populate_temp_table(conn, "_p2_train", train_markets)
     rows = conn.execute(
         "SELECT DISTINCT side, top_category, market_category "
         "FROM training_examples te "
-        "JOIN _p2_train tm USING (condition_id)"
+        "JOIN _p2_train tm USING (condition_id) "
+        "WHERE te.platform = ?",
+        (platform,),
     ).fetchall()
     df = pl.DataFrame(
         rows,
@@ -272,14 +297,22 @@ def _count_split_rows(
     train: frozenset[str],
     val: frozenset[str],
     test: frozenset[str],
+    *,
+    platform: str = "polymarket",
 ) -> tuple[int, int, int]:
-    """Run P3: COUNT(*) per split via temp tables."""
+    """Run P3: COUNT(*) per split via temp tables.
+
+    ``WHERE te.platform = ?`` is belt-and-suspenders against cross-platform
+    ``condition_id`` collisions (see ``_fit_encoder_on_train`` docstring).
+    """
     counts = []
     for label, markets in (("_p3_train", train), ("_p3_val", val), ("_p3_test", test)):
         _populate_temp_table(conn, label, markets)
         (n,) = conn.execute(
             f"SELECT COUNT(*) FROM training_examples te "  # noqa: S608 -- label is a literal
-            f"JOIN {label} sm USING (condition_id)"
+            f"JOIN {label} sm USING (condition_id) "
+            "WHERE te.platform = ?",
+            (platform,),
         ).fetchone()
         counts.append(int(n))
     return counts[0], counts[1], counts[2]
@@ -322,6 +355,11 @@ class _SplitIter:
     iterate from worker threads; sqlite3 connections aren't thread-safe).
     The connection's TEMP TABLE is populated from condition_ids on first
     iteration; the connection closes when iteration finishes or raises.
+
+    The ``platform`` field gates both the JOIN to ``market_resolutions``
+    (composite key after RFC #35 PR A) and the ``WHERE te.platform = ?``
+    predicate on ``training_examples``. Defaults to ``"polymarket"`` to
+    preserve existing test fixtures that construct ``_SplitIter`` directly.
     """
 
     db_path: Path
@@ -329,21 +367,24 @@ class _SplitIter:
     encoder: OneHotEncoder
     kept_cols: tuple[str, ...]
     chunk_size: int
+    platform: str = "polymarket"
 
     def __iter__(self) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray]]:
         select_list = ", ".join(f"te.{c}" for c in self.kept_cols)
         sql = (
             f"SELECT {select_list}, mr.resolved_at "  # noqa: S608 -- kept_cols derived from PRAGMA
             "FROM training_examples te "
-            "JOIN market_resolutions mr USING (condition_id) "
+            "JOIN market_resolutions mr "
+            "  ON mr.platform = te.platform AND mr.condition_id = te.condition_id "
             "JOIN _split_markets sm USING (condition_id) "
+            "WHERE te.platform = ? "
             "ORDER BY te.id"
         )
         col_names = (*self.kept_cols, "resolved_at")
         conn = sqlite3.connect(str(self.db_path))
         try:
             _populate_temp_table(conn, "_split_markets", self.condition_ids)
-            cursor = conn.execute(sql)
+            cursor = conn.execute(sql, (self.platform,))
             while True:
                 rows = cursor.fetchmany(self.chunk_size)
                 if not rows:
@@ -433,6 +474,7 @@ def open_dataset(
     db_path: Path,
     *,
     chunk_size: int = 100_000,
+    platform: str = "polymarket",
 ) -> Iterator[StreamingDataset]:
     """Open the corpus for streaming training.
 
@@ -440,15 +482,21 @@ def open_dataset(
         db_path: Path to the corpus SQLite database.
         chunk_size: Rows per chunk fed into xgboost's DataIter. Default
             100_000; see Issue #39 for the memory / overhead trade-off.
+        platform: RFC #35 PR A platform tag. Filters every SELECT against
+            ``training_examples`` and ``market_resolutions`` to rows with
+            this tag. Defaults to ``"polymarket"`` so existing callers
+            (tests, ``scripts/analyze_model.py``, internal callers) see
+            no behavior change. Single-platform-per-run by design;
+            multi-platform aggregation widens this to a sequence type.
 
     Yields:
         A :class:`StreamingDataset` whose pre-scan has completed.
     """
     conn = sqlite3.connect(str(db_path))
     try:
-        train, val, test = _partition_markets(conn)
-        encoder = _fit_encoder_on_train(conn, train)
-        n_train, n_val, n_test = _count_split_rows(conn, train, val, test)
+        train, val, test = _partition_markets(conn, platform=platform)
+        encoder = _fit_encoder_on_train(conn, train, platform=platform)
+        n_train, n_val, n_test = _count_split_rows(conn, train, val, test, platform=platform)
         kept = _kept_columns(conn)
         ds = StreamingDataset(
             _db_path=db_path,
@@ -462,6 +510,7 @@ def open_dataset(
             n_train_rows=n_train,
             n_val_rows=n_val,
             n_test_rows=n_test,
+            _platform=platform,
         )
         yield ds
     finally:

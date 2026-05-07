@@ -304,6 +304,7 @@ def _dump_artifacts(
     encoder: OneHotEncoder,
     metrics: dict[str, object],
     accepted_categories: tuple[str, ...],
+    platform: str,
 ) -> None:
     """Write model, preprocessor, and metrics to ``output_dir``."""
     booster.save_model(str(output_dir / "model.json"))
@@ -312,6 +313,7 @@ def _dump_artifacts(
         "carrier_cols": list(CARRIER_COLS),
         "encoder": encoder.to_json(),
         "accepted_categories": list(accepted_categories),
+        "platform": platform,
     }
     (output_dir / "preprocessor.json").write_text(json.dumps(preprocessor, indent=2))
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
@@ -335,6 +337,7 @@ def run_study(
     device: str = "cpu",
     chunk_size: int = 100_000,
     accepted_categories: tuple[str, ...] | None = None,
+    platform: str = "polymarket",
 ) -> None:
     """End-to-end study: stream corpus, run Optuna, refit, evaluate, dump.
 
@@ -354,6 +357,9 @@ def run_study(
         accepted_categories: Category strings to gate on at inference
             time. Written to ``preprocessor.json`` as metadata; does NOT
             filter training data.
+        platform: Platform label whose rows to train on. Forwarded to
+            ``open_dataset`` and recorded in ``preprocessor.json``.
+            Defaults to ``"polymarket"``.
     """
     resolved_categories = (
         accepted_categories if accepted_categories is not None else _DEFAULT_ACCEPTED_CATEGORIES
@@ -364,7 +370,7 @@ def run_study(
 
     _log.info("ml.mem", phase="run_study_entry", rss_mb=_rss_mb())
 
-    with open_dataset(db_path, chunk_size=chunk_size) as ds:
+    with open_dataset(db_path, chunk_size=chunk_size, platform=platform) as ds:
         encoder = ds.encoder
         if encoder is None:
             raise RuntimeError("open_dataset did not fit the encoder")
@@ -437,7 +443,7 @@ def run_study(
     }
     if "edge_filtered" in test_metrics:
         metrics["test_edge_filtered"] = test_metrics["edge_filtered"]
-    _dump_artifacts(output_dir, booster, encoder, metrics, resolved_categories)
+    _dump_artifacts(output_dir, booster, encoder, metrics, resolved_categories, platform)
     _log.info(
         "ml.study_complete",
         best_val_edge=metrics["best_val_edge"],

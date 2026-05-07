@@ -24,6 +24,8 @@ _DAY_SECONDS = 86_400
 def _seed_db_from_synthetic(
     conn: sqlite3.Connection,
     df: pl.DataFrame,
+    *,
+    platform: str = "polymarket",
 ) -> None:
     """Populate corpus_markets, market_resolutions, training_examples from
     a synthetic-examples Polars frame so load_dataset / open_dataset see
@@ -33,23 +35,35 @@ def _seed_db_from_synthetic(
         conn.execute(
             """
             INSERT INTO corpus_markets (
-              condition_id, event_slug, category, closed_at,
+              platform, condition_id, event_slug, category, closed_at,
               total_volume_usd, market_slug, backfill_state, enumerated_at
-            ) VALUES (?, '', 'sports', ?, 1000.0, '', 'complete', ?)
+            ) VALUES (?, ?, '', 'sports', ?, 1000.0, '', 'complete', ?)
             """,
-            (row["condition_id"], int(row["resolved_at"]), int(row["resolved_at"]) - 1),
+            (
+                platform,
+                row["condition_id"],
+                int(row["resolved_at"]),
+                int(row["resolved_at"]) - 1,
+            ),
         )
         conn.execute(
             """
             INSERT INTO market_resolutions (
-              condition_id, winning_outcome_index, outcome_yes_won,
+              platform, condition_id, winning_outcome_index, outcome_yes_won,
               resolved_at, source, recorded_at
-            ) VALUES (?, 0, 1, ?, 'gamma', ?)
+            ) VALUES (?, ?, 0, 1, ?, 'gamma', ?)
             """,
-            (row["condition_id"], int(row["resolved_at"]), int(row["resolved_at"])),
+            (
+                platform,
+                row["condition_id"],
+                int(row["resolved_at"]),
+                int(row["resolved_at"]),
+            ),
         )
     examples = df.drop("resolved_at")
-    for row in examples.iter_rows(named=True):
+    for raw_row in examples.iter_rows(named=True):
+        # Inject platform if the synthetic frame didn't set it (most tests).
+        row = raw_row if "platform" in raw_row else {"platform": platform, **raw_row}
         cols = ", ".join(row.keys())
         placeholders = ", ".join(["?"] * len(row))
         conn.execute(
@@ -174,14 +188,21 @@ def make_synthetic_examples_db(
         n_markets: int = 30,
         rows_per_market: int = 20,
         seed: int = 0,
+        platform: str = "polymarket",
+        db_path: Path | None = None,
     ) -> Path:
         df = make_synthetic_examples(
             n_markets=n_markets, rows_per_market=rows_per_market, seed=seed
         )
-        db_path = tmp_path / f"corpus_n{n_markets}_r{rows_per_market}_s{seed}.sqlite3"
+        if db_path is None:
+            db_path = (
+                tmp_path / f"corpus_n{n_markets}_r{rows_per_market}_s{seed}_{platform}.sqlite3"
+            )
+        # init_corpus_db is idempotent; re-opening lets a caller layer a second
+        # platform's rows onto a corpus the helper already created.
         conn = init_corpus_db(db_path)
         try:
-            _seed_db_from_synthetic(conn, df)
+            _seed_db_from_synthetic(conn, df, platform=platform)
         finally:
             conn.close()
         return db_path

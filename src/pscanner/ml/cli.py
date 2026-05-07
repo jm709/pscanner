@@ -59,6 +59,17 @@ def build_ml_parser() -> argparse.ArgumentParser:
         default=100_000,
         help="Rows per chunk fed into xgboost's DataIter (default 100_000)",
     )
+    train.add_argument(
+        "--platform",
+        type=str,
+        choices=["polymarket", "kalshi", "manifold"],
+        default="polymarket",
+        help=(
+            "Filter training_examples to rows with this platform tag. "
+            "Single-platform per run; multi-platform aggregation is a future "
+            "follow-up. Defaults to polymarket."
+        ),
+    )
     return parser
 
 
@@ -79,6 +90,7 @@ def _cmd_train(args: argparse.Namespace) -> int:
         seed=args.seed,
         device=args.device,
         chunk_size=args.chunk_size,
+        platform=args.platform,
     )
     return 0
 

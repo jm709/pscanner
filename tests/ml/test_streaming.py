@@ -10,7 +10,14 @@ from pathlib import Path
 import pytest
 import xgboost as xgb
 
-from pscanner.ml.streaming import SplitDataIter, _SplitIter, open_dataset
+from pscanner.ml.streaming import (
+    SplitDataIter,
+    _count_split_rows,
+    _fit_encoder_on_train,
+    _partition_markets,
+    _SplitIter,
+    open_dataset,
+)
 from pscanner.ml.training import run_study
 
 
@@ -44,6 +51,127 @@ def test_open_dataset_partitions_markets_by_resolved_at(
     assert "0xmarket016" in val
     assert "0xmarket017" in test
     assert "0xmarket019" in test
+
+
+def test_partition_markets_filters_by_platform(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """`_partition_markets` returns only the requested platform's condition_ids.
+
+    Without the WHERE-platform filter the totals would be 8 (4 + 4); the
+    per-platform count == 4 proves the filter is in effect. (The synthetic
+    fixture reuses ``0xmarket{idx:03d}`` names regardless of seed so the
+    polymarket and kalshi condition_id strings overlap — that's a fixture
+    artifact, not a real-world condition; in production ``condition_id`` is
+    unique per platform but the composite PK ``(platform, condition_id)``
+    is what makes the filter mandatory.)
+    """
+    poly_db = make_synthetic_examples_db(n_markets=4, rows_per_market=2, seed=0)
+    # Layer kalshi rows on top of the same DB.
+    make_synthetic_examples_db(
+        n_markets=4, rows_per_market=2, seed=1, platform="kalshi", db_path=poly_db
+    )
+    conn = _sqlite3.connect(str(poly_db))
+    try:
+        train_p, val_p, test_p = _partition_markets(conn, platform="polymarket")
+        train_k, val_k, test_k = _partition_markets(conn, platform="kalshi")
+    finally:
+        conn.close()
+    poly_total = len(train_p) + len(val_p) + len(test_p)
+    kalshi_total = len(train_k) + len(val_k) + len(test_k)
+    assert poly_total == 4, "polymarket has 4 markets"
+    assert kalshi_total == 4, "kalshi has 4 markets"
+
+
+def test_fit_encoder_on_train_filters_by_platform(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """`_fit_encoder_on_train` only sees rows with the requested platform."""
+    poly_db = make_synthetic_examples_db(n_markets=4, rows_per_market=2, seed=0)
+    make_synthetic_examples_db(
+        n_markets=4, rows_per_market=2, seed=1, platform="kalshi", db_path=poly_db
+    )
+    conn = _sqlite3.connect(str(poly_db))
+    try:
+        train_poly, _, _ = _partition_markets(conn, platform="polymarket")
+        encoder = _fit_encoder_on_train(conn, train_poly, platform="polymarket")
+    finally:
+        conn.close()
+    # The encoder fits over the categorical levels of training_examples joined to
+    # the train condition_ids. Even seeding two platforms, the train markets are
+    # platform-scoped — encoder.levels reflects exactly the polymarket train rows.
+    assert "side" in encoder.levels
+    assert set(encoder.levels["side"]).issubset({"YES", "NO"})
+
+
+def test_count_split_rows_filters_by_platform(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """`_count_split_rows` counts only the requested platform's rows."""
+    poly_db = make_synthetic_examples_db(n_markets=10, rows_per_market=3, seed=0)
+    make_synthetic_examples_db(
+        n_markets=10, rows_per_market=3, seed=1, platform="kalshi", db_path=poly_db
+    )
+    conn = _sqlite3.connect(str(poly_db))
+    try:
+        train, val, test = _partition_markets(conn, platform="polymarket")
+        n_train, n_val, n_test = _count_split_rows(conn, train, val, test, platform="polymarket")
+    finally:
+        conn.close()
+    # Per-platform corpus has 10 markets x 3 rows = 30 rows total.
+    assert n_train + n_val + n_test == 30
+
+
+def test_streaming_dataset_stores_platform(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """`StreamingDataset` exposes the platform it was opened for."""
+    db = make_synthetic_examples_db(n_markets=4, rows_per_market=2, seed=0)
+    with open_dataset(db) as ds:
+        assert ds._platform == "polymarket"
+
+
+def test_open_dataset_records_requested_platform(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """`open_dataset(platform=...)` is reflected on the dataset."""
+    db = make_synthetic_examples_db(n_markets=4, rows_per_market=2, seed=0)
+    make_synthetic_examples_db(
+        n_markets=4, rows_per_market=2, seed=1, platform="kalshi", db_path=db
+    )
+    with open_dataset(db, platform="kalshi") as ds:
+        assert ds._platform == "kalshi"
+        # Train markets came from kalshi rows.
+        kalshi_total = ds.n_train_rows + ds.n_val_rows + ds.n_test_rows
+        assert kalshi_total == 8  # 4 markets x 2 rows
+
+
+def test_split_iter_filters_by_platform(
+    make_synthetic_examples_db: Callable[..., Path],
+) -> None:
+    """`_SplitIter` yields only rows with the configured platform."""
+    poly_db = make_synthetic_examples_db(n_markets=10, rows_per_market=3, seed=0)
+    make_synthetic_examples_db(
+        n_markets=10, rows_per_market=3, seed=1, platform="kalshi", db_path=poly_db
+    )
+    with open_dataset(poly_db) as ds:
+        # _SplitIter is constructed inside StreamingDataset; here we instantiate
+        # it directly with the polymarket train markets to verify the platform
+        # field gates the SQL.
+        assert ds.encoder is not None  # narrow for ty
+        iterator = _SplitIter(
+            db_path=ds._db_path,
+            condition_ids=ds._train_markets,
+            encoder=ds.encoder,
+            kept_cols=ds._kept_cols,
+            chunk_size=64,
+            platform="polymarket",
+        )
+        chunks = list(iter(iterator))
+        expected_rows = ds.n_train_rows
+    total_rows = sum(x.shape[0] for x, _, _ in chunks)
+    # The train markets came from polymarket; rows count must equal n_train_rows.
+    assert total_rows == expected_rows
 
 
 def test_open_dataset_closes_pre_pass_connection_on_exit(
