@@ -97,6 +97,9 @@ docstring-code-format = true
 [tool.ty.environment]
 python-version = "3.13"
 
+[tool.ty.src]
+exclude = [".claude/", ".venv/", "build/", "dist/"]
+
 [tool.ty.terminal]
 error-on-warning = true
 

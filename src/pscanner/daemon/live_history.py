@@ -17,6 +17,7 @@ from __future__ import annotations
 import heapq
 import json
 import sqlite3
+from collections.abc import Sequence
 from typing import Protocol, cast, runtime_checkable
 
 from pscanner.corpus.features import (
@@ -57,8 +58,13 @@ class BootstrapDataClient(Protocol):
 
     async def get_closed_positions_for_bootstrap(
         self, address: str, *, limit: int = 500
-    ) -> list[BootstrapPosition]:
-        """Fetch closed positions for the given wallet address."""
+    ) -> Sequence[BootstrapPosition]:
+        """Fetch closed positions for the given wallet address.
+
+        Return type is ``Sequence`` (covariant) rather than ``list`` so
+        structurally-compatible position dataclasses fit without an
+        explicit cast at call sites.
+        """
         ...
 
 
