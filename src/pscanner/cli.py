@@ -34,6 +34,7 @@ from rich.table import Table
 from pscanner.alerts.models import Alert
 from pscanner.config import Config
 from pscanner.corpus.cli import run_corpus_command
+from pscanner.daemon.bootstrap import run_bootstrap
 from pscanner.ml.cli import run_ml_command
 from pscanner.scheduler import Scanner
 from pscanner.store.db import init_db
@@ -95,6 +96,7 @@ def _dispatch_command(
         "unwatch": lambda: _cmd_unwatch(config, address=args.address),
         "watchlist": lambda: _cmd_watchlist(config),
         "paper": lambda: _dispatch_paper(parser, args, config),
+        "daemon": lambda: _dispatch_daemon(parser, args, config),
     }
     handler = handlers.get(args.command)
     if handler is None:
@@ -113,6 +115,26 @@ def _dispatch_paper(
         return _cmd_paper_status(config)
     parser.error(f"unknown paper subcommand: {args.paper_cmd}")
     return 2  # unreachable; argparse exits
+
+
+def _dispatch_daemon(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    config: Config,
+) -> int:
+    """Route ``pscanner daemon <subcmd>`` to the matching handler."""
+    del config  # daemon ops use --corpus-db/--daemon-db flags directly
+    if args.daemon_cmd == "bootstrap-features":
+        return _cmd_daemon_bootstrap(args.corpus_db, args.daemon_db)
+    parser.error(f"unknown daemon subcommand: {args.daemon_cmd}")
+    return 2  # unreachable; argparse exits
+
+
+def _cmd_daemon_bootstrap(corpus_db: Path, daemon_db: Path) -> int:
+    """Cold-start the live history tables from corpus_trades."""
+    n = run_bootstrap(corpus_db=corpus_db, daemon_db=daemon_db)
+    print(f"bootstrap-features: folded {n} trades")  # noqa: T201
+    return 0
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -155,6 +177,15 @@ def _build_parser() -> argparse.ArgumentParser:
     paper = sub.add_parser("paper", help="paper-trading commands")
     paper_sub = paper.add_subparsers(dest="paper_cmd", required=True)
     paper_sub.add_parser("status", help="summarise paper-trading bankroll and PnL")
+
+    daemon = sub.add_parser("daemon", help="daemon-side ops")
+    daemon_sub = daemon.add_subparsers(dest="daemon_cmd", required=True)
+    bootstrap_parser = daemon_sub.add_parser(
+        "bootstrap-features",
+        help="cold-start wallet_state_live + market_state_live from corpus_trades",
+    )
+    bootstrap_parser.add_argument("--corpus-db", type=Path, default=Path("data/corpus.sqlite3"))
+    bootstrap_parser.add_argument("--daemon-db", type=Path, default=Path("data/pscanner.sqlite3"))
 
     corpus = sub.add_parser(
         "corpus",
