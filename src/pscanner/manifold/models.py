@@ -42,6 +42,7 @@ class ManifoldMarket(BaseModel):
     total_liquidity: float = Field(alias="totalLiquidity", default=0.0)
     is_resolved: bool = Field(alias="isResolved")
     resolution_time: int | None = Field(alias="resolutionTime", default=None)
+    resolution: str | None = None
     close_time: int | None = Field(alias="closeTime", default=None)
     url: str | None = None
     slug: ManifoldSlug | None = None
