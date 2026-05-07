@@ -319,6 +319,14 @@ class GateModelConfig(_Section):
     min_edge_pct: float = 0.01
     accepted_categories: tuple[str, ...] | None = None
     queue_max_size: int = 1024
+    platform: str = "polymarket"
+    """Platform whose corpus rows feed the live history tables.
+
+    Scopes ``LiveHistoryProvider`` metadata loading + ``bootstrap-features``
+    so the model is only fed rows from the platform it was trained on.
+    Default ``"polymarket"`` matches every shipped artifact today; bump
+    to ``"manifold"`` / ``"kalshi"`` once a per-platform model trains.
+    """
 
 
 class GateModelMarketFilterConfig(_Section):

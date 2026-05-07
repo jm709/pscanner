@@ -6,6 +6,12 @@ Resolutions are registered up-front from ``market_resolutions`` so the
 buy-then-resolve drain fires correctly during the walk.
 
 After this completes, the daemon can start with O(1) state load.
+
+Reads are scoped to a single ``platform`` so the gate model is only fed
+rows from the platform it was trained on. Manifold trades are
+mana-denominated (CLAUDE.md: "Never aggregate Manifold bet amounts into
+real-money totals"); mixing them into a Polymarket-trained model would
+poison ``cumulative_buy_price_sum`` / ``bet_size_sum`` / ``realized_pnl_usd``.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ def run_bootstrap(
     corpus_db: Path,
     daemon_db: Path,
     log_every: int = 100_000,
+    platform: str = "polymarket",
 ) -> int:
     """Cold-start ``wallet_state_live`` + ``market_state_live`` from corpus.
 
@@ -35,6 +42,10 @@ def run_bootstrap(
         corpus_db: Path to the corpus SQLite (``data/corpus.sqlite3``).
         daemon_db: Path to the daemon SQLite (``data/pscanner.sqlite3``).
         log_every: Emit a progress log every N trades.
+        platform: Scope all corpus reads to this platform. Defaults to
+            ``"polymarket"`` because every shipped gate-model artifact
+            today was trained on Polymarket data; mixing in non-Polymarket
+            rows poisons the wallet/market accumulators.
 
     Returns:
         Total trade count folded.
@@ -42,10 +53,12 @@ def run_bootstrap(
     corpus_conn = init_corpus_db(corpus_db)
     daemon_conn = init_db(daemon_db)
     try:
-        metadata = _load_metadata(corpus_conn)
+        metadata = _load_metadata(corpus_conn, platform=platform)
         provider = LiveHistoryProvider(conn=daemon_conn, metadata=metadata)
         for cond_id, resolved_at, yes_won in corpus_conn.execute(
-            "SELECT condition_id, resolved_at, outcome_yes_won FROM market_resolutions"
+            "SELECT condition_id, resolved_at, outcome_yes_won "
+            "FROM market_resolutions WHERE platform = ?",
+            (platform,),
         ):
             provider.register_resolution(
                 condition_id=cond_id,
@@ -57,8 +70,10 @@ def run_bootstrap(
             SELECT ct.tx_hash, ct.asset_id, ct.wallet_address, ct.condition_id,
                    ct.outcome_side, ct.bs, ct.price, ct.size, ct.notional_usd, ct.ts
             FROM corpus_trades ct
+            WHERE ct.platform = ?
             ORDER BY ct.ts ASC, ct.tx_hash ASC
-            """
+            """,
+            (platform,),
         )
         n = 0
         for row in rows:
@@ -81,15 +96,17 @@ def run_bootstrap(
                 provider.observe_sell(trade)
             n += 1
             if n % log_every == 0:
-                _LOG.info("daemon.bootstrap.progress", trades_folded=n)
-        _LOG.info("daemon.bootstrap.done", trades_folded=n)
+                _LOG.info("daemon.bootstrap.progress", trades_folded=n, platform=platform)
+        _LOG.info("daemon.bootstrap.done", trades_folded=n, platform=platform)
         return n
     finally:
         daemon_conn.close()
         corpus_conn.close()
 
 
-def _load_metadata(conn: sqlite3.Connection) -> dict[str, MarketMetadata]:
+def _load_metadata(
+    conn: sqlite3.Connection, *, platform: str = "polymarket"
+) -> dict[str, MarketMetadata]:
     out: dict[str, MarketMetadata] = {}
     for cond_id, category, closed_at, opened_at in conn.execute(
         """
@@ -98,7 +115,9 @@ def _load_metadata(conn: sqlite3.Connection) -> dict[str, MarketMetadata]:
                COALESCE(closed_at, 0),
                COALESCE(enumerated_at, 0)
         FROM corpus_markets
-        """
+        WHERE platform = ?
+        """,
+        (platform,),
     ):
         out[cond_id] = MarketMetadata(
             condition_id=cond_id,

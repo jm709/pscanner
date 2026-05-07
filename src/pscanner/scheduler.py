@@ -169,7 +169,7 @@ class Scanner:
         if self._config.gate_model.enabled:
             self._live_history_provider = LiveHistoryProvider(
                 conn=self._db,
-                metadata=_load_corpus_metadata(),
+                metadata=_load_corpus_metadata(platform=self._config.gate_model.platform),
             )
         self._owns_clients = clients is None
         self._clients = clients or self._build_default_clients()
@@ -884,12 +884,20 @@ class Scanner:
             await self._clients.ticks_ws.close()
 
 
-def _load_corpus_metadata() -> dict[str, MarketMetadata]:
+def _load_corpus_metadata(*, platform: str = "polymarket") -> dict[str, MarketMetadata]:
     """Load corpus_markets metadata for the gate-model detector.
 
     Reads ``data/corpus.sqlite3`` if it exists; returns an empty dict if
     not. The dict is consumed by :class:`LiveHistoryProvider` for the
     ``market_metadata(condition_id)`` lookup that ``compute_features`` uses.
+
+    Args:
+        platform: Scope the SELECT to a single platform. Defaults to
+            ``"polymarket"``. Mixing platforms here would put non-Polymarket
+            markets in the metadata dict; with disjoint condition_id
+            namespaces today nothing breaks at inference time, but it's
+            wasted memory. The filter keeps the dict aligned with the
+            model's training scope.
 
     Empty-dict fallback is acceptable for v1: the detector handles
     ``KeyError`` from ``market_metadata`` by skipping the trade. Operators
@@ -908,7 +916,9 @@ def _load_corpus_metadata() -> dict[str, MarketMetadata]:
                    COALESCE(closed_at, 0),
                    COALESCE(enumerated_at, 0)
             FROM corpus_markets
-            """
+            WHERE platform = ?
+            """,
+            (platform,),
         ):
             cond_id, category, closed_at, opened_at = row
             out[cond_id] = MarketMetadata(

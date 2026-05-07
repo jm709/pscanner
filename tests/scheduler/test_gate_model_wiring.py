@@ -14,8 +14,10 @@ import xgboost as xgb
 
 from pscanner.collectors.market_scoped_trades import MarketScopedTradeCollector
 from pscanner.config import Config, GateModelConfig, GateModelMarketFilterConfig
+from pscanner.corpus.db import init_corpus_db
+from pscanner.corpus.repos import CorpusMarket, CorpusMarketsRepo
 from pscanner.detectors.gate_model import GateModelDetector
-from pscanner.scheduler import Scanner, SchedulerClients
+from pscanner.scheduler import Scanner, SchedulerClients, _load_corpus_metadata
 
 
 def _make_stub_clients() -> SchedulerClients:
@@ -171,3 +173,49 @@ async def test_preflight_noops_when_gate_model_disabled(tmp_path: Path) -> None:
         scanner.preflight()  # no exception
     finally:
         await scanner.aclose()
+
+
+def test_load_corpus_metadata_filters_by_platform(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """``_load_corpus_metadata(platform=...)`` returns only that platform's markets."""
+    corpus_path = tmp_path / "corpus.sqlite3"
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+    real_corpus_path = tmp_path / "data" / "corpus.sqlite3"
+    conn = init_corpus_db(real_corpus_path)
+    try:
+        markets = CorpusMarketsRepo(conn)
+        markets.insert_pending(
+            CorpusMarket(
+                condition_id="0xpoly",
+                event_slug="p",
+                category="esports",
+                closed_at=1_700_001_000,
+                total_volume_usd=1.0,
+                enumerated_at=1_699_900_000,
+                market_slug="p-m",
+                platform="polymarket",
+            )
+        )
+        markets.insert_pending(
+            CorpusMarket(
+                condition_id="manifold-cond",
+                event_slug="m",
+                category="politics",
+                closed_at=1_700_001_500,
+                total_volume_usd=2.0,
+                enumerated_at=1_699_950_000,
+                market_slug="m-m",
+                platform="manifold",
+            )
+        )
+    finally:
+        conn.close()
+    del corpus_path
+
+    poly = _load_corpus_metadata(platform="polymarket")
+    manifold = _load_corpus_metadata(platform="manifold")
+
+    assert set(poly.keys()) == {"0xpoly"}
+    assert set(manifold.keys()) == {"manifold-cond"}
+    assert poly["0xpoly"].category == "esports"
+    assert manifold["manifold-cond"].category == "politics"

@@ -134,6 +134,7 @@ def test_gate_model_config_defaults() -> None:
     assert cfg.min_edge_pct == 0.01
     assert cfg.accepted_categories is None
     assert cfg.queue_max_size == 1024
+    assert cfg.platform == "polymarket"
 
 
 def test_gate_model_market_filter_defaults() -> None:
