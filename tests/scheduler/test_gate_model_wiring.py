@@ -24,6 +24,7 @@ from pscanner.corpus.repos import (
 )
 from pscanner.daemon.live_history import LiveHistoryProvider
 from pscanner.detectors.gate_model import GateModelDetector
+from pscanner.poly.models import Event, Market
 from pscanner.scheduler import (
     Scanner,
     SchedulerClients,
@@ -356,6 +357,74 @@ def test_load_corpus_resolutions_handles_unmigrated_market_resolutions(
         daemon_conn.close()
     assert n == 0
     assert provider.get_resolution("0xtest") is None
+
+
+@pytest.mark.asyncio
+async def test_collector_refresh_makes_live_market_visible_to_detector(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: a live (non-corpus) market becomes available to the detector.
+
+    Issue #102: corpus_markets only holds backfilled markets, so live trading
+    targets are absent from ``provider.market_metadata`` at boot. The collector's
+    refresh must populate the provider so the detector's metadata lookup
+    succeeds.
+    """
+    artifact_dir = tmp_path / "model"
+    _train_dummy_model(artifact_dir)
+    cfg = _make_config(artifact_dir=artifact_dir, gate_enabled=True, filter_enabled=True)
+    clients = _make_stub_clients()
+
+    # Stub gamma to return one open esports market — exactly the shape of a
+    # production live market.
+    market = Market.model_validate(
+        {
+            "id": "m-live",
+            "conditionId": "0xLIVE",
+            "question": "q",
+            "slug": "slug-live",
+            "outcomes": '["Yes","No"]',
+            "outcomePrices": '["0.4","0.6"]',
+            "liquidity": "1000",
+            "volume": "200000",
+            "active": True,
+            "closed": False,
+            "clobTokenIds": '["a1","a2"]',
+        }
+    )
+    event = Event.model_validate(
+        {
+            "id": "e-live",
+            "slug": "slug-event",
+            "title": "live-event",
+            "tags": [{"label": "Esports"}],
+            "markets": [market.model_dump(by_alias=True)],
+            "active": True,
+            "closed": False,
+        }
+    )
+
+    async def _fake_iter_events(**_: object) -> AsyncIterator[Event]:
+        yield event
+
+    clients.gamma_client.iter_events = _fake_iter_events  # type: ignore[method-assign]  # ty:ignore[invalid-assignment]
+
+    scanner = Scanner(config=cfg, db_path=tmp_path / "daemon.sqlite3", clients=clients)
+    try:
+        # Pre-condition: live market is NOT in the corpus-loaded metadata.
+        assert scanner._live_history_provider is not None
+        with pytest.raises(KeyError):
+            scanner._live_history_provider.market_metadata("0xLIVE")
+
+        collector = scanner._collectors["market_scoped_trades"]
+        assert isinstance(collector, MarketScopedTradeCollector)
+        await collector.refresh_market_set()
+
+        # Post-condition: live market IS now visible to the detector.
+        meta = scanner._live_history_provider.market_metadata("0xLIVE")
+        assert meta.category == "esports"
+    finally:
+        await scanner.aclose()
 
 
 @pytest.mark.asyncio
