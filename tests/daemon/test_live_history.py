@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from pscanner.corpus.features import Trade
+from pscanner.corpus.features import MarketMetadata, Trade
 from pscanner.daemon.live_history import LiveHistoryProvider
 from pscanner.store.db import init_db
 
@@ -232,3 +232,27 @@ async def test_bootstrap_wallet_is_idempotent_for_known_wallet() -> None:
     finally:
         conn.close()
     assert before == after
+
+
+def test_set_market_metadata_inserts_then_overwrites() -> None:
+    """`set_market_metadata` lets callers seed metadata at runtime (issue #102)."""
+    conn = _new_conn()
+    try:
+        provider = LiveHistoryProvider(conn=conn, metadata={})
+        with pytest.raises(KeyError):
+            provider.market_metadata("0xc1")
+
+        initial = MarketMetadata(condition_id="0xc1", category="esports", closed_at=0, opened_at=0)
+        provider.set_market_metadata("0xc1", initial)
+        assert provider.market_metadata("0xc1") == initial
+
+        updated = MarketMetadata(
+            condition_id="0xc1",
+            category="esports",
+            closed_at=1_700_000_000,
+            opened_at=1_690_000_000,
+        )
+        provider.set_market_metadata("0xc1", updated)
+        assert provider.market_metadata("0xc1") == updated
+    finally:
+        conn.close()

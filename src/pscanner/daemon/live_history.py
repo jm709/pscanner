@@ -99,6 +99,16 @@ class LiveHistoryProvider:
         """Return static metadata for ``condition_id``; raises KeyError if unknown."""
         return self._metadata[condition_id]
 
+    def set_market_metadata(self, condition_id: str, metadata: MarketMetadata) -> None:
+        """Insert or overwrite metadata for ``condition_id``.
+
+        Used by :class:`MarketScopedTradeCollector` to push metadata for
+        currently-open markets that aren't yet in ``corpus_markets`` — the
+        boot-time corpus load only covers resolved markets, so live trading
+        targets need this runtime injection (issue #102).
+        """
+        self._metadata[condition_id] = metadata
+
     def wallet_state(self, wallet_address: str, as_of_ts: int) -> WalletState:
         """Return the wallet's state at ``as_of_ts``, draining ready resolutions."""
         row = self._conn.execute(
