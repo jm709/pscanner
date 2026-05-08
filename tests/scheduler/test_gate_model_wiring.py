@@ -151,6 +151,9 @@ async def test_scanner_builds_gate_model_when_enabled(tmp_path: Path) -> None:
         # seed metadata for currently-open markets.
         assert scanner._live_history_provider is not None
         assert collector._provider is scanner._live_history_provider
+        # Issue #103: collector must reference the market_cache so it can
+        # upsert candidate markets for `_resolve_outcome_side` lookups.
+        assert collector._market_cache is scanner._market_cache_repo
     finally:
         await scanner.aclose()
 

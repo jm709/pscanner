@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from pscanner.daemon.live_history import LiveHistoryProvider
     from pscanner.poly.data import DataClient
     from pscanner.poly.gamma import GammaClient
+    from pscanner.store.repo import MarketCacheRepo
 
 _LOG = structlog.get_logger(__name__)
 _FAR_FUTURE_TS = 2_000_000_000  # ~2033; well past any current trade timestamp
@@ -45,6 +46,7 @@ class MarketScopedTradeCollector:
         gamma: GammaClient,
         data_client: DataClient,
         provider: LiveHistoryProvider | None = None,
+        market_cache: MarketCacheRepo | None = None,
     ) -> None:
         """Initialize the collector with configuration and API clients.
 
@@ -52,11 +54,17 @@ class MarketScopedTradeCollector:
         candidate market enumerated by :meth:`refresh_market_set`. This is how
         live open markets (not yet in ``corpus_markets``) become visible to
         :class:`GateModelDetector` (issue #102).
+
+        ``market_cache``, when supplied, receives an upsert of every candidate
+        :class:`Market` so :class:`GateModelDetector._resolve_outcome_side` can
+        map ``trade.asset_id`` to YES/NO. In a gate-model-only daemon config,
+        no other code path populates the cache (issue #103).
         """
         self._config = config
         self._gamma = gamma
         self._data_client = data_client
         self._provider = provider
+        self._market_cache = market_cache
         self._markets: list[str] = []
         self._callbacks: list[Callable[[WalletTrade], None]] = []
         self._last_seen_ts: dict[str, int] = {}
@@ -105,6 +113,8 @@ class MarketScopedTradeCollector:
                             opened_at=0,
                         ),
                     )
+                if self._market_cache is not None:
+                    self._market_cache.upsert(market)
         candidates.sort(reverse=True)
         selected = [cid for _, cid in candidates[: self._config.max_markets]]
         self._markets = selected

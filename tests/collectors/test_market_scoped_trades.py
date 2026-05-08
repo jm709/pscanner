@@ -13,9 +13,10 @@ import pytest
 from pscanner.collectors.market_scoped_trades import MarketScopedTradeCollector
 from pscanner.config import GateModelMarketFilterConfig
 from pscanner.daemon.live_history import LiveHistoryProvider
+from pscanner.poly.ids import ConditionId
 from pscanner.poly.models import Event, Market
 from pscanner.store.db import init_db
-from pscanner.store.repo import WalletTrade
+from pscanner.store.repo import MarketCacheRepo, WalletTrade
 from pscanner.util.clock import FakeClock
 
 
@@ -397,3 +398,63 @@ async def test_refresh_populates_provider_metadata_for_every_candidate(
     # Politics market is filtered out at the category gate.
     with pytest.raises(KeyError):
         provider.market_metadata("0xMP")
+
+
+@pytest.mark.asyncio
+async def test_refresh_upserts_market_cache_for_every_candidate(
+    tmp_path: Path,
+) -> None:
+    """`refresh_market_set` upserts MarketCacheRepo for every category-matching market.
+
+    Issue #103: in a gate-model-only config, no other code path populates
+    market_cache, so `GateModelDetector._resolve_outcome_side` finds no cached
+    market and silently drops every trade. The collector must seed the cache
+    from the same gamma response it already has in hand.
+    """
+    cfg = GateModelMarketFilterConfig(
+        enabled=True,
+        accepted_categories=("esports",),
+        min_volume_24h_usd=10.0,
+        max_markets=2,
+    )
+    esports_a = _make_event(
+        slug="ev-a",
+        tags=["Esports"],
+        markets=[_make_market(condition_id="0xMA", volume=500.0)],
+    )
+    esports_b = _make_event(
+        slug="ev-b",
+        tags=["Esports"],
+        markets=[
+            _make_market(condition_id="0xMB1", volume=400.0),
+            _make_market(condition_id="0xMB2", volume=15.0),  # passes floor; below top-N
+        ],
+    )
+    politics = _make_event(
+        slug="ev-p",
+        tags=["Politics"],
+        markets=[_make_market(condition_id="0xMP", volume=99999.0)],
+    )
+    gamma = _FakeGammaClient([esports_a, esports_b, politics])
+    data_client = _FakeDataClient(by_market={})
+
+    db_path = tmp_path / "daemon.sqlite3"
+    conn = init_db(db_path)
+    try:
+        market_cache = MarketCacheRepo(conn)
+        collector = MarketScopedTradeCollector(
+            config=cfg,
+            gamma=gamma,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+            data_client=data_client,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+            market_cache=market_cache,
+        )
+        await collector.refresh_market_set()
+
+        # All three esports markets cached — including the one below top-N.
+        assert market_cache.get_by_condition_id(ConditionId("0xMA")) is not None
+        assert market_cache.get_by_condition_id(ConditionId("0xMB1")) is not None
+        assert market_cache.get_by_condition_id(ConditionId("0xMB2")) is not None
+        # Politics market is filtered out at the category gate.
+        assert market_cache.get_by_condition_id(ConditionId("0xMP")) is None
+    finally:
+        conn.close()
