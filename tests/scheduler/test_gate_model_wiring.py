@@ -142,9 +142,12 @@ async def test_scanner_builds_gate_model_when_enabled(tmp_path: Path) -> None:
     scanner = Scanner(config=cfg, db_path=tmp_path / "daemon.sqlite3", clients=clients)
     try:
         assert isinstance(scanner._detectors.get("gate_model"), GateModelDetector)
-        assert isinstance(
-            scanner._collectors.get("market_scoped_trades"), MarketScopedTradeCollector
-        )
+        collector = scanner._collectors.get("market_scoped_trades")
+        assert isinstance(collector, MarketScopedTradeCollector)
+        # Issue #102: collector must reference the live provider so it can
+        # seed metadata for currently-open markets.
+        assert scanner._live_history_provider is not None
+        assert collector._provider is scanner._live_history_provider
     finally:
         await scanner.aclose()
 

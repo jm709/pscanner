@@ -331,6 +331,7 @@ class Scanner:
                 config=self._config.gate_model_market_filter,
                 gamma=self._clients.gamma_client,
                 data_client=self._clients.data_client,
+                provider=self._live_history_provider,
             )
         return collectors
 
