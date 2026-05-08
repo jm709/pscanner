@@ -2207,6 +2207,17 @@ class SourceSummary:
     win_rate: float
 
 
+@dataclass(frozen=True, slots=True)
+class PredBucketSummary:
+    """Per-pred-bucket PnL aggregate for the gate-model paper status (#106)."""
+
+    bucket_label: str  # e.g. "0.7-0.8"
+    open_count: int
+    resolved_count: int
+    realized_pnl: float
+    win_rate: float
+
+
 class PaperTradesRepo:
     """CRUD + aggregates for the ``paper_trades`` table.
 
@@ -2412,6 +2423,59 @@ class PaperTradesRepo:
             SourceSummary(
                 detector=r["detector"],
                 rule_variant=r["rule_variant"],
+                open_count=int(r["open_count"] or 0),
+                resolved_count=int(r["resolved_count"] or 0),
+                realized_pnl=float(r["realized_pnl"] or 0.0),
+                win_rate=float(r["win_rate"] or 0.0),
+            )
+            for r in rows
+        ]
+
+    def summary_by_pred_bucket(self) -> list[PredBucketSummary]:
+        """Per-pred-bucket aggregate of open/resolved/realized PnL/win rate.
+
+        Buckets gate-model paper-trade entries by ``alerts.body_json.$.pred``
+        into 0.1-wide bins from ``[0.5, 0.6)`` through ``[0.9, 1.0]``. The
+        upper bound on the top bucket is closed so ``pred = 1.0`` exactly
+        is included. Buckets with zero entries are omitted (caller renders
+        only what's present). Non-gate-model paper trades (no ``pred`` in
+        body) are excluded by the ``triggering_alert_detector`` filter.
+
+        See issue #106 for the variance/calibration analysis this enables.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT
+              CASE
+                WHEN p < 0.6 THEN '0.5-0.6'
+                WHEN p < 0.7 THEN '0.6-0.7'
+                WHEN p < 0.8 THEN '0.7-0.8'
+                WHEN p < 0.9 THEN '0.8-0.9'
+                ELSE              '0.9-1.0'
+              END AS bucket_label,
+              SUM(CASE WHEN x.trade_id IS NULL THEN 1 ELSE 0 END) AS open_count,
+              SUM(CASE WHEN x.trade_id IS NOT NULL THEN 1 ELSE 0 END) AS resolved_count,
+              COALESCE(SUM(x.cost_usd - e.cost_usd), 0.0) AS realized_pnl,
+              AVG(CASE WHEN x.trade_id IS NOT NULL
+                       THEN CASE WHEN x.cost_usd > e.cost_usd THEN 1.0 ELSE 0.0 END
+                       ELSE NULL END) AS win_rate
+            FROM (
+              SELECT e.*, CAST(json_extract(a.body_json, '$.pred') AS REAL) AS p
+                FROM paper_trades e
+                JOIN alerts a ON a.alert_key = e.triggering_alert_key
+               WHERE e.trade_kind = 'entry'
+                 AND e.triggering_alert_detector = 'gate_buy'
+            ) e
+            LEFT JOIN paper_trades x
+              ON x.parent_trade_id = e.trade_id AND x.trade_kind = 'exit'
+            WHERE e.p >= 0.5
+            GROUP BY bucket_label
+            ORDER BY bucket_label
+            """,
+        ).fetchall()
+        return [
+            PredBucketSummary(
+                bucket_label=str(r["bucket_label"]),
                 open_count=int(r["open_count"] or 0),
                 resolved_count=int(r["resolved_count"] or 0),
                 realized_pnl=float(r["realized_pnl"] or 0.0),
