@@ -397,6 +397,28 @@ def test_resolve_outcome_logs_when_market_not_cached(tmp_path: Path) -> None:
     assert matches[0]["condition_id"] == "0xc1"
 
 
+@pytest.mark.asyncio
+async def test_evaluate_logs_when_outcome_unresolved(tmp_path: Path) -> None:
+    """`evaluate()` emits gate_model.skip_unresolved_outcome on the early-return."""
+    conn = _new_db()
+    try:
+        artifact_dir = tmp_path / "model"
+        _train_dummy_model(artifact_dir)
+        provider = LiveHistoryProvider(conn=conn, metadata={})
+        detector = GateModelDetector(
+            config=GateModelConfig(enabled=True, artifact_dir=artifact_dir),
+            provider=provider,
+            alerts_repo=AlertsRepo(conn),
+        )  # no market_cache => _resolve_outcome_side returns ""
+        trade = _make_wallet_trade(condition_id="0xc1")
+        with capture_logs() as logs:
+            await detector.evaluate(trade)
+    finally:
+        conn.close()
+    events = [log["event"] for log in logs]
+    assert "gate_model.skip_unresolved_outcome" in events
+
+
 def test_resolve_outcome_logs_when_outcome_not_binary(tmp_path: Path) -> None:
     conn = _new_db()
     try:

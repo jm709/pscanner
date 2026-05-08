@@ -166,6 +166,10 @@ class GateModelDetector(TradeDrivenDetector):
             return
         outcome_side = self._resolve_outcome_side(trade)
         if outcome_side not in ("YES", "NO"):
+            _LOG.debug(
+                "gate_model.skip_unresolved_outcome",
+                tx=trade.transaction_hash,
+            )
             return
         try:
             metadata = self._provider.market_metadata(trade.condition_id)
