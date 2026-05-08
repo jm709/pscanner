@@ -171,6 +171,10 @@ class Scanner:
                 conn=self._db,
                 metadata=_load_corpus_metadata(platform=self._config.gate_model.platform),
             )
+            _load_corpus_resolutions(
+                self._live_history_provider,
+                platform=self._config.gate_model.platform,
+            )
         self._owns_clients = clients is None
         self._clients = clients or self._build_default_clients()
         self._renderer = TerminalRenderer()
@@ -928,3 +932,63 @@ def _load_corpus_metadata(*, platform: str = "polymarket") -> dict[str, MarketMe
                 opened_at=int(opened_at),
             )
     return out
+
+
+def _load_corpus_resolutions(provider: LiveHistoryProvider, *, platform: str = "polymarket") -> int:
+    """Load market_resolutions from the corpus DB into the provider.
+
+    Mirrors ``_load_corpus_metadata`` but populates the provider's in-memory
+    ``_resolutions`` dict so the lazy drain inside
+    :meth:`LiveHistoryProvider.wallet_state` can apply resolutions
+    accumulated during ``pscanner daemon bootstrap-features``.
+
+    Without this, ``prior_resolved_buys`` / ``prior_wins`` / ``prior_losses``
+    stay at zero forever — the bootstrap walk only stores buys to the
+    per-wallet ``unresolved_buys_json``; the drain triggers in
+    ``wallet_state(...)``, which checks the resolutions dict before
+    folding each buy. An empty resolutions dict means no buy ever drains.
+
+    Args:
+        provider: The :class:`LiveHistoryProvider` to populate.
+        platform: Scope the SELECT to a single platform. Default
+            ``"polymarket"``; non-Polymarket models would pass their own.
+
+    Returns:
+        Count of resolutions registered. Zero if the corpus DB is missing
+        (empty-dict fallback is acceptable for the same reasons documented
+        on ``_load_corpus_metadata``).
+    """
+    corpus_path = Path("data/corpus.sqlite3")
+    if not corpus_path.exists():
+        _LOG.warning("scanner.corpus_db_missing", path=str(corpus_path))
+        return 0
+    n = 0
+    with closing(sqlite3.connect(str(corpus_path))) as conn:
+        try:
+            cursor = conn.execute(
+                """
+                SELECT condition_id, resolved_at, outcome_yes_won
+                FROM market_resolutions
+                WHERE platform = ?
+                """,
+                (platform,),
+            )
+        except sqlite3.OperationalError as exc:
+            # ``market_resolutions`` predates the platform-column migration.
+            # Open the corpus via ``init_corpus_db`` to apply the schema
+            # migration before retry — same fallback path as the bootstrap.
+            _LOG.warning(
+                "scanner.corpus_db_unmigrated_market_resolutions",
+                err=str(exc),
+                path=str(corpus_path),
+            )
+            return 0
+        for cond_id, resolved_at, yes_won in cursor:
+            provider.register_resolution(
+                condition_id=cond_id,
+                resolved_at=int(resolved_at),
+                outcome_yes_won=int(yes_won),
+            )
+            n += 1
+    _LOG.info("scanner.resolutions_loaded", count=n, platform=platform)
+    return n

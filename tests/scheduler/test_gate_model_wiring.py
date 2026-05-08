@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -15,9 +16,21 @@ import xgboost as xgb
 from pscanner.collectors.market_scoped_trades import MarketScopedTradeCollector
 from pscanner.config import Config, GateModelConfig, GateModelMarketFilterConfig
 from pscanner.corpus.db import init_corpus_db
-from pscanner.corpus.repos import CorpusMarket, CorpusMarketsRepo
+from pscanner.corpus.repos import (
+    CorpusMarket,
+    CorpusMarketsRepo,
+    MarketResolution,
+    MarketResolutionsRepo,
+)
+from pscanner.daemon.live_history import LiveHistoryProvider
 from pscanner.detectors.gate_model import GateModelDetector
-from pscanner.scheduler import Scanner, SchedulerClients, _load_corpus_metadata
+from pscanner.scheduler import (
+    Scanner,
+    SchedulerClients,
+    _load_corpus_metadata,
+    _load_corpus_resolutions,
+)
+from pscanner.store.db import init_db
 
 
 def _make_stub_clients() -> SchedulerClients:
@@ -219,3 +232,169 @@ def test_load_corpus_metadata_filters_by_platform(tmp_path: Path, monkeypatch) -
     assert set(manifold.keys()) == {"manifold-cond"}
     assert poly["0xpoly"].category == "esports"
     assert manifold["manifold-cond"].category == "politics"
+
+
+def test_load_corpus_resolutions_populates_provider(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Resolutions loaded at scheduler boot enable the lazy drain in wallet_state."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+    real_corpus_path = tmp_path / "data" / "corpus.sqlite3"
+    conn = init_corpus_db(real_corpus_path)
+    try:
+        resolutions = MarketResolutionsRepo(conn)
+        resolutions.upsert(
+            MarketResolution(
+                condition_id="0xpoly-1",
+                winning_outcome_index=0,
+                outcome_yes_won=1,
+                resolved_at=1_700_001_000,
+                source="gamma",
+                platform="polymarket",
+            ),
+            recorded_at=1_700_001_500,
+        )
+        resolutions.upsert(
+            MarketResolution(
+                condition_id="0xpoly-2",
+                winning_outcome_index=0,
+                outcome_yes_won=0,
+                resolved_at=1_700_002_000,
+                source="gamma",
+                platform="polymarket",
+            ),
+            recorded_at=1_700_002_500,
+        )
+        resolutions.upsert(
+            MarketResolution(
+                condition_id="manifold-cond",
+                winning_outcome_index=0,
+                outcome_yes_won=1,
+                resolved_at=1_700_003_000,
+                source="manifold",
+                platform="manifold",
+            ),
+            recorded_at=1_700_003_500,
+        )
+    finally:
+        conn.close()
+
+    daemon_conn = init_db(tmp_path / "daemon.sqlite3")
+    try:
+        provider = LiveHistoryProvider(conn=daemon_conn, metadata={})
+        n = _load_corpus_resolutions(provider, platform="polymarket")
+        assert n == 2  # only Polymarket rows; the manifold row is filtered
+        assert provider.get_resolution("0xpoly-1") == (1_700_001_000, 1)
+        assert provider.get_resolution("0xpoly-2") == (1_700_002_000, 0)
+        assert provider.get_resolution("manifold-cond") is None
+    finally:
+        daemon_conn.close()
+
+
+def test_load_corpus_resolutions_returns_zero_when_corpus_missing(
+    tmp_path: Path,
+    monkeypatch,  # type: ignore[no-untyped-def]
+) -> None:
+    """Empty-dict fallback path mirrors `_load_corpus_metadata`'s contract."""
+    monkeypatch.chdir(tmp_path)
+    # No data/corpus.sqlite3 exists.
+    daemon_conn = init_db(tmp_path / "daemon.sqlite3")
+    try:
+        provider = LiveHistoryProvider(conn=daemon_conn, metadata={})
+        n = _load_corpus_resolutions(provider, platform="polymarket")
+    finally:
+        daemon_conn.close()
+    assert n == 0
+
+
+def test_load_corpus_resolutions_handles_unmigrated_market_resolutions(
+    tmp_path: Path,
+    monkeypatch,  # type: ignore[no-untyped-def]
+) -> None:
+    """Pre-platform corpus DBs (no ``platform`` column on ``market_resolutions``)
+    fall back to zero rather than crashing the daemon at boot.
+
+    The laptop and any pre-2026-05-04 corpus may have ``corpus_markets``
+    migrated but ``market_resolutions`` not yet (partial-migration state).
+    The function should warn and return 0 instead of bubbling
+    ``OperationalError`` up through ``Scanner.__init__``.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+    corpus_path = tmp_path / "data" / "corpus.sqlite3"
+    # Build a market_resolutions table WITHOUT the platform column —
+    # mirrors a pre-migration corpus snapshot.
+    conn = sqlite3.connect(str(corpus_path))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE market_resolutions (
+              condition_id TEXT PRIMARY KEY,
+              winning_outcome_index INTEGER NOT NULL,
+              outcome_yes_won INTEGER NOT NULL,
+              resolved_at INTEGER NOT NULL,
+              source TEXT NOT NULL,
+              recorded_at INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO market_resolutions VALUES (?, ?, ?, ?, ?, ?)",
+            ("0xtest", 0, 1, 1_700_001_000, "gamma", 1_700_001_500),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    daemon_conn = init_db(tmp_path / "daemon.sqlite3")
+    try:
+        provider = LiveHistoryProvider(conn=daemon_conn, metadata={})
+        n = _load_corpus_resolutions(provider, platform="polymarket")
+    finally:
+        daemon_conn.close()
+    assert n == 0
+    assert provider.get_resolution("0xtest") is None
+
+
+@pytest.mark.asyncio
+async def test_scanner_loads_resolutions_when_gate_model_enabled(tmp_path: Path) -> None:
+    """Scanner.__init__ calls _load_corpus_resolutions on the live provider.
+
+    End-to-end: seed the corpus with resolutions, enable gate_model, build a
+    Scanner, observe that provider.get_resolution returns the loaded entry.
+    """
+    artifact_dir = tmp_path / "model"
+    _train_dummy_model(artifact_dir)
+    (tmp_path / "data").mkdir()
+    real_corpus_path = tmp_path / "data" / "corpus.sqlite3"
+    conn = init_corpus_db(real_corpus_path)
+    try:
+        resolutions = MarketResolutionsRepo(conn)
+        resolutions.upsert(
+            MarketResolution(
+                condition_id="0xseed",
+                winning_outcome_index=0,
+                outcome_yes_won=1,
+                resolved_at=1_700_001_000,
+                source="gamma",
+                platform="polymarket",
+            ),
+            recorded_at=1_700_001_500,
+        )
+    finally:
+        conn.close()
+    cfg = _make_config(artifact_dir=artifact_dir, gate_enabled=True, filter_enabled=True)
+    clients = _make_stub_clients()
+    # Scanner reads ``data/corpus.sqlite3`` relative to cwd; chdir into the
+    # seeded tmp dir so it picks up the test fixture.
+    monkeypatch_setter = pytest.MonkeyPatch()
+    monkeypatch_setter.chdir(tmp_path)
+    try:
+        scanner = Scanner(config=cfg, db_path=tmp_path / "daemon.sqlite3", clients=clients)
+    finally:
+        monkeypatch_setter.undo()
+    try:
+        provider = scanner._live_history_provider
+        assert provider is not None
+        assert provider.get_resolution("0xseed") == (1_700_001_000, 1)
+    finally:
+        await scanner.aclose()
