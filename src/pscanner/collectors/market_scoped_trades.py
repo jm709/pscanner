@@ -104,17 +104,33 @@ class MarketScopedTradeCollector:
         return n
 
     def _row_to_wallet_trade(self, row: dict[str, Any]) -> WalletTrade | None:
+        """Map a Polymarket ``/trades?market=`` row to ``WalletTrade``.
+
+        Field name aliases mirror :func:`pscanner.collectors.trades._event_to_trade`
+        — Polymarket's data-api emits camelCase keys (``transactionHash``,
+        ``proxyWallet``, ``conditionId``, ``asset``, ``usdcSize``). Snake-case
+        fallbacks (``tx_hash``, ``wallet_address``, ``condition_id``,
+        ``asset_id``, ``notional_usd``) cover test fixtures and any future
+        snake-keyed source.
+        """
+        tx_hash = str(row.get("transactionHash") or row.get("tx_hash") or "")
+        if not tx_hash:
+            _LOG.warning("market_scoped.bad_row", row_keys=list(row.keys()))
+            return None
         try:
-            tx_hash = str(row["tx_hash"])
-            asset_id = str(row["asset_id"])
-            bs = str(row["bs"]).upper()
-            wallet = str(row["wallet_address"])
-            condition_id = str(row["condition_id"])
+            asset_id = str(row.get("asset") or row.get("asset_id") or "")
+            bs = str(row.get("side") or row.get("bs") or "").upper()
+            wallet = str(row.get("proxyWallet") or row.get("wallet_address") or "")
+            condition_id = str(row.get("conditionId") or row.get("condition_id") or "")
             price = float(row["price"])
             size = float(row["size"])
-            notional = float(row.get("notional_usd", price * size))
+            usd_raw = row.get("usdcSize", row.get("notional_usd"))
+            usd_value = float(usd_raw) if usd_raw is not None else price * size
             timestamp = int(row["timestamp"])
         except (KeyError, TypeError, ValueError):
+            _LOG.warning("market_scoped.bad_row", row_keys=list(row.keys()))
+            return None
+        if not (asset_id and bs and wallet and condition_id):
             _LOG.warning("market_scoped.bad_row", row_keys=list(row.keys()))
             return None
         return WalletTrade(
@@ -125,7 +141,7 @@ class MarketScopedTradeCollector:
             condition_id=ConditionId(condition_id),
             size=size,
             price=price,
-            usd_value=notional,
+            usd_value=usd_value,
             status="filled",
             source="market_scoped",
             timestamp=timestamp,

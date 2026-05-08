@@ -178,6 +178,77 @@ async def test_poll_once_dispatches_new_trades() -> None:
 
 
 @pytest.mark.asyncio
+async def test_poll_once_handles_polymarket_camelcase_keys() -> None:
+    """Pin the live Polymarket ``/trades?market=`` row shape.
+
+    Surfaced during the 2026-05-08 smoke run on the desktop: the API
+    returns camelCase keys (``transactionHash``, ``proxyWallet``,
+    ``conditionId``, ``asset``, ``usdcSize``) — the original
+    ``_row_to_wallet_trade`` was looking up snake_case (``tx_hash``,
+    ``wallet_address``, ``condition_id``, ``asset_id``, ``notional_usd``)
+    and warning ``market_scoped.bad_row`` on every observed trade. This
+    test pins the canonical keys so that regression can't recur.
+    """
+    cfg = GateModelMarketFilterConfig(
+        enabled=True,
+        accepted_categories=("esports",),
+        min_volume_24h_usd=0,
+    )
+    event = _make_event(
+        slug="ev",
+        tags=["Esports"],
+        markets=[_make_market(condition_id="0xc1", volume=100_000)],
+    )
+    gamma = _FakeGammaClient([event])
+    data = _FakeDataClient(
+        by_market={
+            "0xc1": [
+                {
+                    # Real Polymarket /trades response shape (camelCase).
+                    "transactionHash": "0xabc123",
+                    "asset": "0xasset1",
+                    "side": "BUY",
+                    "proxyWallet": "0xwallet",
+                    "conditionId": "0xc1",
+                    "outcome": "Yes",
+                    "outcomeIndex": 0,
+                    "price": 0.42,
+                    "size": 100.0,
+                    "usdcSize": 42.0,
+                    "timestamp": 1_700_000_100,
+                    "title": "irrelevant",
+                    "slug": "ev-slug",
+                    "name": "Trader",
+                    "pseudonym": "Trader",
+                    "bio": "",
+                    "profileImage": "",
+                    "profileImageOptimized": "",
+                    "icon": "",
+                    "eventSlug": "ev",
+                }
+            ]
+        }
+    )
+    collector = MarketScopedTradeCollector(config=cfg, gamma=gamma, data_client=data)
+    received: list[WalletTrade] = []
+    collector.subscribe_new_trade(received.append)
+    await collector.refresh_market_set()
+    n = await collector.poll_once()
+    assert n == 1
+    assert len(received) == 1
+    trade = received[0]
+    assert trade.transaction_hash == "0xabc123"
+    assert trade.asset_id == "0xasset1"
+    assert trade.side == "BUY"
+    assert trade.wallet == "0xwallet"
+    assert trade.condition_id == "0xc1"
+    assert trade.price == 0.42
+    assert trade.size == 100.0
+    assert trade.usd_value == 42.0
+    assert trade.timestamp == 1_700_000_100
+
+
+@pytest.mark.asyncio
 async def test_poll_once_advances_last_seen_ts() -> None:
     cfg = GateModelMarketFilterConfig(
         enabled=True, accepted_categories=("esports",), min_volume_24h_usd=0
