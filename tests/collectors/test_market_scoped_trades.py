@@ -5,13 +5,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from pscanner.collectors.market_scoped_trades import MarketScopedTradeCollector
 from pscanner.config import GateModelMarketFilterConfig
+from pscanner.daemon.live_history import LiveHistoryProvider
 from pscanner.poly.models import Event, Market
+from pscanner.store.db import init_db
 from pscanner.store.repo import WalletTrade
 from pscanner.util.clock import FakeClock
 
@@ -104,8 +107,8 @@ async def test_refresh_filters_by_category_and_volume() -> None:
     gamma = _FakeGammaClient([esports_event, sports_event, esports_event_2])
     collector = MarketScopedTradeCollector(
         config=cfg,
-        gamma=gamma,
-        data_client=None,  # type: ignore[arg-type]
+        gamma=gamma,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        data_client=None,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
     )
     selected = await collector.refresh_market_set()
     # Only esports markets above the volume floor; sorted desc by volume.
@@ -125,8 +128,8 @@ async def test_refresh_caps_at_max_markets() -> None:
     gamma = _FakeGammaClient([event])
     collector = MarketScopedTradeCollector(
         config=cfg,
-        gamma=gamma,
-        data_client=None,  # type: ignore[arg-type]
+        gamma=gamma,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        data_client=None,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
     )
     selected = await collector.refresh_market_set()
     assert len(selected) == 2
@@ -165,7 +168,11 @@ async def test_poll_once_dispatches_new_trades() -> None:
             ]
         }
     )
-    collector = MarketScopedTradeCollector(config=cfg, gamma=gamma, data_client=data)
+    collector = MarketScopedTradeCollector(
+        config=cfg,
+        gamma=gamma,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        data_client=data,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    )
     received: list[WalletTrade] = []
     collector.subscribe_new_trade(received.append)
     await collector.refresh_market_set()
@@ -229,7 +236,11 @@ async def test_poll_once_handles_polymarket_camelcase_keys() -> None:
             ]
         }
     )
-    collector = MarketScopedTradeCollector(config=cfg, gamma=gamma, data_client=data)
+    collector = MarketScopedTradeCollector(
+        config=cfg,
+        gamma=gamma,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        data_client=data,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    )
     received: list[WalletTrade] = []
     collector.subscribe_new_trade(received.append)
     await collector.refresh_market_set()
@@ -277,7 +288,11 @@ async def test_poll_once_advances_last_seen_ts() -> None:
             ]
         }
     )
-    collector = MarketScopedTradeCollector(config=cfg, gamma=gamma, data_client=data)
+    collector = MarketScopedTradeCollector(
+        config=cfg,
+        gamma=gamma,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        data_client=data,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    )
     await collector.refresh_market_set()
     await collector.poll_once()
     await collector.poll_once()  # second poll: nothing new since last_seen_ts advanced
@@ -301,7 +316,11 @@ async def test_run_loop_polls_on_cadence() -> None:
     )
     gamma = _FakeGammaClient([event])
     data = _FakeDataClient(by_market={"0xc1": []})
-    collector = MarketScopedTradeCollector(config=cfg, gamma=gamma, data_client=data)
+    collector = MarketScopedTradeCollector(
+        config=cfg,
+        gamma=gamma,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        data_client=data,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    )
     clk = FakeClock()
     stop_event = asyncio.Event()
     task = asyncio.create_task(collector.run(stop_event, clock=clk))
@@ -317,3 +336,64 @@ async def test_run_loop_polls_on_cadence() -> None:
             await task
     # At least 2 poll iterations completed.
     assert len(data.calls) >= 2
+
+
+@pytest.mark.asyncio
+async def test_refresh_populates_provider_metadata_for_every_candidate(
+    tmp_path: Path,
+) -> None:
+    """`refresh_market_set` writes MarketMetadata for every category-matching market.
+
+    Issue #102: live open markets aren't in `corpus_markets`, so the
+    collector is the only thing that can teach the provider about them
+    before a trade arrives.
+    """
+    cfg = GateModelMarketFilterConfig(
+        enabled=True,
+        accepted_categories=("esports",),
+        min_volume_24h_usd=10.0,
+        max_markets=2,
+    )
+    esports_a = _make_event(
+        slug="ev-a",
+        tags=["Esports"],
+        markets=[_make_market(condition_id="0xMA", volume=500.0)],
+    )
+    esports_b = _make_event(
+        slug="ev-b",
+        tags=["Esports"],
+        markets=[
+            _make_market(condition_id="0xMB1", volume=400.0),
+            _make_market(condition_id="0xMB2", volume=15.0),  # passes floor; below top-N
+        ],
+    )
+    politics = _make_event(
+        slug="ev-p",
+        tags=["Politics"],
+        markets=[_make_market(condition_id="0xMP", volume=99999.0)],
+    )
+    gamma = _FakeGammaClient([esports_a, esports_b, politics])
+    data_client = _FakeDataClient(by_market={})
+
+    db_path = tmp_path / "daemon.sqlite3"
+    conn = init_db(db_path)
+    try:
+        provider = LiveHistoryProvider(conn=conn, metadata={})
+        collector = MarketScopedTradeCollector(
+            config=cfg,
+            gamma=gamma,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+            data_client=data_client,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+            provider=provider,
+        )
+        selected = await collector.refresh_market_set()
+    finally:
+        conn.close()
+
+    assert selected == ["0xMA", "0xMB1"]  # top-2 by volume
+    # All three esports markets seeded — even the one below top-N.
+    assert provider.market_metadata("0xMA").category == "esports"
+    assert provider.market_metadata("0xMB1").category == "esports"
+    assert provider.market_metadata("0xMB2").category == "esports"
+    # Politics market is filtered out at the category gate.
+    with pytest.raises(KeyError):
+        provider.market_metadata("0xMP")
