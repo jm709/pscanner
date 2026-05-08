@@ -542,6 +542,16 @@ class Scanner:
             )
             raise RuntimeError(msg)
 
+    async def _replay_paper_trader(self) -> None:
+        """Replay unbooked alerts when paper-trading is enabled (issue #105)."""
+        trader = self._detectors.get("paper_trader")
+        if not isinstance(trader, PaperTrader):
+            return
+        try:
+            await trader.replay_unbooked()
+        except Exception:
+            _LOG.exception("scanner.paper_trader_replay_failed")
+
     @property
     def sink(self) -> AlertSink:
         """The shared alert sink (exposed for tests)."""
@@ -564,6 +574,7 @@ class Scanner:
         Catches :class:`KeyboardInterrupt` to perform graceful shutdown.
         """
         self.preflight()
+        await self._replay_paper_trader()
         for worker in self._workers:
             await worker.start()
         try:
