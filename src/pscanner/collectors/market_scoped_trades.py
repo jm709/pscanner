@@ -92,6 +92,10 @@ class MarketScopedTradeCollector:
                 cond_id_str = str(cond_id)
                 candidates.append((volume, cond_id_str))
                 if self._provider is not None:
+                    # Live market: no resolution timestamp yet. closed_at/opened_at
+                    # default to 0 — only `category` is load-bearing at inference.
+                    # `time_to_resolution_seconds` reads `closed_at` but is in
+                    # LEAKAGE_COLS and dropped before the booster sees it.
                     self._provider.set_market_metadata(
                         cond_id_str,
                         MarketMetadata(
