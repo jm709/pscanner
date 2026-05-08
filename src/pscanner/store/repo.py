@@ -699,6 +699,38 @@ class AlertsRepo:
             ).fetchall()
         return [_row_to_alert(row) for row in rows]
 
+    def fetch_unbooked_since(self, *, min_created_at: int) -> list[Alert]:
+        """Return alerts with no ``paper_trades`` entry, ascending by created_at.
+
+        LEFT JOIN against ``paper_trades`` on ``alert_key = triggering_alert_key``
+        (entry rows only); rows where the JOIN produced NULL are unbooked.
+        Used by :meth:`PaperTrader.replay_unbooked` (issue #105) to recover
+        alerts that fired before the evaluator subscribed.
+
+        Args:
+            min_created_at: Lower bound on ``alerts.created_at`` (Unix seconds).
+                Alerts older than this are excluded; the caller derives this
+                from ``replay_lookback_seconds``.
+
+        Returns:
+            Alerts in ascending ``created_at`` order so replay processes
+            oldest first, matching live emission ordering.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT a.alert_key, a.detector, a.severity, a.title, a.body_json, a.created_at
+              FROM alerts a
+              LEFT JOIN paper_trades p
+                     ON p.triggering_alert_key = a.alert_key
+                    AND p.trade_kind = 'entry'
+             WHERE a.created_at >= ?
+               AND p.trade_id IS NULL
+             ORDER BY a.created_at ASC
+            """,
+            (min_created_at,),
+        ).fetchall()
+        return [_row_to_alert(row) for row in rows]
+
 
 def _row_to_alert(row: sqlite3.Row) -> Alert:
     """Convert an ``alerts`` row into an ``Alert`` dataclass."""
