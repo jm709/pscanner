@@ -332,6 +332,7 @@ class Scanner:
                 gamma=self._clients.gamma_client,
                 data_client=self._clients.data_client,
                 provider=self._live_history_provider,
+                market_cache=self._market_cache_repo,
             )
         return collectors
 
