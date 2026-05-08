@@ -130,8 +130,8 @@ def test_gate_model_config_defaults() -> None:
     cfg = GateModelConfig()
     assert cfg.enabled is False
     assert cfg.artifact_dir == Path("models/current")
-    assert cfg.min_pred == 0.7
-    assert cfg.min_edge_pct == 0.01
+    assert cfg.min_pred == 0.5
+    assert cfg.min_edge_pct == 0.05
     assert cfg.accepted_categories is None
     assert cfg.queue_max_size == 1024
     assert cfg.platform == "polymarket"
@@ -155,7 +155,7 @@ def test_root_config_aggregates_gate_sections() -> None:
 def test_gate_model_evaluator_config_defaults() -> None:
     cfg = GateModelEvaluatorConfig()
     assert cfg.enabled is False
-    assert cfg.min_edge_pct == 0.01
+    assert cfg.min_edge_pct == 0.05
     assert cfg.position_fraction == 0.005
 
 
