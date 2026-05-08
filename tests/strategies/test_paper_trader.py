@@ -155,7 +155,8 @@ def _build_trader(
     TrackedWalletsRepo,
     PaperTradesRepo,
 ]:
-    sink = AlertSink(AlertsRepo(tmp_db))
+    alerts = AlertsRepo(tmp_db)
+    sink = AlertSink(alerts)
     cache = MarketCacheRepo(tmp_db)
     wallets = TrackedWalletsRepo(tmp_db)
     paper = PaperTradesRepo(tmp_db)
@@ -171,6 +172,7 @@ def _build_trader(
         market_ticks=MarketTicksRepo(tmp_db),
         data_client=data_client or _default_data_client(),
         gamma_client=gamma_client or _default_gamma_client(),
+        alerts_repo=alerts,
     )
     sink.subscribe(trader.handle_alert_sync)
     return sink, trader, cache, wallets, paper
@@ -602,6 +604,7 @@ async def test_paper_trader_logs_warning_on_unexpected_db_error(
         market_ticks=MarketTicksRepo(tmp_db),
         data_client=AsyncMock(),
         gamma_client=AsyncMock(),
+        alerts_repo=AlertsRepo(tmp_db),
     )
     sink.subscribe(trader.handle_alert_sync)
     await sink.emit(_smart_money_alert())
@@ -678,6 +681,7 @@ def test_paper_trader_accepts_evaluator_list(tmp_db: sqlite3.Connection) -> None
         market_ticks=market_ticks,
         data_client=data,
         gamma_client=gamma,
+        alerts_repo=AlertsRepo(tmp_db),
     )
     assert trader is not None
 
@@ -722,6 +726,7 @@ async def test_evaluate_dispatches_to_first_acceptor(
         market_ticks=MarketTicksRepo(tmp_db),
         data_client=_stub_data_client(),
         gamma_client=_stub_gamma_client(),
+        alerts_repo=AlertsRepo(tmp_db),
     )
 
     await trader.evaluate(_velocity_alert())
@@ -760,6 +765,7 @@ async def test_evaluator_exception_logs_and_continues(
         market_ticks=MarketTicksRepo(tmp_db),
         data_client=_stub_data_client(),
         gamma_client=_stub_gamma_client(),
+        alerts_repo=AlertsRepo(tmp_db),
     )
 
     with capture_logs() as logs:
@@ -820,6 +826,7 @@ async def test_evaluate_writes_detector_and_variant_to_entry(
         market_ticks=MarketTicksRepo(tmp_db),
         data_client=_stub_data_client(),
         gamma_client=_stub_gamma_client(),
+        alerts_repo=AlertsRepo(tmp_db),
     )
 
     await trader.evaluate(_velocity_alert())

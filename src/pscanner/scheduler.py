@@ -428,6 +428,7 @@ class Scanner:
             market_ticks=self._ticks_repo,
             data_client=self._clients.data_client,
             gamma_client=self._clients.gamma_client,
+            alerts_repo=self._alerts_repo,
         )
         detectors["paper_resolver"] = PaperResolver(
             config=self._config.paper_trading,
