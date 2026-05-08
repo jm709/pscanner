@@ -432,7 +432,12 @@ class GateModelEvaluatorConfig(_Section):
     """
 
     enabled: bool = False
-    min_edge_pct: float = 0.01
+    min_edge_pct: float = 0.05
+    """Defensive double-check — must match ``GateModelConfig.min_edge_pct``.
+    The evaluator gate guards against operator config drift between detector
+    and evaluator (see CLAUDE.md gate-model evaluator bullet). Keeping these
+    in sync is the operator contract; #106 raised both to 0.05.
+    """
     position_fraction: float = 0.005
 
 

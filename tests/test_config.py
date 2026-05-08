@@ -155,7 +155,7 @@ def test_root_config_aggregates_gate_sections() -> None:
 def test_gate_model_evaluator_config_defaults() -> None:
     cfg = GateModelEvaluatorConfig()
     assert cfg.enabled is False
-    assert cfg.min_edge_pct == 0.01
+    assert cfg.min_edge_pct == 0.05
     assert cfg.position_fraction == 0.005
 
 
