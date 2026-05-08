@@ -208,20 +208,37 @@ class GateModelDetector(TradeDrivenDetector):
 
         Returns ``""`` when no :class:`MarketCacheRepo` is wired, the market
         is not cached, the asset_id isn't found, or the matched outcome name
-        is neither YES nor NO. The detector treats ``""`` as "skip" so any
-        of these conditions silently drop the trade.
+        is neither YES nor NO. Each silent-skip path emits a distinct debug
+        log so an operator can diagnose why ``evaluate()`` is dropping every
+        trade — see issue #101 for the failure mode this guards against.
         """
         if self._market_cache is None:
+            _LOG.debug("gate_model.no_market_cache", tx=trade.transaction_hash)
             return ""
         cached = self._market_cache.get_by_condition_id(trade.condition_id)
         if cached is None:
+            _LOG.debug(
+                "gate_model.market_not_cached",
+                tx=trade.transaction_hash,
+                condition_id=trade.condition_id,
+            )
             return ""
         for asset_id, name in zip(cached.asset_ids, cached.outcomes, strict=False):
             if asset_id == trade.asset_id:
                 upper = name.strip().upper()
                 if upper in ("YES", "NO"):
                     return upper
+                _LOG.debug(
+                    "gate_model.outcome_not_binary",
+                    tx=trade.transaction_hash,
+                    outcome=name,
+                )
                 return ""
+        _LOG.debug(
+            "gate_model.asset_id_not_found",
+            tx=trade.transaction_hash,
+            asset_id=trade.asset_id,
+        )
         return ""
 
     def _predict_one(self, features: FeatureRow) -> float:

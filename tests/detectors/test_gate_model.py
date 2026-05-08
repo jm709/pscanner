@@ -219,8 +219,8 @@ async def test_evaluate_emits_alert_when_gates_pass(tmp_path: Path) -> None:
         alerts_repo = AlertsRepo(conn)
         detector = GateModelDetector(config=cfg, provider=provider, alerts_repo=alerts_repo)
         # Replace prediction + outcome side with deterministic stubs.
-        detector._predict_one = lambda _: 0.85  # type: ignore[method-assign,assignment]
-        detector._resolve_outcome_side = lambda _trade: "YES"  # type: ignore[method-assign,assignment]
+        detector._predict_one = lambda _: 0.85  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
+        detector._resolve_outcome_side = lambda _trade: "YES"  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
         sink = AlertSink(alerts_repo=alerts_repo)
         detector._sink = sink
         trade = _make_wallet_trade(condition_id="0xc1", price=0.40)
@@ -255,8 +255,8 @@ async def test_evaluate_skips_when_pred_below_floor(tmp_path: Path) -> None:
         provider = LiveHistoryProvider(conn=conn, metadata=metadata)
         alerts_repo = AlertsRepo(conn)
         detector = GateModelDetector(config=cfg, provider=provider, alerts_repo=alerts_repo)
-        detector._predict_one = lambda _: 0.30  # type: ignore[method-assign,assignment]
-        detector._resolve_outcome_side = lambda _trade: "YES"  # type: ignore[method-assign,assignment]
+        detector._predict_one = lambda _: 0.30  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
+        detector._resolve_outcome_side = lambda _trade: "YES"  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
         detector._sink = AlertSink(alerts_repo=alerts_repo)
         trade = _make_wallet_trade(condition_id="0xc1", price=0.20)
         await detector.evaluate(trade)
@@ -284,8 +284,8 @@ async def test_evaluate_skips_when_category_not_accepted(tmp_path: Path) -> None
         provider = LiveHistoryProvider(conn=conn, metadata=metadata)
         alerts_repo = AlertsRepo(conn)
         detector = GateModelDetector(config=cfg, provider=provider, alerts_repo=alerts_repo)
-        detector._predict_one = lambda _: 0.85  # type: ignore[method-assign,assignment]
-        detector._resolve_outcome_side = lambda _trade: "YES"  # type: ignore[method-assign,assignment]
+        detector._predict_one = lambda _: 0.85  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
+        detector._resolve_outcome_side = lambda _trade: "YES"  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
         detector._sink = AlertSink(alerts_repo=alerts_repo)
         trade = _make_wallet_trade(condition_id="0xc1", price=0.40)
         await detector.evaluate(trade)
@@ -351,6 +351,125 @@ def test_resolve_outcome_side_via_market_cache(tmp_path: Path) -> None:
     assert yes_side == "YES"
     assert no_side == "NO"
     assert unknown_side == ""
+
+
+def test_resolve_outcome_logs_when_no_market_cache(tmp_path: Path) -> None:
+    conn = _new_db()
+    try:
+        artifact_dir = tmp_path / "model"
+        _train_dummy_model(artifact_dir)
+        provider = LiveHistoryProvider(conn=conn, metadata={})
+        detector = GateModelDetector(
+            config=GateModelConfig(enabled=True, artifact_dir=artifact_dir),
+            provider=provider,
+            alerts_repo=AlertsRepo(conn),
+        )
+        trade = _make_wallet_trade(condition_id="0xc1", asset_id="0xa1")
+        with capture_logs() as logs:
+            assert detector._resolve_outcome_side(trade) == ""
+    finally:
+        conn.close()
+    events = [log["event"] for log in logs]
+    assert "gate_model.no_market_cache" in events
+
+
+def test_resolve_outcome_logs_when_market_not_cached(tmp_path: Path) -> None:
+    conn = _new_db()
+    try:
+        artifact_dir = tmp_path / "model"
+        _train_dummy_model(artifact_dir)
+        market_cache = MarketCacheRepo(conn)  # empty
+        provider = LiveHistoryProvider(conn=conn, metadata={})
+        detector = GateModelDetector(
+            config=GateModelConfig(enabled=True, artifact_dir=artifact_dir),
+            provider=provider,
+            alerts_repo=AlertsRepo(conn),
+            market_cache=market_cache,
+        )
+        trade = _make_wallet_trade(condition_id="0xc1", asset_id="0xa1")
+        with capture_logs() as logs:
+            assert detector._resolve_outcome_side(trade) == ""
+    finally:
+        conn.close()
+    matches = [log for log in logs if log["event"] == "gate_model.market_not_cached"]
+    assert len(matches) == 1
+    assert matches[0]["condition_id"] == "0xc1"
+
+
+def test_resolve_outcome_logs_when_outcome_not_binary(tmp_path: Path) -> None:
+    conn = _new_db()
+    try:
+        artifact_dir = tmp_path / "model"
+        _train_dummy_model(artifact_dir)
+        market_cache = MarketCacheRepo(conn)
+        cached = CachedMarket(
+            market_id=MarketId("m1"),
+            event_id=EventId("e1"),
+            title="t",
+            liquidity_usd=1.0,
+            volume_usd=1.0,
+            outcome_prices=[0.5, 0.5],
+            active=True,
+            cached_at=1_700_000_000,
+            condition_id=ConditionId("0xc1"),
+            event_slug=None,
+            outcomes=["Trump", "Biden"],  # neither YES nor NO
+            asset_ids=[AssetId("0xa1"), AssetId("0xa2")],
+        )
+        market_cache.upsert(cached)
+        provider = LiveHistoryProvider(conn=conn, metadata={})
+        detector = GateModelDetector(
+            config=GateModelConfig(enabled=True, artifact_dir=artifact_dir),
+            provider=provider,
+            alerts_repo=AlertsRepo(conn),
+            market_cache=market_cache,
+        )
+        trade = _make_wallet_trade(condition_id="0xc1", asset_id="0xa1")
+        with capture_logs() as logs:
+            assert detector._resolve_outcome_side(trade) == ""
+    finally:
+        conn.close()
+    matches = [log for log in logs if log["event"] == "gate_model.outcome_not_binary"]
+    assert len(matches) == 1
+    assert matches[0]["outcome"] == "Trump"
+
+
+def test_resolve_outcome_logs_when_asset_id_not_found(tmp_path: Path) -> None:
+    conn = _new_db()
+    try:
+        artifact_dir = tmp_path / "model"
+        _train_dummy_model(artifact_dir)
+        market_cache = MarketCacheRepo(conn)
+        cached = CachedMarket(
+            market_id=MarketId("m1"),
+            event_id=EventId("e1"),
+            title="t",
+            liquidity_usd=1.0,
+            volume_usd=1.0,
+            outcome_prices=[0.5, 0.5],
+            active=True,
+            cached_at=1_700_000_000,
+            condition_id=ConditionId("0xc1"),
+            event_slug=None,
+            outcomes=["Yes", "No"],
+            asset_ids=[AssetId("0xa1"), AssetId("0xa2")],
+        )
+        market_cache.upsert(cached)
+        provider = LiveHistoryProvider(conn=conn, metadata={})
+        detector = GateModelDetector(
+            config=GateModelConfig(enabled=True, artifact_dir=artifact_dir),
+            provider=provider,
+            alerts_repo=AlertsRepo(conn),
+            market_cache=market_cache,
+        )
+        trade = _make_wallet_trade(condition_id="0xc1", asset_id="0xother")
+        with capture_logs() as logs:
+            assert detector._resolve_outcome_side(trade) == ""
+    finally:
+        conn.close()
+    matches = [log for log in logs if log["event"] == "gate_model.asset_id_not_found"]
+    assert len(matches) == 1
+    assert matches[0]["asset_id"] == "0xother"
 
 
 def test_feature_cols_parity_against_training_derive_feature_names(tmp_path: Path) -> None:
