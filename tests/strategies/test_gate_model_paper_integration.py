@@ -123,6 +123,7 @@ def _build_trader(tmp_db: sqlite3.Connection) -> tuple[AlertSink, PaperTrader, P
         market_ticks=MarketTicksRepo(tmp_db),
         data_client=data,
         gamma_client=gamma,
+        alerts_repo=AlertsRepo(tmp_db),
     )
     sink.subscribe(trader.handle_alert_sync)
     return sink, trader, paper

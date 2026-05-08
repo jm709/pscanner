@@ -24,6 +24,7 @@ from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.ids import AssetId, ConditionId
 from pscanner.store.repo import (
+    AlertsRepo,
     MarketCacheRepo,
     MarketTicksRepo,
     PaperTradesRepo,
@@ -65,6 +66,7 @@ class PaperTrader:
         market_ticks: MarketTicksRepo,
         data_client: DataClient,
         gamma_client: GammaClient,
+        alerts_repo: AlertsRepo,
     ) -> None:
         """Bind dependencies. Subscribers must call :meth:`subscribe` separately.
 
@@ -83,6 +85,8 @@ class PaperTrader:
                 trades.
             gamma_client: Polymarket gamma-API client. Used by the cache-miss
                 fallback to fetch the full ``Market`` once a slug is known.
+            alerts_repo: Read-side access for restart replay
+                (:meth:`replay_unbooked`).
         """
         self._config = config
         self._evaluators = evaluators
@@ -91,6 +95,7 @@ class PaperTrader:
         self._market_ticks = market_ticks
         self._data_client = data_client
         self._gamma_client = gamma_client
+        self._alerts_repo = alerts_repo
         self._pending_tasks: set[asyncio.Task[None]] = set()
 
     async def run(self, sink: AlertSink) -> None:
@@ -144,6 +149,34 @@ class PaperTrader:
             detector=alert.detector,
             alert_key=alert.alert_key,
         )
+
+    async def replay_unbooked(self) -> int:
+        """Drive any unbooked alert from the lookback window through the pipeline.
+
+        Reads ``self._config.replay_lookback_seconds``; ``0`` (default) is a
+        no-op. Returns the number of alerts pushed through ``evaluate()``.
+        Each alert's actual book/skip outcome is decided by the existing
+        evaluator chain — replay does not bypass quality gates.
+
+        Idempotent: alerts that already have a ``paper_trades`` entry row are
+        excluded by the SQL JOIN, and the existing ``IntegrityError`` swallow
+        in :meth:`_insert_entry` covers race conditions where the same alert
+        gets re-emitted by the live path mid-replay.
+        """
+        lookback = self._config.replay_lookback_seconds
+        if lookback <= 0:
+            return 0
+        cutoff = int(time.time()) - lookback
+        unbooked = self._alerts_repo.fetch_unbooked_since(min_created_at=cutoff)
+        for alert in unbooked:
+            await self.evaluate(alert)
+        if unbooked:
+            _LOG.info(
+                "paper_trader.replay_complete",
+                count=len(unbooked),
+                lookback_seconds=lookback,
+            )
+        return len(unbooked)
 
     async def _run_pipeline(
         self,

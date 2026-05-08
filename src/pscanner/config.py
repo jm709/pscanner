@@ -461,6 +461,12 @@ class PaperTradingConfig(_Section):
     starting_bankroll_usd: float = 1000.0
     min_position_cost_usd: float = 0.50
     resolver_scan_interval_seconds: float = 300.0
+    replay_lookback_seconds: int = 0
+    """On boot, replay alerts emitted in the last N seconds that don't yet have
+    a paper_trades entry through the evaluator pipeline. ``0`` disables the
+    replay (default). Set to e.g. ``900`` (15 minutes) to recover from a
+    daemon restart without losing in-flight alerts. See issue #105.
+    """
     evaluators: EvaluatorsConfig = Field(default_factory=EvaluatorsConfig)
 
 

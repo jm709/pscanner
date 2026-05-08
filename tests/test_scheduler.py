@@ -60,6 +60,7 @@ from pscanner.store.repo import (
 )
 from pscanner.strategies.evaluators import MonotoneEvaluator
 from pscanner.strategies.paper_resolver import PaperResolver
+from pscanner.strategies.paper_trader import PaperTrader
 from pscanner.util.clock import FakeClock
 
 
@@ -1072,5 +1073,34 @@ async def test_scanner_wires_monotone_evaluator_when_paper_enabled(db_path: Path
     try:
         evaluators = scanner._build_paper_evaluators()
         assert any(isinstance(e, MonotoneEvaluator) for e in evaluators)
+    finally:
+        await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_replay_paper_trader_calls_replay_when_present(db_path: Path) -> None:
+    """``_replay_paper_trader`` invokes ``replay_unbooked`` on the registered trader."""
+    config = _make_config(enable_paper_trading=True)
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    try:
+        trader = scanner._detectors["paper_trader"]
+        assert isinstance(trader, PaperTrader)
+        trader.replay_unbooked = AsyncMock(return_value=3)  # type: ignore[method-assign]
+        await scanner._replay_paper_trader()
+        trader.replay_unbooked.assert_awaited_once_with()
+    finally:
+        await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_replay_paper_trader_noop_when_disabled(db_path: Path) -> None:
+    """No-op when paper_trading is disabled (no PaperTrader in detectors)."""
+    config = _make_config(enable_paper_trading=False)
+    clients = _make_clients()
+    scanner = Scanner(config=config, db_path=db_path, clients=clients)
+    try:
+        assert "paper_trader" not in scanner._detectors
+        await scanner._replay_paper_trader()  # must not raise
     finally:
         await scanner.aclose()
