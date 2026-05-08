@@ -315,8 +315,17 @@ class GateModelConfig(_Section):
 
     enabled: bool = False
     artifact_dir: Path = Field(default=Path("models/current"))
-    min_pred: float = 0.7
-    min_edge_pct: float = 0.01
+    min_pred: float = 0.5
+    """Sanity floor — never bet on outcomes the model thinks are <50% likely
+    to win. The previous default ``0.7`` dominated the edge gate and
+    systematically excluded the long-shot mispricing signal (high edge,
+    low pred). See issue #106 for the realized-edge analysis behind this.
+    """
+    min_edge_pct: float = 0.05
+    """Meaningful edge floor (5pp). Pairs with the lowered ``min_pred=0.5``
+    so the gate does economic work instead of being a 1pp formality. See
+    issue #106.
+    """
     accepted_categories: tuple[str, ...] | None = None
     queue_max_size: int = 1024
     platform: str = "polymarket"
