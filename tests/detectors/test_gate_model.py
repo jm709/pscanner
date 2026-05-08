@@ -369,8 +369,9 @@ def test_resolve_outcome_logs_when_no_market_cache(tmp_path: Path) -> None:
             assert detector._resolve_outcome_side(trade) == ""
     finally:
         conn.close()
-    events = [log["event"] for log in logs]
-    assert "gate_model.no_market_cache" in events
+    matches = [log for log in logs if log["event"] == "gate_model.no_market_cache"]
+    assert len(matches) == 1
+    assert matches[0]["condition_id"] == "0xc1"
 
 
 def test_resolve_outcome_logs_when_market_not_cached(tmp_path: Path) -> None:
@@ -432,6 +433,7 @@ def test_resolve_outcome_logs_when_outcome_not_binary(tmp_path: Path) -> None:
     matches = [log for log in logs if log["event"] == "gate_model.outcome_not_binary"]
     assert len(matches) == 1
     assert matches[0]["outcome"] == "Trump"
+    assert matches[0]["outcome_normalized"] == "TRUMP"
 
 
 def test_resolve_outcome_logs_when_asset_id_not_found(tmp_path: Path) -> None:

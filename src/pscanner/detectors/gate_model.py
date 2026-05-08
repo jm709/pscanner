@@ -213,7 +213,11 @@ class GateModelDetector(TradeDrivenDetector):
         trade — see issue #101 for the failure mode this guards against.
         """
         if self._market_cache is None:
-            _LOG.debug("gate_model.no_market_cache", tx=trade.transaction_hash)
+            _LOG.debug(
+                "gate_model.no_market_cache",
+                tx=trade.transaction_hash,
+                condition_id=trade.condition_id,
+            )
             return ""
         cached = self._market_cache.get_by_condition_id(trade.condition_id)
         if cached is None:
@@ -232,6 +236,7 @@ class GateModelDetector(TradeDrivenDetector):
                     "gate_model.outcome_not_binary",
                     tx=trade.transaction_hash,
                     outcome=name,
+                    outcome_normalized=upper,
                 )
                 return ""
         _LOG.debug(
