@@ -14,7 +14,7 @@ import pytest
 import xgboost as xgb
 
 from pscanner.collectors.market_scoped_trades import MarketScopedTradeCollector
-from pscanner.config import Config, GateModelConfig, GateModelMarketFilterConfig
+from pscanner.config import Config, GateModelConfig, GateModelMarketFilterConfig, MarketsConfig
 from pscanner.corpus.db import init_corpus_db
 from pscanner.corpus.repos import (
     CorpusMarket,
@@ -104,10 +104,12 @@ def _make_config(
     artifact_dir: Path,
     gate_enabled: bool,
     filter_enabled: bool,
+    markets_enabled: bool = True,
 ) -> Config:
     return Config(
         gate_model=GateModelConfig(enabled=gate_enabled, artifact_dir=artifact_dir),
         gate_model_market_filter=GateModelMarketFilterConfig(enabled=filter_enabled),
+        markets=MarketsConfig(enabled=markets_enabled),
     )
 
 
@@ -168,6 +170,46 @@ async def test_preflight_passes_when_wallet_state_seeded(tmp_path: Path) -> None
     artifact_dir = tmp_path / "model"
     _train_dummy_model(artifact_dir)
     cfg = _make_config(artifact_dir=artifact_dir, gate_enabled=True, filter_enabled=True)
+    clients = _make_stub_clients()
+    scanner = Scanner(config=cfg, db_path=tmp_path / "daemon.sqlite3", clients=clients)
+    try:
+        _seed_wallet_state_live(scanner)
+        scanner.preflight()  # no exception
+    finally:
+        await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_preflight_refuses_to_start_when_markets_disabled(tmp_path: Path) -> None:
+    """gate_model.enabled requires markets.enabled (issue #101)."""
+    artifact_dir = tmp_path / "model"
+    _train_dummy_model(artifact_dir)
+    cfg = _make_config(
+        artifact_dir=artifact_dir,
+        gate_enabled=True,
+        filter_enabled=True,
+        markets_enabled=False,
+    )
+    clients = _make_stub_clients()
+    scanner = Scanner(config=cfg, db_path=tmp_path / "daemon.sqlite3", clients=clients)
+    try:
+        _seed_wallet_state_live(scanner)  # bypass the wallet_state_live gate
+        with pytest.raises(RuntimeError, match=r"markets\.enabled"):
+            scanner.preflight()
+    finally:
+        await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_preflight_passes_when_markets_enabled(tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "model"
+    _train_dummy_model(artifact_dir)
+    cfg = _make_config(
+        artifact_dir=artifact_dir,
+        gate_enabled=True,
+        filter_enabled=True,
+        markets_enabled=True,
+    )
     clients = _make_stub_clients()
     scanner = Scanner(config=cfg, db_path=tmp_path / "daemon.sqlite3", clients=clients)
     try:

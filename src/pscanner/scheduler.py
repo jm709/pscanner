@@ -513,9 +513,13 @@ class Scanner:
     def preflight(self) -> None:
         """Run startup checks before entering the run loop.
 
-        When ``gate_model`` is enabled, refuses to start unless
-        ``wallet_state_live`` has been populated via
-        ``pscanner daemon bootstrap-features``.
+        When ``gate_model`` is enabled, refuses to start unless:
+        - ``wallet_state_live`` has been populated via
+          ``pscanner daemon bootstrap-features``.
+        - ``markets.enabled`` is true (the markets collector populates the
+          ``MarketCacheRepo`` that ``GateModelDetector._resolve_outcome_side``
+          depends on; without it, every trade silently drops to ``""`` —
+          see issue #101).
         """
         if not self._config.gate_model.enabled:
             return
@@ -524,6 +528,14 @@ class Scanner:
             msg = (
                 "gate_model.enabled=true but wallet_state_live is empty. "
                 "Run `pscanner daemon bootstrap-features` first."
+            )
+            raise RuntimeError(msg)
+        if not self._config.markets.enabled:
+            msg = (
+                "gate_model.enabled=true but markets.enabled=false. "
+                "The gate-model detector requires the markets collector to "
+                "populate MarketCacheRepo (used to map asset_id -> YES/NO). "
+                "Set [markets] enabled = true in your config."
             )
             raise RuntimeError(msg)
 
