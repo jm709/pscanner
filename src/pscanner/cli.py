@@ -42,6 +42,7 @@ from pscanner.store.repo import (
     AlertsRepo,
     PaperSummary,
     PaperTradesRepo,
+    PredBucketSummary,
     SourceSummary,
     WatchlistEntry,
     WatchlistRepo,
@@ -443,6 +444,7 @@ def _cmd_paper_status(config: Config) -> int:
         best = _paper_extreme_rows(conn, order="DESC")
         worst = _paper_extreme_rows(conn, order="ASC")
         sources = paper.summary_by_source()
+        pred_buckets = paper.summary_by_pred_bucket()
     finally:
         conn.close()
     console = Console(highlight=False)
@@ -451,6 +453,7 @@ def _cmd_paper_status(config: Config) -> int:
     _print_paper_extremes(console, "top 3 best settled trades", best)
     _print_paper_extremes(console, "top 3 worst settled trades", worst)
     _print_paper_sources(console, sources)
+    _print_paper_pred_buckets(console, pred_buckets)
     return 0
 
 
@@ -567,4 +570,28 @@ def _print_paper_sources(console: Console, sources: list[SourceSummary]) -> None
             f"  {det:<20s} {variant:<8s} "
             f"{s.open_count:>5d} {s.resolved_count:>9d} "
             f"{s.realized_pnl:>+9.2f} {s.win_rate * 100:>8.1f}%",
+        )
+
+
+def _print_paper_pred_buckets(
+    console: Console,
+    buckets: list[PredBucketSummary],
+) -> None:
+    """Render the per-pred-bucket gate-model breakdown, skipping when empty.
+
+    Issue #106: makes the variance/calibration question empirical — operators
+    can see whether the booked edge in the 0.5-0.6 bucket actually realizes
+    over enough resolutions, vs. raising the floor on assumption.
+    """
+    if not buckets:
+        return
+    console.print("")
+    console.print("Per-pred-bucket breakdown (gate_buy):")
+    header = f"  {'pred':<10s} {'open':>5s} {'resolved':>9s} {'pnl':>9s} {'win_rate':>9s}"
+    console.print(header)
+    for b in buckets:
+        console.print(
+            f"  {b.bucket_label:<10s} "
+            f"{b.open_count:>5d} {b.resolved_count:>9d} "
+            f"{b.realized_pnl:>+9.2f} {b.win_rate * 100:>8.1f}%",
         )
