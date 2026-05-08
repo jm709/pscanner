@@ -18,12 +18,14 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from pscanner.categories import categorize_event
+from pscanner.corpus.features import MarketMetadata
 from pscanner.poly.ids import AssetId, ConditionId
 from pscanner.store.repo import WalletTrade
 from pscanner.util.clock import Clock, RealClock
 
 if TYPE_CHECKING:
     from pscanner.config import GateModelMarketFilterConfig
+    from pscanner.daemon.live_history import LiveHistoryProvider
     from pscanner.poly.data import DataClient
     from pscanner.poly.gamma import GammaClient
 
@@ -42,11 +44,19 @@ class MarketScopedTradeCollector:
         config: GateModelMarketFilterConfig,
         gamma: GammaClient,
         data_client: DataClient,
+        provider: LiveHistoryProvider | None = None,
     ) -> None:
-        """Initialize the collector with configuration and API clients."""
+        """Initialize the collector with configuration and API clients.
+
+        ``provider``, when supplied, receives :class:`MarketMetadata` for every
+        candidate market enumerated by :meth:`refresh_market_set`. This is how
+        live open markets (not yet in ``corpus_markets``) become visible to
+        :class:`GateModelDetector` (issue #102).
+        """
         self._config = config
         self._gamma = gamma
         self._data_client = data_client
+        self._provider = provider
         self._markets: list[str] = []
         self._callbacks: list[Callable[[WalletTrade], None]] = []
         self._last_seen_ts: dict[str, int] = {}
@@ -56,7 +66,15 @@ class MarketScopedTradeCollector:
         self._callbacks.append(callback)
 
     async def refresh_market_set(self) -> list[str]:
-        """Enumerate events, filter by category + volume, return top-N condition_ids."""
+        """Enumerate events, filter by category + volume, return top-N condition_ids.
+
+        Side-effect: when ``provider`` was supplied at construction, every
+        market that passes the category + volume gate gets a
+        :class:`MarketMetadata` entry pushed into the provider. We seed every
+        candidate (not just the top-N selected) because a market that drops
+        out of the top-N this cycle could re-enter on the next refresh, and
+        callers may have already enqueued trades for it.
+        """
         accepted = set(self._config.accepted_categories)
         floor = self._config.min_volume_24h_usd
         candidates: list[tuple[float, str]] = []
@@ -71,7 +89,22 @@ class MarketScopedTradeCollector:
                 volume = float(market.volume or 0.0)
                 if volume < floor:
                     continue
-                candidates.append((volume, str(cond_id)))
+                cond_id_str = str(cond_id)
+                candidates.append((volume, cond_id_str))
+                if self._provider is not None:
+                    # Live market: no resolution timestamp yet. closed_at/opened_at
+                    # default to 0 — only `category` is load-bearing at inference.
+                    # `time_to_resolution_seconds` reads `closed_at` but is in
+                    # LEAKAGE_COLS and dropped before the booster sees it.
+                    self._provider.set_market_metadata(
+                        cond_id_str,
+                        MarketMetadata(
+                            condition_id=cond_id_str,
+                            category=category,
+                            closed_at=0,
+                            opened_at=0,
+                        ),
+                    )
         candidates.sort(reverse=True)
         selected = [cid for _, cid in candidates[: self._config.max_markets]]
         self._markets = selected
