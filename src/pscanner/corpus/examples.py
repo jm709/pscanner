@@ -177,7 +177,12 @@ def build_features(
     """Build the training_examples table from corpus_trades + resolutions.
 
     Args:
-        trades_repo: Source of raw trades (chronological).
+        trades_repo: Source of raw trades (chronological). Should be
+            constructed against a dedicated read-only connection — see
+            issue #110. Sharing the write connection with ``examples_repo``
+            serializes WAL checkpoints behind the chunk-boundary read
+            transaction; a separate connection lets the cursor stream
+            without contention.
         resolutions_repo: Kept for API compat; the per-trade resolution
             check now reads from the provider's in-memory map (seeded by
             ``_register_resolutions`` at startup) so the hot loop avoids a
