@@ -17,6 +17,7 @@ from __future__ import annotations
 import heapq
 import json
 import sqlite3
+from collections import deque
 from collections.abc import Sequence
 from typing import Protocol, cast, runtime_checkable
 
@@ -128,7 +129,7 @@ class LiveHistoryProvider:
             cumulative_buy_count=row["cumulative_buy_count"],
             realized_pnl_usd=row["realized_pnl_usd"],
             last_trade_ts=row["last_trade_ts"],
-            recent_30d_trades=tuple(json.loads(row["recent_30d_trades_json"])),
+            recent_30d_trades=deque(json.loads(row["recent_30d_trades_json"])),
             bet_size_sum=row["bet_size_sum"],
             bet_size_count=row["bet_size_count"],
             category_counts=dict(json.loads(row["category_counts_json"])),

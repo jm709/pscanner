@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 
 import pytest
@@ -99,7 +100,7 @@ def test_compute_features_with_one_resolved_buy() -> None:
         cumulative_buy_count=1,
         realized_pnl_usd=70.0,
         last_trade_ts=900_000,
-        recent_30d_trades=(900_000,),
+        recent_30d_trades=deque([900_000]),
         bet_size_sum=30.0,
         bet_size_count=1,
         category_counts={"crypto": 1},

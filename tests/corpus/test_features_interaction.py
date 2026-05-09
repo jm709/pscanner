@@ -8,6 +8,7 @@ computed by ``compute_features`` and stored in ``training_examples``.
 from __future__ import annotations
 
 import sqlite3
+from collections import deque
 from dataclasses import dataclass
 
 import pytest
@@ -108,7 +109,7 @@ def _wallet_with_history(
         cumulative_buy_count=cumulative_buy_count,
         realized_pnl_usd=0.0,
         last_trade_ts=None,
-        recent_30d_trades=(),
+        recent_30d_trades=deque(),
         bet_size_sum=bet_size_sum,
         bet_size_count=bet_size_count,
         category_counts={},

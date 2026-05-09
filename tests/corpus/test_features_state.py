@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections import deque
 
 import pytest
 
@@ -44,7 +45,7 @@ def test_empty_wallet_state_has_zero_counts() -> None:
     assert state.cumulative_buy_count == 0
     assert state.realized_pnl_usd == 0.0
     assert state.last_trade_ts is None
-    assert state.recent_30d_trades == ()
+    assert state.recent_30d_trades == deque()
     assert state.bet_size_sum == 0.0
     assert state.bet_size_count == 0
     assert state.category_counts == {}
@@ -74,7 +75,7 @@ def test_apply_buy_appends_recent_window() -> None:
     state = empty_wallet_state(first_seen_ts=0)
     state = apply_buy_to_state(state, _trade(tx_hash="a", ts=1_000))
     state = apply_buy_to_state(state, _trade(tx_hash="b", ts=2_000))
-    assert state.recent_30d_trades == (1_000, 2_000)
+    assert state.recent_30d_trades == deque([1_000, 2_000])
 
 
 def test_apply_resolution_records_win() -> None:

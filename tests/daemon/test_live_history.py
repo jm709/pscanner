@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import sqlite3
+from collections import deque
 from pathlib import Path
 
 import pytest
@@ -78,7 +79,7 @@ def test_wallet_state_returns_empty_for_unknown_wallet() -> None:
     assert state.prior_trades_count == 0
     assert state.prior_buys_count == 0
     assert state.prior_wins == 0
-    assert state.recent_30d_trades == ()
+    assert state.recent_30d_trades == deque()
     assert state.category_counts == {}
 
 
