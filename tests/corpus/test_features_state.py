@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections import deque
 
 import pytest
 
@@ -44,7 +45,7 @@ def test_empty_wallet_state_has_zero_counts() -> None:
     assert state.cumulative_buy_count == 0
     assert state.realized_pnl_usd == 0.0
     assert state.last_trade_ts is None
-    assert state.recent_30d_trades == ()
+    assert state.recent_30d_trades == deque()
     assert state.bet_size_sum == 0.0
     assert state.bet_size_count == 0
     assert state.category_counts == {}
@@ -74,7 +75,7 @@ def test_apply_buy_appends_recent_window() -> None:
     state = empty_wallet_state(first_seen_ts=0)
     state = apply_buy_to_state(state, _trade(tx_hash="a", ts=1_000))
     state = apply_buy_to_state(state, _trade(tx_hash="b", ts=2_000))
-    assert state.recent_30d_trades == (1_000, 2_000)
+    assert state.recent_30d_trades == deque([1_000, 2_000])
 
 
 def test_apply_resolution_records_win() -> None:
@@ -103,3 +104,29 @@ def test_state_immutability() -> None:
     assert state.prior_trades_count == 0
     assert state2.prior_trades_count == 1
     assert math.isclose(state.cumulative_buy_price_sum, 0.0)
+
+
+def test_apply_buy_mutates_category_counts_in_place() -> None:
+    """category_counts is mutated in place — the post-change semantics from #110."""
+    state = empty_wallet_state(first_seen_ts=1_000)
+    trade = Trade(
+        tx_hash="tx1",
+        asset_id="a1",
+        wallet_address="0xw",
+        condition_id="0xc",
+        outcome_side="YES",
+        bs="BUY",
+        price=0.5,
+        size=10.0,
+        notional_usd=5.0,
+        ts=1_500,
+        category="esports",
+    )
+    new_state = apply_buy_to_state(state, trade)
+
+    # The same dict object is shared across both states post-replace.
+    assert new_state.category_counts is state.category_counts
+    assert state.category_counts == {"esports": 1}
+    # The same deque object is shared too.
+    assert new_state.recent_30d_trades is state.recent_30d_trades
+    assert list(state.recent_30d_trades) == [1_500]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json as _json
 import sqlite3 as _sqlite3
 from pathlib import Path
@@ -12,7 +13,12 @@ import pytest
 import respx
 
 from pscanner.corpus import cli as corpus_cli
-from pscanner.corpus.cli import _DEFAULT_SUBGRAPH_ID, build_corpus_parser, run_corpus_command
+from pscanner.corpus.cli import (
+    _DEFAULT_SUBGRAPH_ID,
+    _cmd_build_features,
+    build_corpus_parser,
+    run_corpus_command,
+)
 from pscanner.corpus.db import init_corpus_db
 from pscanner.corpus.repos import AssetEntry, AssetIndexRepo
 from pscanner.corpus.subgraph_ingest import SubgraphRunSummary
@@ -320,3 +326,30 @@ def test_build_features_parser_default_platform_is_polymarket() -> None:
     parser = build_corpus_parser()
     args = parser.parse_args(["build-features"])
     assert args.platform == "polymarket"
+
+
+@pytest.mark.asyncio
+async def test_cli_build_features_uses_separate_read_connection(tmp_path: Path) -> None:
+    """The CLI opens a read-only connection for the chronological cursor (#110)."""
+    db_path = tmp_path / "corpus.sqlite3"
+    init_corpus_db(db_path).close()
+
+    args = argparse.Namespace(
+        db=str(db_path),
+        rebuild=False,
+        platform="polymarket",
+    )
+
+    seen_uris: list[str] = []
+    real_connect = _sqlite3.connect
+
+    def _spy_connect(database: object, *cargs: object, **ckwargs: object) -> object:
+        if ckwargs.get("uri") and "mode=ro" in str(database):
+            seen_uris.append(str(database))
+        return real_connect(database, *cargs, **ckwargs)  # type: ignore[arg-type]
+
+    with patch("pscanner.corpus.cli.sqlite3.connect", side_effect=_spy_connect):
+        rc = await _cmd_build_features(args)
+    assert rc == 0
+    assert seen_uris, "_cmd_build_features must open a read-only connection"
+    assert any("mode=ro" in u for u in seen_uris)

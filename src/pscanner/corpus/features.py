@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import heapq
 import statistics
+from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import Protocol
 
@@ -67,6 +68,12 @@ class WalletState:
 
     Holds enough state to derive every trader feature in
     ``training_examples``. Updated by ``apply_*_to_state`` functions.
+
+    ``recent_30d_trades`` is mutated in place by the apply_* functions
+    (see issue #110 — the previous immutable-tuple rebuild was O(N) per
+    trade and dominated the build-features wall time on heavy wallets).
+    The dataclass stays frozen — only the deque's contents change, not
+    the field reference.
     """
 
     first_seen_ts: int
@@ -79,7 +86,7 @@ class WalletState:
     cumulative_buy_count: int
     realized_pnl_usd: float
     last_trade_ts: int | None
-    recent_30d_trades: tuple[int, ...]
+    recent_30d_trades: deque[int]
     # Running totals for avg_bet_size_usd. Storing the raw bet_sizes
     # tuple would cost O(N) per fold and O(N) per feature read on
     # heavy-hitter wallets — a streaming sum/count keeps both at O(1).
@@ -133,7 +140,7 @@ def empty_wallet_state(*, first_seen_ts: int) -> WalletState:
         cumulative_buy_count=0,
         realized_pnl_usd=0.0,
         last_trade_ts=None,
-        recent_30d_trades=(),
+        recent_30d_trades=deque(),
         bet_size_sum=0.0,
         bet_size_count=0,
         category_counts={},
@@ -151,26 +158,35 @@ def empty_market_state(*, market_age_start_ts: int) -> MarketState:
     )
 
 
-# Rolling-window for `recent_30d_trades` storage. The tuple holds only
+# Rolling-window for `recent_30d_trades` storage. The deque holds only
 # trades within this many seconds of the most recent fold, so the
-# accumulator's per-wallet memory stays bounded for very-active wallets
-# (without a trim, hot wallets create O(N^2) work over the streaming
-# walk: scanning a growing tuple per call). The window matches what
-# `compute_features` reads (30 days), so the trimmed entries are
-# exactly the ones a feature query would have discarded anyway.
+# accumulator's per-wallet memory stays bounded for very-active wallets.
+# The window matches what `compute_features` reads (30 days), so trimmed
+# entries are exactly the ones a feature query would have discarded.
 _RECENT_WINDOW_SECONDS = 30 * 86_400
 
 
-def _trim_recent_trades(recent: tuple[int, ...], current_ts: int) -> tuple[int, ...]:
-    """Drop entries older than ``current_ts - _RECENT_WINDOW_SECONDS``."""
+def _trim_and_append(window: deque[int], current_ts: int) -> None:
+    """Drop entries older than ``current_ts - _RECENT_WINDOW_SECONDS`` and append.
+
+    Mutates ``window`` in place. O(1) amortized per call (popleft + append),
+    versus O(N) for the old tuple rebuild — the change that drives most of
+    issue #110's wall-time reduction.
+    """
     cutoff = current_ts - _RECENT_WINDOW_SECONDS
-    return tuple(ts for ts in recent if ts >= cutoff)
+    while window and window[0] < cutoff:
+        window.popleft()
+    window.append(current_ts)
 
 
 def apply_buy_to_state(state: WalletState, trade: Trade) -> WalletState:
-    """Apply a BUY fill to wallet state. Returns a new WalletState."""
-    new_categories = dict(state.category_counts)
-    new_categories[trade.category] = new_categories.get(trade.category, 0) + 1
+    """Apply a BUY fill to wallet state. Returns a new WalletState.
+
+    Mutates ``state.recent_30d_trades`` and ``state.category_counts`` in
+    place — see :class:`WalletState` for why frozen+mutate is safe.
+    """
+    state.category_counts[trade.category] = state.category_counts.get(trade.category, 0) + 1
+    _trim_and_append(state.recent_30d_trades, trade.ts)
     return replace(
         state,
         prior_trades_count=state.prior_trades_count + 1,
@@ -178,10 +194,8 @@ def apply_buy_to_state(state: WalletState, trade: Trade) -> WalletState:
         cumulative_buy_price_sum=state.cumulative_buy_price_sum + trade.price,
         cumulative_buy_count=state.cumulative_buy_count + 1,
         last_trade_ts=trade.ts,
-        recent_30d_trades=(*_trim_recent_trades(state.recent_30d_trades, trade.ts), trade.ts),
         bet_size_sum=state.bet_size_sum + trade.notional_usd,
         bet_size_count=state.bet_size_count + 1,
-        category_counts=new_categories,
     )
 
 
@@ -192,12 +206,13 @@ def apply_sell_to_state(state: WalletState, trade: _TradeFields) -> WalletState:
     aggregates (avg price paid, bet sizes, win/loss ledger). Accepts any
     object with the SELL-relevant fields so callers can pass either
     ``Trade`` or the bare repo ``CorpusTrade`` without rebuilding.
+    Mutates ``state.recent_30d_trades`` in place.
     """
+    _trim_and_append(state.recent_30d_trades, trade.ts)
     return replace(
         state,
         prior_trades_count=state.prior_trades_count + 1,
         last_trade_ts=trade.ts,
-        recent_30d_trades=(*_trim_recent_trades(state.recent_30d_trades, trade.ts), trade.ts),
     )
 
 

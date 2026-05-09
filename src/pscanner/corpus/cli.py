@@ -495,13 +495,18 @@ async def _run_kalshi_refresh(args: argparse.Namespace) -> int:
 
 async def _cmd_build_features(args: argparse.Namespace) -> int:
     """Rebuild the training_examples table from raw corpus_trades + resolutions."""
-    conn = init_corpus_db(Path(args.db))
+    db_path = Path(args.db)
+    write_conn = init_corpus_db(db_path)
+    # Dedicated read-only connection for the streaming chronological cursor
+    # so writes (INSERT OR IGNORE) don't contend with the read txn (#110).
+    read_conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    read_conn.row_factory = sqlite3.Row
     try:
         written = build_features(
-            trades_repo=CorpusTradesRepo(conn),
-            resolutions_repo=MarketResolutionsRepo(conn),
-            examples_repo=TrainingExamplesRepo(conn),
-            markets_conn=conn,
+            trades_repo=CorpusTradesRepo(read_conn),
+            resolutions_repo=MarketResolutionsRepo(write_conn),
+            examples_repo=TrainingExamplesRepo(write_conn),
+            markets_conn=write_conn,
             now_ts=int(time.time()),
             rebuild=bool(getattr(args, "rebuild", False)),
             platform=args.platform,
@@ -509,7 +514,8 @@ async def _cmd_build_features(args: argparse.Namespace) -> int:
         _log.info("corpus.build_features_done", written=written)
         return 0
     finally:
-        conn.close()
+        read_conn.close()
+        write_conn.close()
 
 
 async def _cmd_onchain_backfill(args: argparse.Namespace) -> int:
