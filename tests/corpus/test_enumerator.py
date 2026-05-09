@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from pscanner.corpus.enumerator import (
-    VOLUME_GATE_USD,
+    _DEFAULT_VOLUME_GATE_USD,
     enumerate_closed_markets,
 )
 from pscanner.corpus.repos import CorpusMarketsRepo
@@ -63,8 +63,8 @@ def _fake_gamma(events: list[Event]) -> MagicMock:
 async def test_enumerate_inserts_above_gate(tmp_corpus_db: sqlite3.Connection) -> None:
     repo = CorpusMarketsRepo(tmp_corpus_db)
     events = [
-        _event("e1", [_market("c1", VOLUME_GATE_USD + 1)]),
-        _event("e2", [_market("c2", VOLUME_GATE_USD - 1)]),
+        _event("e1", [_market("c1", _DEFAULT_VOLUME_GATE_USD + 1)]),
+        _event("e2", [_market("c2", _DEFAULT_VOLUME_GATE_USD - 1)]),
     ]
     inserted = await enumerate_closed_markets(
         gamma=_fake_gamma(events),
@@ -82,7 +82,7 @@ async def test_enumerate_inserts_above_gate(tmp_corpus_db: sqlite3.Connection) -
 @pytest.mark.asyncio
 async def test_enumerate_is_idempotent(tmp_corpus_db: sqlite3.Connection) -> None:
     repo = CorpusMarketsRepo(tmp_corpus_db)
-    events = [_event("e1", [_market("c1", VOLUME_GATE_USD + 1)])]
+    events = [_event("e1", [_market("c1", _DEFAULT_VOLUME_GATE_USD + 1)])]
     await enumerate_closed_markets(
         gamma=_fake_gamma(events), repo=repo, now_ts=1_000, since_ts=None
     )
@@ -100,7 +100,7 @@ async def test_enumerate_skips_open_markets(tmp_corpus_db: sqlite3.Connection) -
     events = [
         _event(
             "e1",
-            [_market("c1", VOLUME_GATE_USD + 1, closed=False)],
+            [_market("c1", _DEFAULT_VOLUME_GATE_USD + 1, closed=False)],
             closed=True,
         )
     ]
@@ -127,7 +127,7 @@ async def test_enumerate_treats_5xx_as_end_of_catalog(
     must persist the markets it already saw rather than aborting the run.
     """
     repo = CorpusMarketsRepo(tmp_corpus_db)
-    events = [_event("e1", [_market("c1", VOLUME_GATE_USD + 1)])]
+    events = [_event("e1", [_market("c1", _DEFAULT_VOLUME_GATE_USD + 1)])]
     stub = MagicMock()
     stub.iter_events = lambda **_kw: _events_then_500(events)
     inserted = await enumerate_closed_markets(gamma=stub, repo=repo, now_ts=1_000, since_ts=None)
@@ -154,7 +154,7 @@ async def test_enumerate_treats_422_as_end_of_catalog(
     deployments. Same handling as 5xx — log and stop the walk cleanly.
     """
     repo = CorpusMarketsRepo(tmp_corpus_db)
-    events = [_event("e1", [_market("c1", VOLUME_GATE_USD + 1)])]
+    events = [_event("e1", [_market("c1", _DEFAULT_VOLUME_GATE_USD + 1)])]
     stub = MagicMock()
     stub.iter_events = lambda **_kw: _events_then_status(events, status=422)
     inserted = await enumerate_closed_markets(gamma=stub, repo=repo, now_ts=1_000, since_ts=None)
@@ -165,8 +165,51 @@ async def test_enumerate_treats_422_as_end_of_catalog(
 async def test_enumerate_propagates_real_4xx(tmp_corpus_db: sqlite3.Connection) -> None:
     """A 404 (or other non-422 4xx) is a real client error — must propagate."""
     repo = CorpusMarketsRepo(tmp_corpus_db)
-    events = [_event("e1", [_market("c1", VOLUME_GATE_USD + 1)])]
+    events = [_event("e1", [_market("c1", _DEFAULT_VOLUME_GATE_USD + 1)])]
     stub = MagicMock()
     stub.iter_events = lambda **_kw: _events_then_status(events, status=404)
     with pytest.raises(httpx.HTTPStatusError):
         await enumerate_closed_markets(gamma=stub, repo=repo, now_ts=1_000, since_ts=None)
+
+
+@pytest.mark.asyncio
+async def test_enumerate_uses_per_category_gate(tmp_corpus_db: sqlite3.Connection) -> None:
+    """Esports markets clear at $100K, but thesis markets at the same volume don't.
+
+    Per issue #109: live daemon polls esports at $100K 24h; corpus must
+    train on the same band to avoid OOD inference.
+    """
+    repo = CorpusMarketsRepo(tmp_corpus_db)
+    esports_event = Event.model_validate(
+        {
+            "id": "ev-e",
+            "title": "T",
+            "slug": "ev-e",
+            "markets": [_market("c-esports", 200_000.0).model_dump(by_alias=True)],
+            "active": False,
+            "closed": True,
+            "tags": [{"label": "Esports"}],
+        }
+    )
+    thesis_event = Event.model_validate(
+        {
+            "id": "ev-t",
+            "title": "T",
+            "slug": "ev-t",
+            "markets": [_market("c-thesis", 200_000.0).model_dump(by_alias=True)],
+            "active": False,
+            "closed": True,
+            "tags": [],
+        }
+    )
+    inserted = await enumerate_closed_markets(
+        gamma=_fake_gamma([esports_event, thesis_event]),
+        repo=repo,
+        now_ts=1_000,
+        since_ts=None,
+    )
+    assert inserted == 1
+    rows = tmp_corpus_db.execute(
+        "SELECT condition_id FROM corpus_markets ORDER BY condition_id"
+    ).fetchall()
+    assert [r["condition_id"] for r in rows] == ["c-esports"]
