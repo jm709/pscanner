@@ -50,6 +50,7 @@ class TestSplit:
     y: np.ndarray  # int32 labels
     implied_prob: np.ndarray  # float32
     top_categories: np.ndarray  # object (str), unencoded — for per-category breakdowns
+    total_volume_usd: np.ndarray  # float32 (n,) — for per-volume-bucket breakdowns (#109)
 
 
 @dataclass
@@ -181,7 +182,34 @@ class StreamingDataset:
             conn.close()
         top_categories = np.array([r[0] for r in rows], dtype=object)
 
-        return TestSplit(x=x, y=y, implied_prob=implied, top_categories=top_categories)
+        # Parallel small SELECT for total_volume_usd, JOINed to corpus_markets
+        # via (platform, condition_id). Used by per_volume_bucket_edge_breakdown
+        # (#109) to stratify the test edge by market lifetime volume.
+        sql_volume = (
+            "SELECT COALESCE(cm.total_volume_usd, 0.0) "
+            "FROM training_examples te "
+            "JOIN _split_markets sm USING (condition_id) "
+            "LEFT JOIN corpus_markets cm "
+            "  ON cm.condition_id = te.condition_id "
+            " AND cm.platform = te.platform "
+            "WHERE te.platform = ? "
+            "ORDER BY te.id"
+        )
+        conn = sqlite3.connect(str(self._db_path))
+        try:
+            _populate_temp_table(conn, "_split_markets", self._test_markets)
+            volume_rows = conn.execute(sql_volume, (self._platform,)).fetchall()
+        finally:
+            conn.close()
+        total_volume_usd = np.array([r[0] for r in volume_rows], dtype=np.float32)
+
+        return TestSplit(
+            x=x,
+            y=y,
+            implied_prob=implied,
+            top_categories=top_categories,
+            total_volume_usd=total_volume_usd,
+        )
 
     def _build_dmatrix(
         self,

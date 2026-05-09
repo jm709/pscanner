@@ -2,18 +2,39 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Final
 
 import httpx
 import structlog
 
-from pscanner.categories import categorize_event
+from pscanner.categories import Category, categorize_event
 from pscanner.corpus.repos import CorpusMarket, CorpusMarketsRepo
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.models import Event
 
 _log = structlog.get_logger(__name__)
-VOLUME_GATE_USD: Final[float] = 1_000_000.0
+
+_DEFAULT_VOLUME_GATE_USD: Final[float] = 1_000_000.0
+"""Lifetime-volume floor for any category not in :data:`VOLUME_GATE_BY_CATEGORY_USD`.
+
+Defaults remain at $1M (the historical corpus floor) so existing categories
+are unaffected. New per-category overrides go in the mapping below.
+"""
+
+VOLUME_GATE_BY_CATEGORY_USD: Final[Mapping[Category, float]] = {
+    Category.ESPORTS: 100_000.0,
+}
+"""Per-category lifetime-volume floors.
+
+Esports drops to ``$100K`` to match the live daemon's
+``gate_model_market_filter.min_volume_24h_usd = 100_000`` floor — the
+previous $1M corpus floor put the live polling target out of distribution
+relative to the training set (issue #109).
+
+Categories not listed fall through to :data:`_DEFAULT_VOLUME_GATE_USD`.
+"""
+
 _HTTP_SERVER_ERROR_FLOOR: Final[int] = 500
 # Polymarket's gamma `/events` uses 422 to signal a deep-offset overflow
 # (mirroring the documented 400 cap on `/trades`). Some deployments
@@ -22,17 +43,23 @@ _HTTP_SERVER_ERROR_FLOOR: Final[int] = 500
 _DEEP_OFFSET_STATUS: Final[int] = 422
 
 
+def _volume_gate_for(category: Category) -> float:
+    """Return the lifetime-volume floor for ``category``."""
+    return VOLUME_GATE_BY_CATEGORY_USD.get(category, _DEFAULT_VOLUME_GATE_USD)
+
+
 def _qualifying_markets(event: Event, now_ts: int) -> list[CorpusMarket]:
     """Return CorpusMarket rows for every market on ``event`` that qualifies."""
     if not event.closed:
         return []
-    category = str(categorize_event(event))
+    category = categorize_event(event)
+    gate = _volume_gate_for(category)
     out: list[CorpusMarket] = []
     for market in event.markets:
         if not market.closed:
             continue
         volume = market.volume or 0.0
-        if volume < VOLUME_GATE_USD:
+        if volume < gate:
             continue
         if market.condition_id is None:
             continue
@@ -40,7 +67,7 @@ def _qualifying_markets(event: Event, now_ts: int) -> list[CorpusMarket]:
             CorpusMarket(
                 condition_id=str(market.condition_id),
                 event_slug=event.slug,
-                category=category,
+                category=str(category),
                 closed_at=now_ts,  # placeholder; mark_complete rewrites this to MAX(trade_ts) once backfill finishes  # noqa: E501
                 total_volume_usd=volume,
                 enumerated_at=now_ts,

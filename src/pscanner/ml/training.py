@@ -20,7 +20,11 @@ import structlog
 import xgboost as xgb
 
 from pscanner.categories import Category
-from pscanner.ml.metrics import per_decile_edge_breakdown, realized_edge_metric
+from pscanner.ml.metrics import (
+    per_decile_edge_breakdown,
+    per_volume_bucket_edge_breakdown,
+    realized_edge_metric,
+)
 from pscanner.ml.preprocessing import (
     CARRIER_COLS,
     LEAKAGE_COLS,
@@ -201,6 +205,7 @@ def evaluate_on_test(
     n_min: int,
     top_category_test: np.ndarray | None = None,
     accepted_categories: tuple[str, ...] | None = None,
+    total_volume_usd_test: np.ndarray | None = None,
 ) -> dict[str, object]:
     """Score the booster on the held-out test split.
 
@@ -216,12 +221,18 @@ def evaluate_on_test(
             computed over the accepted-category subset of taken bets.
         accepted_categories: Category strings to include in the filtered
             edge computation. Ignored when ``top_category_test`` is None.
+        total_volume_usd_test: Optional float array (parallel to ``y_test``)
+            of per-row market lifetime volume. When provided, a
+            ``per_volume_bucket`` breakdown is added to the result so we
+            can tell whether sub-$1M esports markets carry edge after
+            the corpus floor expansion (issue #109).
 
     Returns:
         Dict with keys ``"edge"``, ``"accuracy"``, ``"logloss"``,
         ``"per_decile"``. When both ``top_category_test`` and
         ``accepted_categories`` are supplied, also includes
-        ``"edge_filtered"``.
+        ``"edge_filtered"``. When ``total_volume_usd_test`` is supplied,
+        also includes ``"per_volume_bucket"``.
     """
     dtest = xgb.DMatrix(X_test)
     p_test = booster.predict(dtest)
@@ -247,6 +258,10 @@ def evaluate_on_test(
             p_test[cat_mask],
             implied_prob_test[cat_mask],
             n_min=n_min,
+        )
+    if total_volume_usd_test is not None:
+        result["per_volume_bucket"] = per_volume_bucket_edge_breakdown(
+            y_test, p_test, implied_prob_test, total_volume_usd_test
         )
     return result
 
@@ -427,6 +442,7 @@ def run_study(
         n_min=n_min,
         top_category_test=test.top_categories,
         accepted_categories=resolved_categories,
+        total_volume_usd_test=test.total_volume_usd,
     )
 
     metrics: dict[str, object] = {
@@ -443,6 +459,8 @@ def run_study(
     }
     if "edge_filtered" in test_metrics:
         metrics["test_edge_filtered"] = test_metrics["edge_filtered"]
+    if "per_volume_bucket" in test_metrics:
+        metrics["test_per_volume_bucket"] = test_metrics["per_volume_bucket"]
     _dump_artifacts(output_dir, booster, encoder, metrics, resolved_categories, platform)
     _log.info(
         "ml.study_complete",
