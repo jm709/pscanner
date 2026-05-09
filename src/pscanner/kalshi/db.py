@@ -12,6 +12,8 @@ Tables:
 
 from __future__ import annotations
 
+import sqlite3
+
 KALSHI_SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS kalshi_markets (
@@ -25,6 +27,7 @@ KALSHI_SCHEMA_STATEMENTS: tuple[str, ...] = (
       expected_expiration_time  TEXT NOT NULL DEFAULT '',
       yes_sub_title             TEXT NOT NULL DEFAULT '',
       no_sub_title              TEXT NOT NULL DEFAULT '',
+      result                    TEXT,
       last_price_cents          INTEGER NOT NULL DEFAULT 0,
       yes_bid_cents             INTEGER NOT NULL DEFAULT 0,
       yes_ask_cents             INTEGER NOT NULL DEFAULT 0,
@@ -64,3 +67,40 @@ KALSHI_SCHEMA_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_kalshi_ob_ticker_ts "
     "ON kalshi_orderbook_snapshots(ticker, ts DESC)",
 )
+
+
+_MIGRATIONS: tuple[str, ...] = ("ALTER TABLE kalshi_markets ADD COLUMN result TEXT",)
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """Apply additive ALTER TABLE migrations. Idempotent.
+
+    Each migration is wrapped to swallow ``duplicate column name`` errors
+    so repeated calls on already-migrated DBs are no-ops. Mirrors
+    ``pscanner.manifold.db._apply_migrations``.
+    """
+    for stmt in _MIGRATIONS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" in str(exc).lower():
+                continue
+            raise
+    conn.commit()
+
+
+def init_kalshi_tables(conn: sqlite3.Connection) -> None:
+    """Apply all Kalshi schema statements + migrations to ``conn``.
+
+    Idempotent — safe to call on an already-initialised database. Mirrors
+    ``pscanner.manifold.db.init_manifold_tables``.
+
+    Note: the daemon's ``pscanner.store.db.init_db`` already concatenates
+    ``KALSHI_SCHEMA_STATEMENTS`` into its own schema. This standalone helper
+    exists so tests and any code path that wants Kalshi schema in isolation
+    has a single entry point that includes migrations.
+    """
+    for statement in KALSHI_SCHEMA_STATEMENTS:
+        conn.execute(statement)
+    _apply_migrations(conn)
+    conn.commit()

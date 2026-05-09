@@ -110,6 +110,42 @@ def test_market_defaults_for_optional_fields() -> None:
     assert market.last_price_cents == 0
 
 
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [
+        ("yes", "yes"),
+        ("no", "no"),
+        ("scalar", "scalar"),
+        ("", ""),
+    ],
+)
+def test_kalshi_market_parses_result_field(raw_value: str, expected: str) -> None:
+    """`result` round-trips through validation for all four documented values."""
+    market = KalshiMarket.model_validate(
+        {
+            "ticker": "KX-1",
+            "event_ticker": "KX",
+            "title": "Q?",
+            "status": "finalized",
+            "result": raw_value,
+        }
+    )
+    assert market.result == expected
+
+
+def test_kalshi_market_result_defaults_to_none_when_absent() -> None:
+    """Active markets that haven't settled omit the field; the model defaults to None."""
+    market = KalshiMarket.model_validate(
+        {
+            "ticker": "KX-1",
+            "event_ticker": "KX",
+            "title": "Q?",
+            "status": "active",
+        }
+    )
+    assert market.result is None
+
+
 # ---------------------------------------------------------------------------
 # KalshiOrderbook
 # ---------------------------------------------------------------------------

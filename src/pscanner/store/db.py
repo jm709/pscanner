@@ -11,6 +11,7 @@ import sqlite3
 from pathlib import Path
 
 from pscanner.kalshi.db import KALSHI_SCHEMA_STATEMENTS
+from pscanner.kalshi.db import _apply_migrations as _apply_kalshi_migrations
 from pscanner.manifold.db import MANIFOLD_SCHEMA_STATEMENTS
 
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
@@ -390,6 +391,7 @@ def init_db(path: Path) -> sqlite3.Connection:
             for statement in _SCHEMA_STATEMENTS:
                 conn.execute(statement)
         _apply_migrations(conn)
+        _apply_kalshi_migrations(conn)
     except sqlite3.DatabaseError:
         conn.close()
         raise

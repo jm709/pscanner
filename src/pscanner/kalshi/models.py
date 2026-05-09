@@ -46,6 +46,7 @@ class KalshiMarket(BaseModel):
     expected_expiration_time: str = ""
     yes_sub_title: str = ""
     no_sub_title: str = ""
+    result: str | None = None
 
     # Prices are returned as dollar strings like "0.0900"; coerce to float.
     last_price_dollars: Annotated[float, Field(default=0.0)]

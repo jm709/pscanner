@@ -20,6 +20,8 @@ import structlog
 from pscanner.corpus.db import init_corpus_db
 from pscanner.corpus.enumerator import enumerate_closed_markets
 from pscanner.corpus.examples import build_features
+from pscanner.corpus.kalshi_enumerator import enumerate_resolved_kalshi_markets
+from pscanner.corpus.kalshi_walker import walk_kalshi_market
 from pscanner.corpus.manifold_enumerator import enumerate_resolved_manifold_markets
 from pscanner.corpus.manifold_walker import walk_manifold_market
 from pscanner.corpus.market_walker import walk_market
@@ -35,8 +37,14 @@ from pscanner.corpus.repos import (
     MarketResolutionsRepo,
     TrainingExamplesRepo,
 )
-from pscanner.corpus.resolutions import record_manifold_resolutions, record_resolutions
+from pscanner.corpus.resolutions import (
+    record_kalshi_resolutions,
+    record_manifold_resolutions,
+    record_resolutions,
+)
 from pscanner.corpus.subgraph_ingest import run_subgraph_backfill
+from pscanner.kalshi.client import KalshiClient
+from pscanner.kalshi.ids import KalshiMarketTicker
 from pscanner.manifold.client import ManifoldClient
 from pscanner.manifold.ids import ManifoldMarketId
 from pscanner.poly.data import DataClient
@@ -83,11 +91,12 @@ def build_corpus_parser() -> argparse.ArgumentParser:
     backfill.add_argument(
         "--platform",
         type=str,
-        choices=["polymarket", "manifold"],
+        choices=["polymarket", "manifold", "kalshi"],
         default="polymarket",
         help=(
             "Platform to ingest. Defaults to polymarket. "
-            "`manifold` runs the Manifold REST enumerator + bet walker."
+            "`manifold` runs the Manifold REST enumerator + bet walker. "
+            "`kalshi` runs the Kalshi REST enumerator + per-market trades walker."
         ),
     )
     refresh = sub.add_parser("refresh", help="Incremental pass for newly-resolved markets")
@@ -95,11 +104,12 @@ def build_corpus_parser() -> argparse.ArgumentParser:
     refresh.add_argument(
         "--platform",
         type=str,
-        choices=["polymarket", "manifold"],
+        choices=["polymarket", "manifold", "kalshi"],
         default="polymarket",
         help=(
             "Platform to ingest. Defaults to polymarket. "
-            "`manifold` re-enumerates resolved markets and records resolutions."
+            "`manifold` re-enumerates resolved markets and records resolutions. "
+            "`kalshi` re-enumerates settled markets and records resolutions."
         ),
     )
     bf = sub.add_parser("build-features", help="Rebuild training_examples from raw events")
@@ -300,6 +310,8 @@ async def _cmd_backfill(args: argparse.Namespace) -> int:
     """Run the corpus backfill for the requested platform."""
     if args.platform == "manifold":
         return await _run_manifold_backfill(args)
+    if args.platform == "kalshi":
+        return await _run_kalshi_backfill(args)
     return await _run_polymarket_backfill(args)
 
 
@@ -345,10 +357,35 @@ async def _run_manifold_backfill(args: argparse.Namespace) -> int:
         conn.close()
 
 
+async def _run_kalshi_backfill(args: argparse.Namespace) -> int:
+    """Kalshi path: enumerate settled binary markets, then walk each one's trades."""
+    conn = init_corpus_db(Path(args.db))
+    markets_repo = CorpusMarketsRepo(conn)
+    trades_repo = CorpusTradesRepo(conn)
+    now_ts = int(time.time())
+    try:
+        async with KalshiClient() as client:
+            await enumerate_resolved_kalshi_markets(client, markets_repo, now_ts=now_ts)
+            while pending := markets_repo.next_pending(limit=10, platform="kalshi"):
+                for market in pending:
+                    await walk_kalshi_market(
+                        client,
+                        markets_repo,
+                        trades_repo,
+                        market_ticker=KalshiMarketTicker(market.condition_id),
+                        now_ts=now_ts,
+                    )
+        return 0
+    finally:
+        conn.close()
+
+
 async def _cmd_refresh(args: argparse.Namespace) -> int:
     """Run the corpus refresh for the requested platform."""
     if args.platform == "manifold":
         return await _run_manifold_refresh(args)
+    if args.platform == "kalshi":
+        return await _run_kalshi_refresh(args)
     return await _run_polymarket_refresh(args)
 
 
@@ -413,6 +450,39 @@ async def _run_manifold_refresh(args: argparse.Namespace) -> int:
                 if row["condition_id"] in missing_set
             ]
             await record_manifold_resolutions(
+                client=client,
+                repo=resolutions_repo,
+                targets=targets,
+                now_ts=now_ts,
+            )
+    finally:
+        conn.close()
+    return 0
+
+
+async def _run_kalshi_refresh(args: argparse.Namespace) -> int:
+    """Kalshi refresh: re-enumerate, then record resolutions for missing markets."""
+    db_path = Path(args.db)
+    conn = init_corpus_db(db_path)
+    markets_repo = CorpusMarketsRepo(conn)
+    resolutions_repo = MarketResolutionsRepo(conn)
+    now_ts = int(time.time())
+    try:
+        async with KalshiClient() as client:
+            await enumerate_resolved_kalshi_markets(client, markets_repo, now_ts=now_ts)
+            rows = conn.execute(
+                "SELECT condition_id, closed_at FROM corpus_markets "
+                "WHERE platform = 'kalshi' AND backfill_state = 'complete'"
+            ).fetchall()
+            condition_ids = [row["condition_id"] for row in rows]
+            missing = resolutions_repo.missing_for(condition_ids, platform="kalshi")
+            missing_set = set(missing)
+            targets = [
+                (row["condition_id"], int(row["closed_at"]))
+                for row in rows
+                if row["condition_id"] in missing_set
+            ]
+            await record_kalshi_resolutions(
                 client=client,
                 repo=resolutions_repo,
                 targets=targets,

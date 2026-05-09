@@ -88,13 +88,13 @@ class KalshiMarketsRepo:
             INSERT OR REPLACE INTO kalshi_markets (
               ticker, event_ticker, title, status, market_type,
               open_time, close_time, expected_expiration_time,
-              yes_sub_title, no_sub_title,
+              yes_sub_title, no_sub_title, result,
               last_price_cents, yes_bid_cents, yes_ask_cents,
               no_bid_cents, no_ask_cents,
               volume_fp, volume_24h_fp, open_interest_fp, cached_at
             ) VALUES (
               ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-              ?, ?, ?, ?, ?, ?, ?, ?, ?
+              ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             (
@@ -108,6 +108,7 @@ class KalshiMarketsRepo:
                 market.expected_expiration_time,
                 market.yes_sub_title,
                 market.no_sub_title,
+                market.result,
                 market.last_price_cents,
                 market.yes_bid_cents,
                 market.yes_ask_cents,
