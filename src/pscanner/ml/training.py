@@ -453,13 +453,14 @@ def run_study(
         "test_accuracy": test_metrics["accuracy"],
         "test_logloss": test_metrics["logloss"],
         "test_per_decile": test_metrics["per_decile"],
-        "test_per_volume_bucket": test_metrics["per_volume_bucket"],
         "split_label_won_rate": rates,
         "seed": seed,
         "accepted_categories": list(resolved_categories),
     }
     if "edge_filtered" in test_metrics:
         metrics["test_edge_filtered"] = test_metrics["edge_filtered"]
+    if "per_volume_bucket" in test_metrics:
+        metrics["test_per_volume_bucket"] = test_metrics["per_volume_bucket"]
     _dump_artifacts(output_dir, booster, encoder, metrics, resolved_categories, platform)
     _log.info(
         "ml.study_complete",
