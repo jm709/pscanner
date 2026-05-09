@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import numpy as np
+import xgboost as xgb
 
 from pscanner.ml.metrics import per_volume_bucket_edge_breakdown
+from pscanner.ml.training import evaluate_on_test
 
 
 def test_buckets_emitted_only_when_taken_bets_present() -> None:
@@ -68,3 +70,35 @@ def test_empty_inputs_return_empty_dict() -> None:
     result = per_volume_bucket_edge_breakdown(y_true, y_pred, implied, volume)
 
     assert result == {}
+
+
+def test_evaluate_on_test_includes_per_volume_bucket() -> None:
+    """`evaluate_on_test` returns ``per_volume_bucket`` when volume array is given."""
+    rng = np.random.default_rng(0)
+    n = 200
+    x = rng.uniform(0, 1, size=(n, 1)).astype(np.float32)
+    y = (x[:, 0] > 0.5).astype(int)
+    booster = xgb.train(
+        params={
+            "objective": "binary:logistic",
+            "max_depth": 2,
+            "tree_method": "hist",
+            "verbosity": 0,
+        },
+        dtrain=xgb.DMatrix(x, label=y),
+        num_boost_round=5,
+    )
+    implied = np.full(n, 0.4, dtype=np.float32)
+    volume = np.full(n, 2_000_000.0, dtype=np.float32)
+
+    result = evaluate_on_test(
+        booster=booster,
+        X_test=x,
+        y_test=y,
+        implied_prob_test=implied,
+        n_min=20,
+        total_volume_usd_test=volume,
+    )
+
+    assert "per_volume_bucket" in result
+    assert "1M-5M" in result["per_volume_bucket"]
