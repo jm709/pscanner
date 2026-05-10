@@ -368,7 +368,7 @@ class CorpusTradesRepo:
         return cur.rowcount or 0
 
     def iter_chronological(
-        self, *, chunk_size: int = 50_000, platform: str = "polymarket"
+        self, *, chunk_size: int = 100_000, platform: str = "polymarket"
     ) -> Iterator[CorpusTrade]:
         """Yield every trade in (ts, tx_hash, asset_id) order for ``platform``.
 
@@ -391,7 +391,11 @@ class CorpusTradesRepo:
         and performs a heap rowid lookup for each fetched row.
 
         Args:
-            chunk_size: Rows per page. Default 50,000 (~5MB resident).
+            chunk_size: Rows per page. Default 100,000 (~10MB resident).
+                Bumped from 50,000 in #114 to amortise the per-chunk
+                SELECT round-trip cost; resident size is bounded by the
+                covering index's per-row payload (~150 bytes x 100K = 15MB
+                worst case, well within the 4 GB read-conn cache).
             platform: Platform to scope iteration to. Default
                 ``"polymarket"`` preserves single-platform behavior for
                 existing callers.

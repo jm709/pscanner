@@ -528,7 +528,7 @@ def test_build_features_emits_progress_events(
         recorded_at=10_001,
     )
 
-    with capture_logs() as logs:  # type: ignore[no-untyped-call]  # ty:ignore[invalid-argument-type]
+    with capture_logs() as logs:  # type: ignore[no-untyped-call]
         build_features(
             trades_repo=trades,
             resolutions_repo=resolutions,
@@ -571,7 +571,7 @@ def test_build_features_checkpoint_fires_on_threshold(
     monkeypatch.setattr(
         TrainingExamplesRepo,
         "checkpoint_wal",
-        lambda self: checkpoints.append(None),  # type: ignore[no-untyped-def]  # ty:ignore[invalid-argument-type]
+        lambda self: checkpoints.append(None),  # type: ignore[no-untyped-def]
     )
 
     _seed_market_metadata(tmp_corpus_db, "cond1")
