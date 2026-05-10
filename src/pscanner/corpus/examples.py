@@ -155,6 +155,57 @@ def _maybe_make_example(
     )
 
 
+# How many condition_ids to include in the WARN payload. Five is enough
+# for an operator to grep the corpus or check `gh issue list` for context;
+# more would clutter the structured-log render without adding diagnostic
+# value (the count itself is the signal).
+_MISSING_RESOLUTIONS_SAMPLE_SIZE: Final[int] = 5
+
+
+def _warn_if_missing_resolutions(markets_conn: sqlite3.Connection, *, platform: str) -> None:
+    """Log a WARN if any complete corpus_markets row lacks a market_resolutions row.
+
+    Defensive diagnostic added in #115: the silent feature-loss symptom
+    (newly-ingested resolved markets producing zero training_examples
+    because no one ran ``pscanner corpus refresh``) is now visible at the
+    start of every ``build-features`` run.
+
+    Read-only — never blocks the build, never raises, never modifies state.
+    Scoped to the ``platform`` arg passed to ``build_features``.
+    """
+    sample_rows = markets_conn.execute(
+        """
+        SELECT m.condition_id
+        FROM corpus_markets m
+        LEFT JOIN market_resolutions r USING (condition_id)
+        WHERE r.condition_id IS NULL
+          AND m.backfill_state = 'complete'
+          AND m.platform = ?
+        LIMIT ?
+        """,
+        (platform, _MISSING_RESOLUTIONS_SAMPLE_SIZE),
+    ).fetchall()
+    if not sample_rows:
+        return
+    count_row = markets_conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM corpus_markets m
+        LEFT JOIN market_resolutions r USING (condition_id)
+        WHERE r.condition_id IS NULL
+          AND m.backfill_state = 'complete'
+          AND m.platform = ?
+        """,
+        (platform,),
+    ).fetchone()
+    _log.warning(
+        "corpus.build_features_missing_resolutions",
+        count=count_row["n"],
+        first_condition_ids=[r["condition_id"] for r in sample_rows],
+        platform=platform,
+    )
+
+
 def _register_resolutions(
     provider: StreamingHistoryProvider,
     markets_conn: sqlite3.Connection,
@@ -223,6 +274,7 @@ def build_features(
     metadata = _load_market_metadata(markets_conn, platform=platform)
     provider = StreamingHistoryProvider(metadata=metadata)
     _register_resolutions(provider, markets_conn, platform=platform)
+    _warn_if_missing_resolutions(markets_conn, platform=platform)
 
     written = _write_examples(
         trades_repo, examples_repo, metadata, provider, now_ts, platform=platform

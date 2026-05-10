@@ -11,6 +11,8 @@ from structlog.testing import capture_logs
 from pscanner.corpus import examples as examples_module
 from pscanner.corpus.examples import build_features
 from pscanner.corpus.repos import (
+    CorpusMarket,
+    CorpusMarketsRepo,
     CorpusTrade,
     CorpusTradesRepo,
     MarketResolution,
@@ -610,3 +612,63 @@ def test_build_features_checkpoint_fires_on_threshold(
     assert len(checkpoints) >= 1, (
         f"expected >=1 checkpoint, got {len(checkpoints)} for written={written}"
     )
+
+
+def test_build_features_warns_on_missing_resolutions(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """build_features logs a WARN for complete markets missing resolutions (#115)."""
+    # Insert a corpus_market with backfill_state='complete' but NO matching
+    # market_resolutions row — the silent-feature-loss state from #115.
+    markets_repo = CorpusMarketsRepo(tmp_corpus_db)
+    markets_repo.insert_pending(
+        CorpusMarket(
+            condition_id="0xmissing1",
+            event_slug="missing-event-one",
+            category="esports",
+            closed_at=1_700_000_000,
+            enumerated_at=1_700_000_000,
+            total_volume_usd=50_000.0,
+            market_slug="missing-one",
+        )
+    )
+    markets_repo.mark_complete("0xmissing1", completed_at=1_700_000_500, truncated=False)
+
+    with capture_logs() as logs:  # type: ignore[no-untyped-call]
+        build_features(
+            trades_repo=CorpusTradesRepo(tmp_corpus_db),
+            resolutions_repo=MarketResolutionsRepo(tmp_corpus_db),
+            examples_repo=TrainingExamplesRepo(tmp_corpus_db),
+            markets_conn=tmp_corpus_db,
+            now_ts=0,
+            rebuild=True,
+            platform="polymarket",
+        )
+
+    warns = [log for log in logs if log.get("event") == "corpus.build_features_missing_resolutions"]
+    assert len(warns) == 1, f"expected 1 WARN, got {len(warns)}: {warns}"
+    sample = warns[0]
+    assert sample["log_level"] == "warning"
+    assert sample["count"] == 1
+    assert sample["first_condition_ids"] == ["0xmissing1"]
+    assert sample["platform"] == "polymarket"
+
+
+def test_build_features_does_not_warn_when_resolutions_present(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """build_features stays quiet when complete markets all have resolutions (#115)."""
+    # Empty corpus — no complete markets means no missing resolutions.
+    with capture_logs() as logs:  # type: ignore[no-untyped-call]
+        build_features(
+            trades_repo=CorpusTradesRepo(tmp_corpus_db),
+            resolutions_repo=MarketResolutionsRepo(tmp_corpus_db),
+            examples_repo=TrainingExamplesRepo(tmp_corpus_db),
+            markets_conn=tmp_corpus_db,
+            now_ts=0,
+            rebuild=True,
+            platform="polymarket",
+        )
+
+    warns = [log for log in logs if log.get("event") == "corpus.build_features_missing_resolutions"]
+    assert warns == []
