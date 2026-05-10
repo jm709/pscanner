@@ -13,6 +13,7 @@ size) — true watermark-incremental is deferred to v2.
 from __future__ import annotations
 
 import sqlite3
+import time
 from typing import Final
 
 import structlog
@@ -40,6 +41,12 @@ _BATCH_SIZE: Final[int] = 5000
 # stops growing under sustained writes. The 6.7h rebuild observed in
 # issue #114 grew the WAL to 12 GB and never auto-truncated.
 _CHECKPOINT_EVERY_N_BATCHES: Final[int] = 50
+# Emit a structlog progress event every N batches so a multi-hour
+# rebuild reports its position to the operator without needing a
+# separate SQL sampler. At _BATCH_SIZE=5000 and N=10 that's one
+# event per 50K rows — fine-grained enough to see the chronological
+# cursor advance, sparse enough to not flood the log.
+_PROGRESS_EVERY_N_BATCHES: Final[int] = 10
 
 
 def _load_market_metadata(
@@ -228,6 +235,34 @@ def build_features(
     return written
 
 
+def _flush_batch(
+    pending: list[TrainingExample],
+    examples_repo: TrainingExamplesRepo,
+    batch_idx: int,
+    *,
+    last_trade_ts: int,
+    start_monotonic: float,
+    written: int,
+) -> int:
+    """Flush ``pending`` to the DB, checkpoint if due, and emit progress.
+
+    Returns the updated ``written`` count.  The caller is responsible for
+    clearing ``pending`` after this returns.
+    """
+    written += examples_repo.insert_or_ignore(pending)
+    if batch_idx % _CHECKPOINT_EVERY_N_BATCHES == 0:
+        examples_repo.checkpoint_wal()
+    if batch_idx % _PROGRESS_EVERY_N_BATCHES == 0:
+        _log.info(
+            "corpus.build_features_progress",
+            rows_emitted=written,
+            batch_idx=batch_idx,
+            last_trade_ts=last_trade_ts,
+            elapsed_seconds=int(time.monotonic() - start_monotonic),
+        )
+    return written
+
+
 def _write_examples(
     trades_repo: CorpusTradesRepo,
     examples_repo: TrainingExamplesRepo,
@@ -244,6 +279,7 @@ def _write_examples(
     """
     written = 0
     batch_idx = 0
+    start_monotonic = time.monotonic()
     pending_examples: list[TrainingExample] = []
 
     for ct in trades_repo.iter_chronological(platform=platform):
@@ -275,11 +311,16 @@ def _write_examples(
             pending_examples.append(example)
         provider.observe(trade)
         if len(pending_examples) >= _BATCH_SIZE:
-            written += examples_repo.insert_or_ignore(pending_examples)
-            pending_examples.clear()
             batch_idx += 1
-            if batch_idx % _CHECKPOINT_EVERY_N_BATCHES == 0:
-                examples_repo.checkpoint_wal()
+            written = _flush_batch(
+                pending_examples,
+                examples_repo,
+                batch_idx,
+                last_trade_ts=ct.ts,
+                start_monotonic=start_monotonic,
+                written=written,
+            )
+            pending_examples.clear()
 
     if pending_examples:
         written += examples_repo.insert_or_ignore(pending_examples)

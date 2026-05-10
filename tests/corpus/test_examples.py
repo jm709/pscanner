@@ -6,6 +6,7 @@ import sqlite3
 from unittest.mock import patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from pscanner.corpus import examples as examples_module
 from pscanner.corpus.examples import build_features
@@ -495,6 +496,64 @@ def test_build_features_incremental_does_not_drop_indexes(
     )
 
     assert drops == []
+
+
+def test_build_features_emits_progress_events(
+    tmp_corpus_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """build_features emits structlog progress events every N batches (#114)."""
+    # Tiny batches: batch_size=2, progress_every=2 → every 2nd batch fires.
+    # 6 BUYs → 3 batches (batch_idx=1,2,3) → progress fires at batch_idx=2.
+    monkeypatch.setattr(examples_module, "_BATCH_SIZE", 2)
+    monkeypatch.setattr(examples_module, "_PROGRESS_EVERY_N_BATCHES", 2)
+
+    _seed_market_metadata(tmp_corpus_db, "cond1")
+    trades = CorpusTradesRepo(tmp_corpus_db)
+    resolutions = MarketResolutionsRepo(tmp_corpus_db)
+    examples = TrainingExamplesRepo(tmp_corpus_db)
+
+    # 6 BUY trades each ≥$10 notional (floor guard in insert_batch).
+    trades.insert_batch(
+        [_trade(tx_hash=f"0x{i}", ts=i * 1_000, notional_usd=40.0) for i in range(1, 7)]
+    )
+    resolutions.upsert(
+        MarketResolution(
+            condition_id="cond1",
+            winning_outcome_index=0,
+            outcome_yes_won=1,
+            resolved_at=10_000,
+            source="gamma",
+        ),
+        recorded_at=10_001,
+    )
+
+    with capture_logs() as logs:  # type: ignore[no-untyped-call]  # ty:ignore[invalid-argument-type]
+        build_features(
+            trades_repo=trades,
+            resolutions_repo=resolutions,
+            examples_repo=examples,
+            markets_conn=tmp_corpus_db,
+            now_ts=20_000,
+            rebuild=True,
+            platform="polymarket",
+        )
+
+    progress_events = [log for log in logs if log.get("event") == "corpus.build_features_progress"]
+    assert len(progress_events) >= 1, f"expected >=1 progress event, got {len(progress_events)}"
+    sample = progress_events[0]
+    assert "rows_emitted" in sample
+    assert "batch_idx" in sample
+    assert "last_trade_ts" in sample
+    assert "elapsed_seconds" in sample
+    # Strengthened (#114): values must be meaningful, not all-zero. The
+    # fixture inserts 6 BUYs at ts=1000..6000; with _BATCH_SIZE=2 and
+    # _PROGRESS_EVERY_N_BATCHES=2 the first event fires at batch_idx=2
+    # after rows with ts up through the 4th BUY have flushed.
+    assert sample["rows_emitted"] > 0
+    assert sample["batch_idx"] == 2
+    assert sample["last_trade_ts"] >= 1_000
+    assert sample["elapsed_seconds"] >= 0
 
 
 def test_build_features_checkpoint_fires_on_threshold(
