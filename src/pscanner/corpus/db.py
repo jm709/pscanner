@@ -61,13 +61,20 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_corpus_trades_market_ts ON corpus_trades(condition_id, ts)",
     "CREATE INDEX IF NOT EXISTS idx_corpus_trades_wallet_ts ON corpus_trades(wallet_address, ts)",
-    # Composite covers chronological keyset pagination
-    # (``CorpusTradesRepo.iter_chronological``) without a temp B-tree sort.
-    # The leading ``platform`` column scopes per-platform iteration to a
-    # contiguous index range; the trailing ``ts, tx_hash, asset_id`` columns
-    # satisfy the keyset-tiebreak ordering.
-    "CREATE INDEX IF NOT EXISTS idx_corpus_trades_platform_ts_tx_asset "
-    "ON corpus_trades(platform, ts, tx_hash, asset_id)",
+    # Covering index for the build-features chronological scan (#114).
+    # The leading ``(platform, ts, tx_hash, asset_id)`` prefix satisfies the
+    # keyset-paginated WHERE clause and ORDER BY so no temp B-tree is needed.
+    # The trailing columns cover every column the ``iter_chronological`` SELECT
+    # reads, eliminating the per-row heap rowid lookup on an existing B-tree
+    # descent entirely.
+    (
+        "CREATE INDEX IF NOT EXISTS idx_corpus_trades_chrono_covering "
+        "ON corpus_trades("
+        "  platform, ts, tx_hash, asset_id, "
+        "  wallet_address, condition_id, outcome_side, bs, "
+        "  price, size, notional_usd"
+        ")"
+    ),
     """
     CREATE TABLE IF NOT EXISTS market_resolutions (
       platform TEXT NOT NULL DEFAULT 'polymarket'
@@ -155,13 +162,51 @@ _PRAGMAS: tuple[str, ...] = (
     "PRAGMA journal_mode=WAL",
     "PRAGMA synchronous=NORMAL",
     "PRAGMA foreign_keys=ON",
+    # Path A perf (#114): ~2 GB write-side page cache (-2000000 KiB ≈
+    # 1.91 GB), and a hard 256 MB cap on the WAL. The 12 GB WAL symptom
+    # from issue #114's 6.7h rebuild was checkpoint starvation under a
+    # long-lived read cursor — auto-checkpoint cadence is a sanity floor,
+    # not the bound. journal_size_limit is the hard cap; Task 4 adds
+    # manual wal_checkpoint(TRUNCATE) calls on the build-features write
+    # path to actively reclaim WAL pages between batches.
+    "PRAGMA cache_size=-2000000",
+    "PRAGMA journal_size_limit=268435456",
+    "PRAGMA temp_store=MEMORY",
 )
+
+# Read-connection PRAGMAs for the build-features chronological cursor.
+# A separate set is needed because the read connection is opened in
+# URI ?mode=ro mode (issue #110) and bypasses ``init_corpus_db``. The
+# ~4 GB cache (-4000000 KiB ≈ 3.81 GB) + 8 GB mmap is sized for a 32 GB corpus on a desktop with
+# 12+ GB RAM allocated to WSL2; ``temp_store=MEMORY`` prevents temp-
+# btree spill onto the same vhdx that already pressures the source
+# read. ``query_only=1`` is belt-and-braces against a future caller
+# accidentally writing through the read connection.
+_READ_PRAGMAS: tuple[str, ...] = (
+    "PRAGMA cache_size=-4000000",
+    "PRAGMA mmap_size=8589934592",
+    "PRAGMA temp_store=MEMORY",
+    "PRAGMA query_only=1",
+)
+
+
+def apply_read_pragmas(conn: sqlite3.Connection) -> None:
+    """Apply Path A read-side PRAGMAs to a connection (#114).
+
+    Idempotent. Use on read-only connections opened outside
+    ``init_corpus_db`` (the build-features chronological cursor is the
+    only current caller).
+    """
+    for pragma in _READ_PRAGMAS:
+        conn.execute(pragma)
+
 
 _MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE corpus_markets ADD COLUMN market_slug TEXT",
-    # Superseded by ``idx_corpus_trades_platform_ts_tx_asset``, which covers
-    # platform/ts-prefix queries (the ``ts``-only single-column index it once
-    # replaced is no longer adequate after PR A's platform-aware indexing).
+    # Superseded by ``idx_corpus_trades_platform_ts_tx_asset``, which itself
+    # is later superseded in this same migration list by
+    # ``idx_corpus_trades_chrono_covering`` (Path A perf, #114) — see the
+    # DROP+CREATE pair appended at the end of _MIGRATIONS.
     "DROP INDEX IF EXISTS idx_corpus_trades_ts",
     "ALTER TABLE corpus_markets ADD COLUMN onchain_trades_count INTEGER",
     # Resume cursor for the per-market targeted on-chain backfill: NULL means
@@ -173,6 +218,20 @@ _MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE training_examples ADD COLUMN win_rate_confidence_weighted REAL NOT NULL DEFAULT 0",
     "ALTER TABLE training_examples ADD COLUMN is_high_quality_wallet INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE training_examples ADD COLUMN bet_size_relative_to_history REAL NOT NULL DEFAULT 1",
+    # Path A perf (#114): the existing 4-column index was non-covering for the
+    # build-features chronological scan, so each fetched row triggered a heap
+    # rowid lookup. Replace with an 11-column index that covers every column the
+    # build-features SELECT reads, leaving the keyset-paginated WHERE-clause
+    # prefix (platform, ts, tx_hash, asset_id) unchanged.
+    "DROP INDEX IF EXISTS idx_corpus_trades_platform_ts_tx_asset",
+    (
+        "CREATE INDEX IF NOT EXISTS idx_corpus_trades_chrono_covering "
+        "ON corpus_trades("
+        "  platform, ts, tx_hash, asset_id, "
+        "  wallet_address, condition_id, outcome_side, bs, "
+        "  price, size, notional_usd"
+        ")"
+    ),
 )
 
 
@@ -312,8 +371,12 @@ def _migrate_corpus_trades_add_platform(conn: sqlite3.Connection) -> None:
             "ON corpus_trades(wallet_address, ts)"
         )
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_corpus_trades_platform_ts_tx_asset "
-            "ON corpus_trades(platform, ts, tx_hash, asset_id)"
+            "CREATE INDEX IF NOT EXISTS idx_corpus_trades_chrono_covering "
+            "ON corpus_trades("
+            "  platform, ts, tx_hash, asset_id, "
+            "  wallet_address, condition_id, outcome_side, bs, "
+            "  price, size, notional_usd"
+            ")"
         )
     duration_s = time.monotonic() - start
     _log.info(

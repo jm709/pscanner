@@ -506,6 +506,47 @@ def test_check_constraint_rejects_invalid_platform() -> None:
         conn.close()
 
 
+def test_init_corpus_db_creates_covering_index(tmp_path: Path) -> None:
+    """The chronological scan index covers every build-features SELECT column (#114)."""
+    db_path = tmp_path / "corpus.sqlite3"
+    conn = init_corpus_db(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='index' AND tbl_name='corpus_trades' "
+            "AND name='idx_corpus_trades_chrono_covering'"
+        ).fetchall()
+        assert len(rows) == 1, "covering index missing"
+
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='index' "
+            "AND name='idx_corpus_trades_platform_ts_tx_asset'"
+        ).fetchall()
+        assert len(rows) == 0, "old non-covering index still present"
+
+        info = conn.execute("PRAGMA index_info(idx_corpus_trades_chrono_covering)").fetchall()
+        cols_in_index = {row["name"] for row in info}
+        required = {
+            "platform",
+            "ts",
+            "tx_hash",
+            "asset_id",
+            "wallet_address",
+            "condition_id",
+            "outcome_side",
+            "bs",
+            "price",
+            "size",
+            "notional_usd",
+        }
+        assert required.issubset(cols_in_index), (
+            f"covering index missing columns: {required - cols_in_index}"
+        )
+    finally:
+        conn.close()
+
+
 def test_cross_platform_rows_coexist() -> None:
     """Same condition_id under different platforms = two distinct rows."""
     conn = init_corpus_db(Path(":memory:"))

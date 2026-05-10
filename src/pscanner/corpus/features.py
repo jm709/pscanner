@@ -108,13 +108,21 @@ class MarketState:
     so per-market state stays O(1) per fold; storing the set in the
     immutable state would require an O(N) tuple/frozenset rebuild on
     every trade for large markets.
+
+    ``recent_prices`` is a bounded deque (maxlen=20) mutated in place by
+    ``apply_trade_to_market`` — the previous tuple-rebuild was O(20) per
+    fold and dominated wall time on the build-features hot loop (#114).
+    The dataclass stays frozen — only the deque's contents change, not
+    the field reference. ``_RECENT_PRICES_MAX`` is module-private but
+    imported by ``pscanner.daemon.live_history`` for deserialization;
+    this cross-module reach is intentional.
     """
 
     market_age_start_ts: int
     volume_so_far_usd: float
     unique_traders_count: int
     last_trade_price: float | None
-    recent_prices: tuple[float, ...]
+    recent_prices: deque[float]
 
 
 @dataclass(frozen=True)
@@ -154,7 +162,7 @@ def empty_market_state(*, market_age_start_ts: int) -> MarketState:
         volume_so_far_usd=0.0,
         unique_traders_count=0,
         last_trade_price=None,
-        recent_prices=(),
+        recent_prices=deque(maxlen=_RECENT_PRICES_MAX),
     )
 
 
@@ -164,6 +172,11 @@ def empty_market_state(*, market_age_start_ts: int) -> MarketState:
 # The window matches what `compute_features` reads (30 days), so trimmed
 # entries are exactly the ones a feature query would have discarded.
 _RECENT_WINDOW_SECONDS = 30 * 86_400
+
+# Bounded rolling-window for recent_prices. Kept as a deque(maxlen) so
+# appends are O(1) without manual trimming. The window matches what
+# compute_features reads (last N prices for volatility).
+_RECENT_PRICES_MAX = 20
 
 
 def _trim_and_append(window: deque[int], current_ts: int) -> None:
@@ -246,13 +259,16 @@ def apply_trade_to_market(
     ``is_new_trader`` is computed by the caller against its own membership
     set — keeping the set out of the immutable state lets per-market
     folds stay O(1) instead of O(N) on the trader count.
+
+    Mutates ``state.recent_prices`` in place — see :class:`MarketState`
+    for why frozen+mutate is safe (#114).
     """
+    state.recent_prices.append(trade.price)
     return replace(
         state,
         volume_so_far_usd=state.volume_so_far_usd + trade.notional_usd,
         unique_traders_count=state.unique_traders_count + (1 if is_new_trader else 0),
         last_trade_price=trade.price,
-        recent_prices=(*state.recent_prices, trade.price)[-20:],
     )
 
 

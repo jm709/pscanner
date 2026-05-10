@@ -19,7 +19,7 @@ from pscanner.corpus.cli import (
     build_corpus_parser,
     run_corpus_command,
 )
-from pscanner.corpus.db import init_corpus_db
+from pscanner.corpus.db import apply_read_pragmas, init_corpus_db
 from pscanner.corpus.repos import AssetEntry, AssetIndexRepo
 from pscanner.corpus.subgraph_ingest import SubgraphRunSummary
 
@@ -353,3 +353,46 @@ async def test_cli_build_features_uses_separate_read_connection(tmp_path: Path) 
     assert rc == 0
     assert seen_uris, "_cmd_build_features must open a read-only connection"
     assert any("mode=ro" in u for u in seen_uris)
+
+
+@pytest.mark.asyncio
+async def test_cli_build_features_applies_read_pragmas(tmp_path: Path) -> None:
+    """The CLI tunes the read connection with Path A PRAGMAs (#114)."""
+    db_path = tmp_path / "corpus.sqlite3"
+    init_corpus_db(db_path).close()
+
+    pragmas_applied: list[str] = []
+    real_apply = apply_read_pragmas
+
+    def _spy_apply(conn: object) -> None:
+        pragmas_applied.append("called")
+        real_apply(conn)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+
+    args = argparse.Namespace(
+        db=str(db_path),
+        rebuild=False,
+        platform="polymarket",
+    )
+    with patch("pscanner.corpus.cli.apply_read_pragmas", side_effect=_spy_apply):
+        rc = await _cmd_build_features(args)
+    assert rc == 0
+    assert pragmas_applied, "apply_read_pragmas must be called by _cmd_build_features"
+
+
+def test_apply_read_pragmas_sets_expected_values(tmp_path: Path) -> None:
+    """``apply_read_pragmas`` configures cache, mmap, temp_store, and query_only."""
+    db_path = tmp_path / "corpus.sqlite3"
+    init_corpus_db(db_path).close()
+
+    conn = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        apply_read_pragmas(conn)
+        assert conn.execute("PRAGMA cache_size").fetchone()[0] == -4000000
+        # mmap_size is clamped by SQLITE_MAX_MMAP_SIZE at compile time (often
+        # ~2 GB on Linux builds). We requested 8 GB; assert it is at least
+        # 1 GB to confirm the PRAGMA fired and wasn't silently ignored.
+        assert conn.execute("PRAGMA mmap_size").fetchone()[0] >= 2**30
+        assert conn.execute("PRAGMA temp_store").fetchone()[0] == 2
+        assert conn.execute("PRAGMA query_only").fetchone()[0] == 1
+    finally:
+        conn.close()

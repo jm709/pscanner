@@ -13,6 +13,7 @@ size) — true watermark-incremental is deferred to v2.
 from __future__ import annotations
 
 import sqlite3
+import time
 from typing import Final
 
 import structlog
@@ -32,7 +33,20 @@ from pscanner.corpus.repos import (
 )
 
 _log = structlog.get_logger(__name__)
-_BATCH_SIZE: Final[int] = 500
+# Path A perf (#114): batches of 5000 cut commit overhead by 10x vs the
+# previous 500. At 15M rows that's ~3K commits vs 30K, recovering ~90s
+# of fixed per-commit work on WSL2 vhdx.
+_BATCH_SIZE: Final[int] = 5000
+# Force a WAL TRUNCATE checkpoint every N batches so the WAL file
+# stops growing under sustained writes. The 6.7h rebuild observed in
+# issue #114 grew the WAL to 12 GB and never auto-truncated.
+_CHECKPOINT_EVERY_N_BATCHES: Final[int] = 50
+# Emit a structlog progress event every N batches so a multi-hour
+# rebuild reports its position to the operator without needing a
+# separate SQL sampler. At _BATCH_SIZE=5000 and N=10 that's one
+# event per 50K rows — fine-grained enough to see the chronological
+# cursor advance, sparse enough to not flood the log.
+_PROGRESS_EVERY_N_BATCHES: Final[int] = 10
 
 
 def _load_market_metadata(
@@ -204,12 +218,68 @@ def build_features(
     del resolutions_repo  # signature kept; reads come from provider/markets_conn
     if rebuild:
         examples_repo.truncate(platform=platform)
+        examples_repo.drop_secondary_indexes()
 
     metadata = _load_market_metadata(markets_conn, platform=platform)
     provider = StreamingHistoryProvider(metadata=metadata)
     _register_resolutions(provider, markets_conn, platform=platform)
 
+    written = _write_examples(
+        trades_repo, examples_repo, metadata, provider, now_ts, platform=platform
+    )
+
+    if rebuild:
+        examples_repo.recreate_secondary_indexes()
+
+    _log.info("corpus.build_features_complete", written=written, rebuild=rebuild)
+    return written
+
+
+def _flush_batch(
+    pending: list[TrainingExample],
+    examples_repo: TrainingExamplesRepo,
+    batch_idx: int,
+    *,
+    last_trade_ts: int,
+    start_monotonic: float,
+    written: int,
+) -> int:
+    """Flush ``pending`` to the DB, checkpoint if due, and emit progress.
+
+    Returns the updated ``written`` count.  The caller is responsible for
+    clearing ``pending`` after this returns.
+    """
+    written += examples_repo.insert_or_ignore(pending)
+    if batch_idx % _CHECKPOINT_EVERY_N_BATCHES == 0:
+        examples_repo.checkpoint_wal()
+    if batch_idx % _PROGRESS_EVERY_N_BATCHES == 0:
+        _log.info(
+            "corpus.build_features_progress",
+            rows_emitted=written,
+            batch_idx=batch_idx,
+            last_trade_ts=last_trade_ts,
+            elapsed_seconds=int(time.monotonic() - start_monotonic),
+        )
+    return written
+
+
+def _write_examples(
+    trades_repo: CorpusTradesRepo,
+    examples_repo: TrainingExamplesRepo,
+    metadata: dict[str, MarketMetadata],
+    provider: StreamingHistoryProvider,
+    now_ts: int,
+    *,
+    platform: str,
+) -> int:
+    """Walk trades chronologically and flush batched training examples.
+
+    Extracted from ``build_features`` to keep cyclomatic complexity within
+    the project limit (≤8 branches per function).
+    """
     written = 0
+    batch_idx = 0
+    start_monotonic = time.monotonic()
     pending_examples: list[TrainingExample] = []
 
     for ct in trades_repo.iter_chronological(platform=platform):
@@ -241,11 +311,18 @@ def build_features(
             pending_examples.append(example)
         provider.observe(trade)
         if len(pending_examples) >= _BATCH_SIZE:
-            written += examples_repo.insert_or_ignore(pending_examples)
+            batch_idx += 1
+            written = _flush_batch(
+                pending_examples,
+                examples_repo,
+                batch_idx,
+                last_trade_ts=ct.ts,
+                start_monotonic=start_monotonic,
+                written=written,
+            )
             pending_examples.clear()
 
     if pending_examples:
         written += examples_repo.insert_or_ignore(pending_examples)
 
-    _log.info("corpus.build_features_complete", written=written, rebuild=rebuild)
     return written
