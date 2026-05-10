@@ -16,11 +16,12 @@ from pscanner.corpus import cli as corpus_cli
 from pscanner.corpus.cli import (
     _DEFAULT_SUBGRAPH_ID,
     _cmd_build_features,
+    _register_missing_polymarket_resolutions,
     build_corpus_parser,
     run_corpus_command,
 )
 from pscanner.corpus.db import apply_read_pragmas, init_corpus_db
-from pscanner.corpus.repos import AssetEntry, AssetIndexRepo
+from pscanner.corpus.repos import AssetEntry, AssetIndexRepo, CorpusMarket, CorpusMarketsRepo
 from pscanner.corpus.subgraph_ingest import SubgraphRunSummary
 
 
@@ -394,5 +395,62 @@ def test_apply_read_pragmas_sets_expected_values(tmp_path: Path) -> None:
         assert conn.execute("PRAGMA mmap_size").fetchone()[0] >= 2**30
         assert conn.execute("PRAGMA temp_store").fetchone()[0] == 2
         assert conn.execute("PRAGMA query_only").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_register_missing_polymarket_resolutions_calls_gamma_for_each_missing(
+    tmp_path: Path,
+) -> None:
+    """Helper finds complete markets with no resolution and calls record_resolutions (#115)."""
+    db_path = tmp_path / "corpus.sqlite3"
+    conn = init_corpus_db(db_path)
+    try:
+        markets_repo = CorpusMarketsRepo(conn)
+        # Two complete markets with valid slugs.
+        markets_repo.insert_pending(
+            CorpusMarket(
+                condition_id="0xabc1",
+                event_slug="event-one",
+                category="esports",
+                closed_at=1_700_000_000,
+                enumerated_at=1_700_000_000,
+                total_volume_usd=50_000.0,
+                market_slug="market-one",
+            )
+        )
+        markets_repo.mark_complete("0xabc1", completed_at=1_700_000_500, truncated=False)
+        markets_repo.insert_pending(
+            CorpusMarket(
+                condition_id="0xabc2",
+                event_slug="event-two",
+                category="esports",
+                closed_at=1_700_001_000,
+                enumerated_at=1_700_001_000,
+                total_volume_usd=80_000.0,
+                market_slug="market-two",
+            )
+        )
+        markets_repo.mark_complete("0xabc2", completed_at=1_700_001_500, truncated=False)
+
+        # determine_outcome_yes_won reads market.outcome_prices (list[float]).
+        # index 0 = YES price >= 0.99 → YES won.
+        fake_market = MagicMock()
+        fake_market.outcome_prices = [1.0, 0.0]
+
+        fake_gamma = MagicMock()
+        fake_gamma.get_market_by_slug = AsyncMock(return_value=fake_market)
+
+        written = await _register_missing_polymarket_resolutions(
+            conn=conn,
+            gamma=fake_gamma,
+            now_ts=1_700_002_000,
+        )
+        assert written == 2
+        rows = conn.execute(
+            "SELECT condition_id FROM market_resolutions WHERE platform = 'polymarket'"
+        ).fetchall()
+        assert {next(iter(r)) for r in rows} == {"0xabc1", "0xabc2"}
     finally:
         conn.close()

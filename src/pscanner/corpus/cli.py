@@ -306,6 +306,42 @@ async def _drain_pending(*, conn: sqlite3.Connection, data: DataClient) -> int:
                 _log.warning("corpus.walk_failed", condition_id=m.condition_id, error=str(exc))
 
 
+async def _register_missing_polymarket_resolutions(
+    *,
+    conn: sqlite3.Connection,
+    gamma: GammaClient,
+    now_ts: int,
+) -> int:
+    """Find complete Polymarket markets without resolutions and register them.
+
+    Selects ``corpus_markets`` rows where ``backfill_state='complete'`` but
+    no matching ``market_resolutions`` row exists, then calls
+    ``record_resolutions`` on the gathered targets. Returns the count of
+    resolutions actually written.
+
+    Used by ``_run_polymarket_refresh`` for the incremental sweep that catches
+    markets whose resolution was silently dropped (see issue #115). Extracted
+    as a standalone helper so ``_run_polymarket_backfill`` can reuse it in the
+    follow-up task without duplicating the SQL.
+    """
+    res_repo = MarketResolutionsRepo(conn)
+    rows = conn.execute(
+        """
+        SELECT m.condition_id, m.market_slug, m.closed_at
+        FROM corpus_markets m
+        LEFT JOIN market_resolutions r USING (condition_id)
+        WHERE r.condition_id IS NULL AND m.backfill_state = 'complete'
+          AND m.market_slug IS NOT NULL AND m.market_slug != ''
+        """
+    ).fetchall()
+    return await record_resolutions(
+        gamma=gamma,
+        repo=res_repo,
+        targets=[(r["condition_id"], r["market_slug"], r["closed_at"]) for r in rows],
+        now_ts=now_ts,
+    )
+
+
 async def _cmd_backfill(args: argparse.Namespace) -> int:
     """Run the corpus backfill for the requested platform."""
     if args.platform == "manifold":
@@ -405,20 +441,9 @@ async def _run_polymarket_refresh(args: argparse.Namespace) -> int:
                 since_ts=since_ts,
             )
             await _drain_pending(conn=conn, data=data)
-            res_repo = MarketResolutionsRepo(conn)
-            rows = conn.execute(
-                """
-                SELECT m.condition_id, m.market_slug, m.closed_at
-                FROM corpus_markets m
-                LEFT JOIN market_resolutions r USING (condition_id)
-                WHERE r.condition_id IS NULL AND m.backfill_state = 'complete'
-                  AND m.market_slug IS NOT NULL AND m.market_slug != ''
-                """
-            ).fetchall()
-            await record_resolutions(
+            await _register_missing_polymarket_resolutions(
+                conn=conn,
                 gamma=gamma,
-                repo=res_repo,
-                targets=[(r["condition_id"], r["market_slug"], r["closed_at"]) for r in rows],
                 now_ts=int(time.time()),
             )
             state.set("last_gamma_sweep_ts", str(int(time.time())), updated_at=int(time.time()))
