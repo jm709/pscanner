@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlite3
 from unittest.mock import patch
 
+import pytest
+
 from pscanner.corpus import examples as examples_module
 from pscanner.corpus.examples import build_features
 from pscanner.corpus.repos import (
@@ -433,3 +435,63 @@ def test_build_features_is_incremental(tmp_corpus_db: sqlite3.Connection) -> Non
     assert written == 1
     count = tmp_corpus_db.execute("SELECT COUNT(*) AS c FROM training_examples").fetchone()["c"]
     assert count == 2
+
+
+def test_build_features_rebuild_drops_and_recreates_secondary_indexes(
+    tmp_corpus_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--rebuild` drops the 3 secondary indexes pre-walk and recreates them post-walk (#114)."""
+    drops: list[str] = []
+    creates: list[str] = []
+    real_drop = TrainingExamplesRepo.drop_secondary_indexes
+    real_recreate = TrainingExamplesRepo.recreate_secondary_indexes
+
+    def _spy_drop(self: TrainingExamplesRepo) -> None:
+        drops.append("drop")
+        real_drop(self)
+
+    def _spy_recreate(self: TrainingExamplesRepo) -> None:
+        creates.append("recreate")
+        real_recreate(self)
+
+    monkeypatch.setattr(TrainingExamplesRepo, "drop_secondary_indexes", _spy_drop)
+    monkeypatch.setattr(TrainingExamplesRepo, "recreate_secondary_indexes", _spy_recreate)
+
+    build_features(
+        trades_repo=CorpusTradesRepo(tmp_corpus_db),
+        resolutions_repo=MarketResolutionsRepo(tmp_corpus_db),
+        examples_repo=TrainingExamplesRepo(tmp_corpus_db),
+        markets_conn=tmp_corpus_db,
+        now_ts=0,
+        rebuild=True,
+        platform="polymarket",
+    )
+
+    assert drops == ["drop"]
+    assert creates == ["recreate"]
+
+
+def test_build_features_incremental_does_not_drop_indexes(
+    tmp_corpus_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-rebuild build_features leaves secondary indexes alone (#114)."""
+    drops: list[str] = []
+    monkeypatch.setattr(
+        TrainingExamplesRepo,
+        "drop_secondary_indexes",
+        lambda self: drops.append("drop"),
+    )
+
+    build_features(
+        trades_repo=CorpusTradesRepo(tmp_corpus_db),
+        resolutions_repo=MarketResolutionsRepo(tmp_corpus_db),
+        examples_repo=TrainingExamplesRepo(tmp_corpus_db),
+        markets_conn=tmp_corpus_db,
+        now_ts=0,
+        rebuild=False,
+        platform="polymarket",
+    )
+
+    assert drops == []

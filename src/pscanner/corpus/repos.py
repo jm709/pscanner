@@ -578,6 +578,29 @@ class TrainingExample:
     platform: str = "polymarket"
 
 
+# Secondary indexes on training_examples — dropped before --rebuild and
+# re-created after, per Path A (#114). The implicit UNIQUE index from
+# the (platform, tx_hash, asset_id, wallet_address) constraint is NOT
+# in this list — INSERT OR IGNORE depends on it and removing it would
+# allow duplicate rows during the rebuild walk.
+_TRAINING_EXAMPLES_SECONDARY_INDEXES: Final[tuple[tuple[str, str], ...]] = (
+    (
+        "idx_training_examples_condition",
+        "CREATE INDEX IF NOT EXISTS idx_training_examples_condition"
+        " ON training_examples(condition_id)",
+    ),
+    (
+        "idx_training_examples_wallet",
+        "CREATE INDEX IF NOT EXISTS idx_training_examples_wallet"
+        " ON training_examples(wallet_address)",
+    ),
+    (
+        "idx_training_examples_label",
+        "CREATE INDEX IF NOT EXISTS idx_training_examples_label ON training_examples(label_won)",
+    ),
+)
+
+
 class TrainingExamplesRepo:
     """Inserts, truncate, and uniqueness lookups against ``training_examples``."""
 
@@ -618,6 +641,48 @@ class TrainingExamplesRepo:
         """Delete every row in ``training_examples`` for the given platform."""
         self._conn.execute("DELETE FROM training_examples WHERE platform = ?", (platform,))
         self._conn.commit()
+
+    def drop_secondary_indexes(self) -> None:
+        """Drop the three non-unique indexes on training_examples (#114).
+
+        Used by ``build_features --rebuild`` to bypass per-row B-tree
+        maintenance during the bulk insert. The implicit UNIQUE index
+        is NOT dropped — ``INSERT OR IGNORE`` depends on it for
+        idempotency.
+        """
+        for name, _ in _TRAINING_EXAMPLES_SECONDARY_INDEXES:
+            self._conn.execute(f"DROP INDEX IF EXISTS {name}")
+        self._conn.commit()
+
+    def recreate_secondary_indexes(self) -> None:
+        """Re-create the three non-unique indexes on training_examples (#114).
+
+        Run after ``--rebuild`` completes the bulk walk. SQLite builds
+        each index in one sorted pass over the now-populated table —
+        substantially faster than maintaining the indexes incrementally
+        across 15M+ inserts.
+
+        Uses ``CREATE INDEX IF NOT EXISTS`` to guard against a caller
+        invoking this method in isolation, outside the ``--rebuild``
+        flow (where ``drop_secondary_indexes`` always runs first and
+        the indexes are guaranteed absent at this point).
+        """
+        for _, ddl in _TRAINING_EXAMPLES_SECONDARY_INDEXES:
+            self._conn.execute(ddl)
+        self._conn.commit()
+
+    def checkpoint_wal(self) -> None:
+        """Force a TRUNCATE checkpoint of the WAL (#114).
+
+        Bounds WAL growth on long-running rebuilds. The default
+        ``wal_autocheckpoint`` cadence is unreliable under sustained
+        write load (#114 observed a 12 GB WAL never auto-truncating
+        across a 6.7h rebuild).
+
+        Note: ``PRAGMA wal_checkpoint`` executes outside a transaction;
+        no commit is issued.
+        """
+        self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     def existing_keys(self, *, platform: str = "polymarket") -> set[tuple[str, str, str]]:
         """Return (tx_hash, asset_id, wallet_address) for the given platform."""

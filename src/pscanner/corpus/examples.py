@@ -204,11 +204,37 @@ def build_features(
     del resolutions_repo  # signature kept; reads come from provider/markets_conn
     if rebuild:
         examples_repo.truncate(platform=platform)
+        examples_repo.drop_secondary_indexes()
 
     metadata = _load_market_metadata(markets_conn, platform=platform)
     provider = StreamingHistoryProvider(metadata=metadata)
     _register_resolutions(provider, markets_conn, platform=platform)
 
+    written = _write_examples(
+        trades_repo, examples_repo, metadata, provider, now_ts, platform=platform
+    )
+
+    if rebuild:
+        examples_repo.recreate_secondary_indexes()
+
+    _log.info("corpus.build_features_complete", written=written, rebuild=rebuild)
+    return written
+
+
+def _write_examples(
+    trades_repo: CorpusTradesRepo,
+    examples_repo: TrainingExamplesRepo,
+    metadata: dict[str, MarketMetadata],
+    provider: StreamingHistoryProvider,
+    now_ts: int,
+    *,
+    platform: str,
+) -> int:
+    """Walk trades chronologically and flush batched training examples.
+
+    Extracted from ``build_features`` to keep cyclomatic complexity within
+    the project limit (≤8 branches per function).
+    """
     written = 0
     pending_examples: list[TrainingExample] = []
 
@@ -247,5 +273,4 @@ def build_features(
     if pending_examples:
         written += examples_repo.insert_or_ignore(pending_examples)
 
-    _log.info("corpus.build_features_complete", written=written, rebuild=rebuild)
     return written
