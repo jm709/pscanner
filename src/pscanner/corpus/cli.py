@@ -17,7 +17,7 @@ from pathlib import Path
 
 import structlog
 
-from pscanner.corpus.db import init_corpus_db
+from pscanner.corpus.db import apply_read_pragmas, init_corpus_db
 from pscanner.corpus.enumerator import enumerate_closed_markets
 from pscanner.corpus.examples import build_features
 from pscanner.corpus.kalshi_enumerator import enumerate_resolved_kalshi_markets
@@ -499,8 +499,11 @@ async def _cmd_build_features(args: argparse.Namespace) -> int:
     write_conn = init_corpus_db(db_path)
     # Dedicated read-only connection for the streaming chronological cursor
     # so writes (INSERT OR IGNORE) don't contend with the read txn (#110).
+    # Tune for a 32 GB DB: ~4 GB cache + 8 GB mmap window so the heap rowid
+    # lookups don't thrash an 8 MB default cache (#114 Path A, Task 1).
     read_conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     read_conn.row_factory = sqlite3.Row
+    apply_read_pragmas(read_conn)
     try:
         written = build_features(
             trades_repo=CorpusTradesRepo(read_conn),

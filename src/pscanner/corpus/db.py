@@ -155,7 +155,44 @@ _PRAGMAS: tuple[str, ...] = (
     "PRAGMA journal_mode=WAL",
     "PRAGMA synchronous=NORMAL",
     "PRAGMA foreign_keys=ON",
+    # Path A perf (#114): ~2 GB write-side page cache (-2000000 KiB ≈
+    # 1.91 GB), and a hard 256 MB cap on the WAL. The 12 GB WAL symptom
+    # from issue #114's 6.7h rebuild was checkpoint starvation under a
+    # long-lived read cursor — auto-checkpoint cadence is a sanity floor,
+    # not the bound. journal_size_limit is the hard cap; Task 4 adds
+    # manual wal_checkpoint(TRUNCATE) calls on the build-features write
+    # path to actively reclaim WAL pages between batches.
+    "PRAGMA cache_size=-2000000",
+    "PRAGMA journal_size_limit=268435456",
+    "PRAGMA temp_store=MEMORY",
 )
+
+# Read-connection PRAGMAs for the build-features chronological cursor.
+# A separate set is needed because the read connection is opened in
+# URI ?mode=ro mode (issue #110) and bypasses ``init_corpus_db``. The
+# ~4 GB cache (-4000000 KiB ≈ 3.81 GB) + 8 GB mmap is sized for a 32 GB corpus on a desktop with
+# 12+ GB RAM allocated to WSL2; ``temp_store=MEMORY`` prevents temp-
+# btree spill onto the same vhdx that already pressures the source
+# read. ``query_only=1`` is belt-and-braces against a future caller
+# accidentally writing through the read connection.
+_READ_PRAGMAS: tuple[str, ...] = (
+    "PRAGMA cache_size=-4000000",
+    "PRAGMA mmap_size=8589934592",
+    "PRAGMA temp_store=MEMORY",
+    "PRAGMA query_only=1",
+)
+
+
+def apply_read_pragmas(conn: sqlite3.Connection) -> None:
+    """Apply Path A read-side PRAGMAs to a connection (#114).
+
+    Idempotent. Use on read-only connections opened outside
+    ``init_corpus_db`` (the build-features chronological cursor is the
+    only current caller).
+    """
+    for pragma in _READ_PRAGMAS:
+        conn.execute(pragma)
+
 
 _MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE corpus_markets ADD COLUMN market_slug TEXT",
