@@ -319,10 +319,11 @@ async def _register_missing_polymarket_resolutions(
     ``record_resolutions`` on the gathered targets. Returns the count of
     resolutions actually written.
 
-    Used by ``_run_polymarket_refresh`` for the incremental sweep that catches
-    markets whose resolution was silently dropped (see issue #115). Extracted
-    as a standalone helper so ``_run_polymarket_backfill`` can reuse it in the
-    follow-up task without duplicating the SQL.
+    Used by both ``_run_polymarket_backfill`` (so a fresh corpus pull
+    finishes feature-ready) and ``_run_polymarket_refresh`` (incremental
+    sweep). The shared helper avoids duplicating the SQL across the two
+    ingest paths. See issue #115 for the silent feature-loss symptom this
+    contract avoids.
     """
     res_repo = MarketResolutionsRepo(conn)
     rows = conn.execute(
