@@ -22,6 +22,7 @@ from collections.abc import Sequence
 from typing import Protocol, cast, runtime_checkable
 
 from pscanner.corpus.features import (
+    _RECENT_PRICES_MAX,  # intentionally imported; see MarketState docstring
     MarketMetadata,
     MarketState,
     Trade,
@@ -202,7 +203,7 @@ class LiveHistoryProvider:
             volume_so_far_usd=row["volume_so_far_usd"],
             unique_traders_count=row["unique_traders_count"],
             last_trade_price=row["last_trade_price"],
-            recent_prices=tuple(json.loads(row["recent_prices_json"])),
+            recent_prices=deque(json.loads(row["recent_prices_json"]), maxlen=_RECENT_PRICES_MAX),
         )
 
     def observe(self, trade: Trade) -> None:
@@ -254,7 +255,10 @@ class LiveHistoryProvider:
                 volume_so_far_usd=market_row["volume_so_far_usd"],
                 unique_traders_count=market_row["unique_traders_count"],
                 last_trade_price=market_row["last_trade_price"],
-                recent_prices=tuple(json.loads(market_row["recent_prices_json"])),
+                recent_prices=deque(
+                    json.loads(market_row["recent_prices_json"]),
+                    maxlen=_RECENT_PRICES_MAX,
+                ),
             )
             traders = set(json.loads(market_row["traders_json"]))
         is_new_trader = trade.wallet_address not in traders

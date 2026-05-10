@@ -130,7 +130,7 @@ def test_compute_features_market_features() -> None:
             volume_so_far_usd=12_345.0,
             unique_traders_count=3,
             last_trade_price=0.45,
-            recent_prices=(0.4, 0.42, 0.45),
+            recent_prices=deque([0.4, 0.42, 0.45], maxlen=20),
         ),
         meta=_meta(),
     )
@@ -162,7 +162,7 @@ def test_compute_features_volatility_null_with_few_prices() -> None:
             volume_so_far_usd=100.0,
             unique_traders_count=1,
             last_trade_price=0.5,
-            recent_prices=(0.5,),
+            recent_prices=deque([0.5], maxlen=20),
         ),
         meta=_meta(),
     )
