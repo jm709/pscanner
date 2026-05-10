@@ -67,6 +67,36 @@ async def test_backfill_command_smokes(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_backfill_command_registers_resolutions(tmp_path: Path) -> None:
+    """`pscanner corpus backfill` registers resolutions before exiting (#115)."""
+    db_path = tmp_path / "corpus.sqlite3"
+    fake_enumerate = AsyncMock(return_value=0)
+    fake_drain = AsyncMock(return_value=0)
+    fake_register = AsyncMock(return_value=0)
+    fake_data_cm = MagicMock()
+    fake_data_cm.__aenter__ = AsyncMock(return_value=AsyncMock())
+    fake_data_cm.__aexit__ = AsyncMock(return_value=None)
+    fake_gamma_cm = MagicMock()
+    fake_gamma_cm.__aenter__ = AsyncMock(return_value=AsyncMock())
+    fake_gamma_cm.__aexit__ = AsyncMock(return_value=None)
+    with (
+        patch("pscanner.corpus.cli.enumerate_closed_markets", fake_enumerate),
+        patch("pscanner.corpus.cli._drain_pending", fake_drain),
+        patch(
+            "pscanner.corpus.cli._register_missing_polymarket_resolutions",
+            fake_register,
+        ),
+        patch("pscanner.corpus.cli._make_data_client", return_value=fake_data_cm),
+        patch("pscanner.corpus.cli._make_gamma_client", return_value=fake_gamma_cm),
+    ):
+        rc = await run_corpus_command(["backfill", "--db", str(db_path)])
+    assert rc == 0
+    fake_enumerate.assert_awaited()
+    fake_drain.assert_awaited()
+    fake_register.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_build_features_command_smokes(tmp_path: Path) -> None:
     db_path = tmp_path / "corpus.sqlite3"
     rc = await run_corpus_command(["build-features", "--db", str(db_path)])

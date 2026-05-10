@@ -352,7 +352,13 @@ async def _cmd_backfill(args: argparse.Namespace) -> int:
 
 
 async def _run_polymarket_backfill(args: argparse.Namespace) -> int:
-    """Bulk-pull every closed qualifying Polymarket market into the corpus."""
+    """Bulk-pull every closed qualifying Polymarket market into the corpus.
+
+    Registers ``market_resolutions`` rows for every newly-completed market
+    before exiting so the corpus is feature-ready (i.e. ``build-features``
+    can produce training_examples without needing a separate ``refresh``
+    run). See issue #115 for the silent feature-loss symptom this avoids.
+    """
     conn = init_corpus_db(Path(args.db))
     try:
         async with AsyncExitStack() as stack:
@@ -365,6 +371,11 @@ async def _run_polymarket_backfill(args: argparse.Namespace) -> int:
                 since_ts=None,
             )
             await _drain_pending(conn=conn, data=data)
+            await _register_missing_polymarket_resolutions(
+                conn=conn,
+                gamma=gamma,
+                now_ts=int(time.time()),
+            )
         return 0
     finally:
         conn.close()

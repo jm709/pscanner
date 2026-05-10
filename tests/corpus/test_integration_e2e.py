@@ -39,6 +39,23 @@ def _events_payload() -> list[dict[str, Any]]:
     ]
 
 
+def _market_by_slug_payload() -> list[dict[str, Any]]:
+    """Gamma /markets?slug=cond1-slug response: YES won (price=1.0)."""
+    return [
+        {
+            "id": "cond1",
+            "conditionId": "cond1",
+            "question": "?",
+            "slug": "cond1-slug",
+            "outcomes": '["Yes","No"]',
+            "outcomePrices": '["1.0","0.0"]',
+            "volume": 2_000_000.0,
+            "active": False,
+            "closed": True,
+        }
+    ]
+
+
 def _trades_page() -> list[dict[str, Any]]:
     return [
         {
@@ -53,28 +70,6 @@ def _trades_page() -> list[dict[str, Any]]:
             "timestamp": 1_000,
         }
     ]
-
-
-def _seed_resolution(db: Path, condition_id: str = "cond1") -> None:
-    """Insert a market_resolutions row directly. The backfill path doesn't
-    fetch resolutions (refresh does); this keeps the test focused on
-    backfill → build-features without exercising the resolution code path.
-    """
-    conn = sqlite3.connect(str(db))
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute(
-            """
-            INSERT INTO market_resolutions
-              (condition_id, winning_outcome_index, outcome_yes_won,
-               resolved_at, source, recorded_at)
-            VALUES (?, 0, 1, 2000, 'gamma', 2001)
-            """,
-            (condition_id,),
-        )
-        conn.commit()
-    finally:
-        conn.close()
 
 
 @pytest.mark.asyncio
@@ -93,11 +88,14 @@ async def test_corpus_backfill_then_build_features_e2e(tmp_path: Path) -> None:
                 json=_trades_page() if int(req.url.params.get("offset") or "0") == 0 else [],
             )
         )
+        rx.get("https://gamma-api.polymarket.com/markets").mock(
+            return_value=Response(200, json=_market_by_slug_payload()),
+        )
 
         rc_backfill = await run_corpus_command(["backfill", "--db", str(db)])
         assert rc_backfill == 0
 
-    _seed_resolution(db)
+    # Backfill auto-registers resolutions (#115); no manual seeding needed.
 
     with respx.mock(assert_all_called=False):
         rc_build = await run_corpus_command(["build-features", "--db", str(db)])
@@ -132,8 +130,11 @@ async def test_corpus_build_features_idempotent(tmp_path: Path) -> None:
                 json=_trades_page() if int(req.url.params.get("offset") or "0") == 0 else [],
             )
         )
+        rx.get("https://gamma-api.polymarket.com/markets").mock(
+            return_value=Response(200, json=_market_by_slug_payload()),
+        )
         await run_corpus_command(["backfill", "--db", str(db)])
-    _seed_resolution(db)
+    # Backfill auto-registers resolutions (#115); no manual seeding needed.
     await run_corpus_command(["build-features", "--db", str(db)])
     await run_corpus_command(["build-features", "--db", str(db)])
 
