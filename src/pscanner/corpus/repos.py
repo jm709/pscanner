@@ -385,10 +385,10 @@ class CorpusTradesRepo:
         order deterministic for the streaming feature pipeline.
 
         Performance depends on
-        ``idx_corpus_trades_platform_ts_tx_asset`` covering the
-        platform-prefixed ORDER BY tuple — without it SQLite falls back
-        to a ``USE TEMP B-TREE FOR ORDER BY`` plan and sorts the entire
-        table per chunk.
+        ``idx_corpus_trades_chrono_covering`` covering the
+        platform-prefixed ORDER BY tuple and every SELECT column — without
+        it SQLite falls back to a ``USE TEMP B-TREE FOR ORDER BY`` plan
+        and performs a heap rowid lookup for each fetched row.
 
         Args:
             chunk_size: Rows per page. Default 50,000 (~5MB resident).
