@@ -495,3 +495,59 @@ def test_build_features_incremental_does_not_drop_indexes(
     )
 
     assert drops == []
+
+
+def test_build_features_checkpoint_fires_on_threshold(
+    tmp_corpus_db: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """checkpoint_wal fires once per N batches during the rebuild walk (#114)."""
+    # Force tiny batches so the test corpus only needs ~5 resolved BUYs
+    # to trigger one checkpoint: batch_size=2, checkpoint_every=2 means
+    # every 2nd batch fires → need >4 rows emitted → 5 BUYs suffice.
+    monkeypatch.setattr(examples_module, "_BATCH_SIZE", 2)
+    monkeypatch.setattr(examples_module, "_CHECKPOINT_EVERY_N_BATCHES", 2)
+
+    checkpoints: list[None] = []
+    monkeypatch.setattr(
+        TrainingExamplesRepo,
+        "checkpoint_wal",
+        lambda self: checkpoints.append(None),  # type: ignore[no-untyped-def]  # ty:ignore[invalid-argument-type]
+    )
+
+    _seed_market_metadata(tmp_corpus_db, "cond1")
+    trades = CorpusTradesRepo(tmp_corpus_db)
+    resolutions = MarketResolutionsRepo(tmp_corpus_db)
+    examples = TrainingExamplesRepo(tmp_corpus_db)
+
+    # Insert 6 BUY trades each ≥$10 notional so none are filtered by the
+    # _NOTIONAL_FLOOR_USD guard in insert_batch. 6 rows → 3 batches of 2
+    # → checkpoint fires at batch_idx=2.
+    trades.insert_batch(
+        [_trade(tx_hash=f"0x{i}", ts=i * 1_000, notional_usd=40.0) for i in range(1, 7)]
+    )
+    resolutions.upsert(
+        MarketResolution(
+            condition_id="cond1",
+            winning_outcome_index=0,
+            outcome_yes_won=1,
+            resolved_at=10_000,
+            source="gamma",
+        ),
+        recorded_at=10_001,
+    )
+
+    written = build_features(
+        trades_repo=trades,
+        resolutions_repo=resolutions,
+        examples_repo=examples,
+        markets_conn=tmp_corpus_db,
+        now_ts=20_000,
+        rebuild=True,
+        platform="polymarket",
+    )
+
+    assert written >= 1
+    assert len(checkpoints) >= 1, (
+        f"expected >=1 checkpoint, got {len(checkpoints)} for written={written}"
+    )

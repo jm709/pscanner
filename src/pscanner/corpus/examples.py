@@ -32,7 +32,14 @@ from pscanner.corpus.repos import (
 )
 
 _log = structlog.get_logger(__name__)
-_BATCH_SIZE: Final[int] = 500
+# Path A perf (#114): batches of 5000 cut commit overhead by 10x vs the
+# previous 500. At 15M rows that's ~3K commits vs 30K, recovering ~90s
+# of fixed per-commit work on WSL2 vhdx.
+_BATCH_SIZE: Final[int] = 5000
+# Force a WAL TRUNCATE checkpoint every N batches so the WAL file
+# stops growing under sustained writes. The 6.7h rebuild observed in
+# issue #114 grew the WAL to 12 GB and never auto-truncated.
+_CHECKPOINT_EVERY_N_BATCHES: Final[int] = 50
 
 
 def _load_market_metadata(
@@ -236,6 +243,7 @@ def _write_examples(
     the project limit (≤8 branches per function).
     """
     written = 0
+    batch_idx = 0
     pending_examples: list[TrainingExample] = []
 
     for ct in trades_repo.iter_chronological(platform=platform):
@@ -269,6 +277,9 @@ def _write_examples(
         if len(pending_examples) >= _BATCH_SIZE:
             written += examples_repo.insert_or_ignore(pending_examples)
             pending_examples.clear()
+            batch_idx += 1
+            if batch_idx % _CHECKPOINT_EVERY_N_BATCHES == 0:
+                examples_repo.checkpoint_wal()
 
     if pending_examples:
         written += examples_repo.insert_or_ignore(pending_examples)
