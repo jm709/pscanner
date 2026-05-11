@@ -29,7 +29,7 @@ import time
 import structlog
 
 from pscanner.alerts.models import Alert, Severity
-from pscanner.categories import Category, categorize_tags, settings_for
+from pscanner.categories import Category, primary_category, settings_for
 from pscanner.config import ConvergenceConfig, SmartMoneyConfig
 from pscanner.detectors.trade_driven import TradeDrivenDetector
 from pscanner.poly.ids import ConditionId
@@ -105,7 +105,7 @@ class ConvergenceDetector(TradeDrivenDetector):
         tags = self._event_tag_cache.get(cached.event_slug)
         if tags is None:
             return
-        category = categorize_tags(tags)
+        category = primary_category(tags)
         window = self._window_seconds_for(category)
         smart_wallets = self._smart_wallets_in_category(category)
         if not smart_wallets:
