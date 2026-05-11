@@ -167,6 +167,10 @@ def categorize_tags(tags: Iterable[str]) -> Category:
     category. Match is case-insensitive. Non-string entries in ``tags``
     are ignored.
 
+    A taxonomy entry is skipped when any of its ``tag_exclusions`` is
+    present in the input tag set, even if its ``tag_labels`` would
+    otherwise match.
+
     Args:
         tags: Iterable of tag label strings.
 
@@ -177,6 +181,8 @@ def categorize_tags(tags: Iterable[str]) -> Category:
     lower = {tag.lower() for tag in tags if isinstance(tag, str)}
     for settings in DEFAULT_TAXONOMY:
         if not settings.tag_labels:
+            continue
+        if any(label.lower() in lower for label in settings.tag_exclusions):
             continue
         if any(label.lower() in lower for label in settings.tag_labels):
             return settings.category

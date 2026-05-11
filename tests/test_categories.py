@@ -180,3 +180,21 @@ def test_culture_movies_classifies_as_culture() -> None:
 def test_fed_event_macro_wins_over_elections_via_priority() -> None:
     """Multi-tag Fed-during-election event: MACRO wins (higher priority)."""
     assert categorize_tags(["Fed Rates", "Global Elections"]) is Category.MACRO
+
+
+def test_crypto_prices_event_does_not_match_crypto() -> None:
+    """Decision A4: tag_exclusions prevents Crypto-Prices recurring markets from CRYPTO."""
+    assert categorize_tags(["Crypto", "Crypto Prices", "Recurring"]) is Category.THESIS
+
+
+def test_crypto_with_no_exclusion_tag_matches_crypto() -> None:
+    """Sanity: a plain ``Crypto`` event still matches CRYPTO."""
+    assert categorize_tags(["Crypto"]) is Category.CRYPTO
+
+
+def test_crypto_excluded_falls_to_next_matching_category() -> None:
+    """If excluded from CRYPTO, the event still has its other tag labels checked."""
+    # An event tagged both Sports and Crypto + Crypto Prices: CRYPTO is excluded,
+    # SPORTS matches. SPORTS has higher priority (listed first in DEFAULT_TAXONOMY),
+    # so the result is SPORTS.
+    assert categorize_tags(["Sports", "Crypto", "Crypto Prices"]) is Category.SPORTS
