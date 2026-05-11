@@ -3,8 +3,12 @@
 Scores every observed trade on top-volume open markets in
 ``accepted_categories`` through a loaded XGBoost gate model. Emits
 ``gate_buy`` alerts when the model's predicted P(win) clears the
-configured floor AND exceeds the implied probability paid AND the
-trade's market category is in ``accepted_categories``.
+configured floor AND exceeds the implied probability paid AND any
+element of ``features.market_categories`` intersects
+``accepted_categories``. Un-backfilled corpus rows (pending #121) gate
+correctly because ``compute_features`` falls back ``MarketMetadata.categories``
+to ``(category,)`` upstream — the detector sees a non-empty tuple in
+every case (Decision C from #119).
 
 Loads ``model.json`` + ``preprocessor.json`` once at construction. Hot
 reload is deferred (v2 — see RFC #77 Q3). The artifact format is the
@@ -193,7 +197,12 @@ class GateModelDetector(TradeDrivenDetector):
             category=metadata.category,
         )
         features = compute_features(feature_trade, self._provider)
-        if self.accepted_categories and features.market_category not in self.accepted_categories:
+        if self.accepted_categories and not set(features.market_categories).intersection(
+            self.accepted_categories
+        ):
+            # ``features.market_categories`` is always non-empty: ``compute_features``
+            # falls back to ``(meta.category,)`` when ``meta.categories`` is empty,
+            # so un-backfilled corpus rows (pending #121) still gate via the primary.
             return
         pred = self._predict_one(features)
         implied = features.implied_prob_at_buy
