@@ -12,6 +12,7 @@ from pscanner.categories import (
     CategorySettings,
     categorize_event,
     categorize_tags,
+    primary_category,
     settings_for,
 )
 from pscanner.poly.models import Event
@@ -198,3 +199,23 @@ def test_crypto_excluded_falls_to_next_matching_category() -> None:
     # SPORTS matches. SPORTS has higher priority (listed first in DEFAULT_TAXONOMY),
     # so the result is SPORTS.
     assert categorize_tags(["Sports", "Crypto", "Crypto Prices"]) is Category.SPORTS
+
+
+def test_primary_category_returns_single_category() -> None:
+    assert primary_category(["Sports"]) is Category.SPORTS
+
+
+def test_primary_category_priority_order_macro_over_elections() -> None:
+    assert primary_category(["Global Elections", "Fed Rates"]) is Category.MACRO
+
+
+def test_primary_category_no_match_falls_back_to_thesis() -> None:
+    assert primary_category(["random-tag-not-in-taxonomy"]) is Category.THESIS
+
+
+def test_primary_category_empty_tags_is_thesis() -> None:
+    assert primary_category([]) is Category.THESIS
+
+
+def test_primary_category_honors_tag_exclusions() -> None:
+    assert primary_category(["Crypto", "Crypto Prices"]) is Category.THESIS

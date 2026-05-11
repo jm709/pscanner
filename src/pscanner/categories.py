@@ -189,6 +189,34 @@ def categorize_tags(tags: Iterable[str]) -> Category:
     return Category.THESIS
 
 
+def primary_category(tags: Iterable[str]) -> Category:
+    """Return the priority-ordered first :class:`Category` match for ``tags``.
+
+    Walks :data:`DEFAULT_TAXONOMY` in tuple order; the first entry whose
+    ``tag_labels`` match (and whose ``tag_exclusions`` do not match) wins.
+    Equivalent to :func:`categorize_tags` today but kept as a stable
+    single-Category accessor so detector dispatch sites have a clear
+    contract independent of any future move to multi-label
+    :func:`categorize_tags` semantics.
+
+    Args:
+        tags: Iterable of tag label strings.
+
+    Returns:
+        The priority-ordered first :class:`Category` match, or
+        :attr:`Category.THESIS` when no labelled entry matches.
+    """
+    lower = {tag.lower() for tag in tags if isinstance(tag, str)}
+    for settings in DEFAULT_TAXONOMY:
+        if not settings.tag_labels:
+            continue
+        if any(label.lower() in lower for label in settings.tag_exclusions):
+            continue
+        if any(label.lower() in lower for label in settings.tag_labels):
+            return settings.category
+    return Category.THESIS
+
+
 def categorize_event(event: Event) -> Category:
     """Categorize an :class:`Event` by its tags.
 
@@ -229,5 +257,6 @@ __all__ = [
     "CategorySettings",
     "categorize_event",
     "categorize_tags",
+    "primary_category",
     "settings_for",
 ]
