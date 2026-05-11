@@ -316,6 +316,7 @@ class FeatureRow:
     side: str
     implied_prob_at_buy: float
     market_category: str
+    market_categories: tuple[str, ...]
     market_volume_so_far_usd: float
     market_unique_traders_so_far: int
     market_age_seconds: int
@@ -437,6 +438,7 @@ def compute_features(trade: Trade, history: HistoryProvider) -> FeatureRow:
         side=trade.outcome_side,
         implied_prob_at_buy=implied_prob,
         market_category=meta.category,
+        market_categories=meta.categories or (meta.category,),
         market_volume_so_far_usd=market.volume_so_far_usd,
         market_unique_traders_so_far=market.unique_traders_count,
         market_age_seconds=trade.ts - market.market_age_start_ts,
