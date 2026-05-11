@@ -1,7 +1,7 @@
 """argparse handlers for ``pscanner corpus`` subcommands.
 
 Covers ``backfill``, ``refresh``, ``build-features``, ``onchain-backfill``,
-``onchain-backfill-targeted``, and ``subgraph-backfill``.
+``onchain-backfill-targeted``, ``subgraph-backfill``, and ``backfill-gamma-tags``.
 Each handler opens ``corpus.sqlite3``, instantiates the required clients with
 their own rate budget, runs the orchestration, and exits with 0 on success.
 """
@@ -20,6 +20,7 @@ import structlog
 from pscanner.corpus.db import apply_read_pragmas, init_corpus_db
 from pscanner.corpus.enumerator import enumerate_closed_markets
 from pscanner.corpus.examples import build_features
+from pscanner.corpus.gamma_tags_backfill import run_backfill_gamma_tags
 from pscanner.corpus.kalshi_enumerator import enumerate_resolved_kalshi_markets
 from pscanner.corpus.kalshi_walker import walk_kalshi_market
 from pscanner.corpus.manifold_enumerator import enumerate_resolved_manifold_markets
@@ -249,6 +250,26 @@ def build_corpus_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Process at most N markets in this run (default: no limit).",
+    )
+    btgt = sub.add_parser(
+        "backfill-gamma-tags",
+        help=(
+            "Backfill corpus_markets.tags_json + categories_json from gamma. "
+            "Idempotent: re-runs skip rows that already have tags or are quarantined."
+        ),
+    )
+    _add_db_arg(btgt)
+    btgt.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Process at most N markets in this run (default: drain the queue).",
+    )
+    btgt.add_argument(
+        "--rpm",
+        type=int,
+        default=50,
+        help="Gamma requests per minute ceiling (default: 50).",
     )
     return parser
 
@@ -667,6 +688,31 @@ async def _cmd_subgraph_backfill(args: argparse.Namespace) -> int:
         conn.close()
 
 
+async def _cmd_backfill_gamma_tags(args: argparse.Namespace) -> int:
+    """Backfill gamma tags into corpus_markets."""
+    conn = init_corpus_db(Path(args.db))
+    try:
+        # Use a one-off GammaClient with the requested rate limit. _GammaCM
+        # hardcodes rpm=50; we instantiate directly to let the operator tune.
+        gamma = GammaClient(rpm=args.rpm)
+        try:
+            summary = await run_backfill_gamma_tags(
+                conn=conn,
+                gamma=gamma,
+                limit=args.limit,
+            )
+        finally:
+            await gamma.aclose()
+        _log.info(
+            "gamma_tags_backfill.cli_summary",
+            markets_processed=summary.markets_processed,
+            markets_quarantined=summary.markets_quarantined,
+        )
+        return 0
+    finally:
+        conn.close()
+
+
 _HANDLERS = {
     "backfill": _cmd_backfill,
     "refresh": _cmd_refresh,
@@ -674,6 +720,7 @@ _HANDLERS = {
     "onchain-backfill": _cmd_onchain_backfill,
     "onchain-backfill-targeted": _cmd_onchain_backfill_targeted,
     "subgraph-backfill": _cmd_subgraph_backfill,
+    "backfill-gamma-tags": _cmd_backfill_gamma_tags,
 }
 
 

@@ -15,6 +15,7 @@ import respx
 from pscanner.corpus import cli as corpus_cli
 from pscanner.corpus.cli import (
     _DEFAULT_SUBGRAPH_ID,
+    _HANDLERS,
     _cmd_build_features,
     _register_missing_polymarket_resolutions,
     build_corpus_parser,
@@ -484,3 +485,21 @@ async def test_register_missing_polymarket_resolutions_calls_gamma_for_each_miss
         assert {next(iter(r)) for r in rows} == {"0xabc1", "0xabc2"}
     finally:
         conn.close()
+
+
+def test_corpus_parser_supports_backfill_gamma_tags() -> None:
+    parser = build_corpus_parser()
+    args = parser.parse_args(["backfill-gamma-tags", "--db", "x.sqlite3", "--limit", "100"])
+    assert args.command == "backfill-gamma-tags"
+    assert args.db == "x.sqlite3"
+    assert args.limit == 100
+
+
+def test_backfill_gamma_tags_handler_registered() -> None:
+    assert "backfill-gamma-tags" in _HANDLERS
+
+
+def test_backfill_gamma_tags_default_rpm_is_50() -> None:
+    parser = build_corpus_parser()
+    args = parser.parse_args(["backfill-gamma-tags", "--db", "x.sqlite3"])
+    assert args.rpm == 50
