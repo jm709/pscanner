@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import pytest
 
 from pscanner.corpus.features import (
+    FeatureRow,
     HistoryProvider,
     MarketMetadata,
     MarketState,
@@ -64,7 +65,7 @@ def _meta(**kwargs: object) -> MarketMetadata:
         "opened_at": 500_000,
     }
     base.update(kwargs)
-    return MarketMetadata(**base)  # type: ignore[arg-type]
+    return MarketMetadata(**base)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
 
 
 def test_compute_features_no_prior_history_yields_nulls() -> None:
@@ -168,3 +169,26 @@ def test_compute_features_volatility_null_with_few_prices() -> None:
     )
     features = compute_features(_trade(), history)
     assert features.price_volatility_recent is None
+
+
+def test_market_metadata_categories_defaults_to_empty_tuple() -> None:
+    meta = MarketMetadata(condition_id="0xc1", category="thesis", closed_at=0, opened_at=0)
+    assert meta.categories == ()
+
+
+def test_market_metadata_accepts_explicit_categories() -> None:
+    meta = MarketMetadata(
+        condition_id="0xc1",
+        category="thesis",
+        closed_at=0,
+        opened_at=0,
+        categories=("macro", "elections"),
+    )
+    assert meta.categories == ("macro", "elections")
+
+
+def test_feature_row_has_market_categories_field() -> None:
+    """``FeatureRow`` carries the multi-label ``market_categories`` tuple."""
+    names = {f.name for f in fields(FeatureRow)}
+    assert "market_categories" in names
+    assert "market_category" in names  # legacy single-string field is retained

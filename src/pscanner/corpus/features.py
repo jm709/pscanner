@@ -127,12 +127,20 @@ class MarketState:
 
 @dataclass(frozen=True)
 class MarketMetadata:
-    """Static per-market metadata. Does not change with time."""
+    """Static per-market metadata. Does not change with time.
+
+    ``categories`` is the multi-label set of every taxonomy category that
+    matches the market's gamma tags (see :func:`pscanner.categories.categorize_tags`).
+    Defaults to ``()`` so callers that only know the primary string
+    ``category`` keep working unchanged; consumers that need multi-label
+    behaviour read ``categories or (category,)`` as the fallback.
+    """
 
     condition_id: str
     category: str
     closed_at: int
     opened_at: int
+    categories: tuple[str, ...] = ()
 
 
 def empty_wallet_state(*, first_seen_ts: int) -> WalletState:
@@ -308,6 +316,7 @@ class FeatureRow:
     side: str
     implied_prob_at_buy: float
     market_category: str
+    market_categories: tuple[str, ...]
     market_volume_so_far_usd: float
     market_unique_traders_so_far: int
     market_age_seconds: int
@@ -429,6 +438,7 @@ def compute_features(trade: Trade, history: HistoryProvider) -> FeatureRow:
         side=trade.outcome_side,
         implied_prob_at_buy=implied_prob,
         market_category=meta.category,
+        market_categories=meta.categories or (meta.category,),
         market_volume_so_far_usd=market.volume_so_far_usd,
         market_unique_traders_so_far=market.unique_traders_count,
         market_age_seconds=trade.ts - market.market_age_start_ts,

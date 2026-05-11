@@ -6,7 +6,7 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
-from pscanner.corpus.db import _SCHEMA_STATEMENTS, init_corpus_db
+from pscanner.corpus.db import _SCHEMA_STATEMENTS, _apply_migrations, init_corpus_db
 
 _EXPECTED_TABLES = {
     "corpus_markets",
@@ -543,6 +543,51 @@ def test_init_corpus_db_creates_covering_index(tmp_path: Path) -> None:
         assert required.issubset(cols_in_index), (
             f"covering index missing columns: {required - cols_in_index}"
         )
+    finally:
+        conn.close()
+
+
+def test_corpus_markets_has_tags_json_column() -> None:
+    conn = init_corpus_db(Path(":memory:"))
+    try:
+        info = conn.execute("PRAGMA table_info(corpus_markets)").fetchall()
+        cols = {row["name"] for row in info}
+        assert "tags_json" in cols
+        assert "categories_json" in cols
+    finally:
+        conn.close()
+
+
+def test_corpus_markets_tags_json_defaults_to_empty_list() -> None:
+    """New rows that omit tags_json / categories_json get the '[]' default."""
+    conn = init_corpus_db(Path(":memory:"))
+    try:
+        conn.execute(
+            """
+            INSERT INTO corpus_markets (
+              platform, condition_id, event_slug, category, closed_at,
+              total_volume_usd, backfill_state, enumerated_at
+            ) VALUES ('polymarket', '0xc1', 'test', 'thesis', 0, 0.0, 'pending', 0)
+            """
+        )
+        row = conn.execute(
+            "SELECT tags_json, categories_json FROM corpus_markets WHERE condition_id = '0xc1'"
+        ).fetchone()
+        assert row["tags_json"] == "[]"
+        assert row["categories_json"] == "[]"
+    finally:
+        conn.close()
+
+
+def test_apply_migrations_is_idempotent_for_new_columns() -> None:
+    """Re-running ``_apply_migrations`` on a populated DB is a no-op."""
+    conn = init_corpus_db(Path(":memory:"))
+    try:
+        _apply_migrations(conn)  # re-run; should swallow "duplicate column name"
+        info = conn.execute("PRAGMA table_info(corpus_markets)").fetchall()
+        cols = {row["name"] for row in info}
+        assert "tags_json" in cols
+        assert "categories_json" in cols
     finally:
         conn.close()
 
