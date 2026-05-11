@@ -127,6 +127,52 @@ class CorpusMarketsRepo:
             for row in rows
         ]
 
+    def iter_unbackfilled_tags(
+        self,
+        *,
+        limit: int | None = None,
+        platform: str = "polymarket",
+    ) -> Iterator[CorpusMarket]:
+        """Yield markets with empty ``tags_json`` (i.e. not yet backfilled).
+
+        Skips rows quarantined with ``tags_json = '__ERROR__'`` — operators
+        re-run those separately by filtering on the sentinel explicitly.
+
+        Args:
+            limit: Cap the number of rows returned. ``None`` returns all
+                unbackfilled rows.
+            platform: Scope to a single platform (default ``polymarket``).
+
+        Yields:
+            ``CorpusMarket`` rows ordered by ``enumerated_at DESC`` so the
+            newest pending rows are processed first.
+        """
+        params: list[object] = [platform]
+        sql = (
+            "SELECT condition_id, event_slug, category, closed_at, "
+            "total_volume_usd, market_slug, enumerated_at, tags_json, categories_json "
+            "FROM corpus_markets "
+            "WHERE platform = ? AND tags_json = '[]' "
+            "ORDER BY enumerated_at DESC"
+        )
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        cur = self._conn.execute(sql, params)
+        for row in cur:
+            yield CorpusMarket(
+                condition_id=row["condition_id"],
+                event_slug=row["event_slug"],
+                category=row["category"],
+                closed_at=row["closed_at"],
+                total_volume_usd=row["total_volume_usd"],
+                market_slug=row["market_slug"] or "",
+                enumerated_at=row["enumerated_at"],
+                platform=platform,
+                tags_json=row["tags_json"],
+                categories_json=row["categories_json"],
+            )
+
     def get_last_offset(self, condition_id: str, *, platform: str = "polymarket") -> int:
         """Return the last offset seen for a market, or 0 if not started."""
         row = self._conn.execute(

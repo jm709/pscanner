@@ -402,3 +402,71 @@ def test_insert_pending_defaults_keep_existing_callers_working(
     ).fetchone()
     assert row["tags_json"] == "[]"
     assert row["categories_json"] == "[]"
+
+
+def test_iter_unbackfilled_tags_returns_only_default_rows(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """Rows with non-default tags_json are skipped."""
+    repo = CorpusMarketsRepo(tmp_corpus_db)
+    unbackfilled = CorpusMarket(
+        condition_id="0xun",
+        event_slug="unbackfilled",
+        category="thesis",
+        closed_at=0,
+        total_volume_usd=1.0,
+        enumerated_at=0,
+        market_slug="",
+    )
+    already_done = CorpusMarket(
+        condition_id="0xdone",
+        event_slug="done",
+        category="sports",
+        closed_at=0,
+        total_volume_usd=1.0,
+        enumerated_at=0,
+        market_slug="",
+        tags_json='["Sports"]',
+        categories_json='["sports"]',
+    )
+    repo.insert_pending(unbackfilled)
+    repo.insert_pending(already_done)
+    slugs = [m.event_slug for m in repo.iter_unbackfilled_tags(limit=100)]
+    assert slugs == ["unbackfilled"]
+
+
+def test_iter_unbackfilled_tags_skips_error_sentinel(tmp_corpus_db: sqlite3.Connection) -> None:
+    """Rows quarantined with tags_json='__ERROR__' are NOT returned."""
+    repo = CorpusMarketsRepo(tmp_corpus_db)
+    repo.insert_pending(
+        CorpusMarket(
+            condition_id="0xer",
+            event_slug="err",
+            category="thesis",
+            closed_at=0,
+            total_volume_usd=1.0,
+            enumerated_at=0,
+            market_slug="",
+            tags_json="__ERROR__",
+        )
+    )
+    rows = list(repo.iter_unbackfilled_tags(limit=100))
+    assert rows == []
+
+
+def test_iter_unbackfilled_tags_honors_limit(tmp_corpus_db: sqlite3.Connection) -> None:
+    repo = CorpusMarketsRepo(tmp_corpus_db)
+    for i in range(5):
+        repo.insert_pending(
+            CorpusMarket(
+                condition_id=f"0x{i}",
+                event_slug=f"e{i}",
+                category="thesis",
+                closed_at=0,
+                total_volume_usd=float(i),
+                enumerated_at=0,
+                market_slug="",
+            )
+        )
+    rows = list(repo.iter_unbackfilled_tags(limit=3))
+    assert len(rows) == 3
