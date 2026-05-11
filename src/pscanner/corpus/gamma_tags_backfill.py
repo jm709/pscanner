@@ -69,12 +69,17 @@ async def run_backfill_gamma_tags(
     for market in repo.iter_unbackfilled_tags(limit=limit):
         try:
             event = await gamma.get_event_by_slug(market.event_slug)
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            # ValueError covers pydantic.ValidationError on malformed
+            # event payloads; TypeError covers the isinstance guard
+            # inside get_event_by_slug. Either would crash the loop and
+            # lose the rest of the queue, so we quarantine and continue.
             _log.warning(
                 "gamma_tags_backfill.fetch_failed",
                 condition_id=market.condition_id,
                 event_slug=market.event_slug,
                 error=str(exc),
+                error_type=type(exc).__name__,
             )
             repo.set_gamma_tags_error(condition_id=market.condition_id)
             quarantined += 1

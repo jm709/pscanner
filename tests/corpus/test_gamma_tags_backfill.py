@@ -110,6 +110,27 @@ async def test_backfill_quarantines_on_http_error() -> None:
         conn.close()
 
 
+async def test_backfill_quarantines_on_malformed_payload() -> None:
+    """A TypeError / ValidationError from gamma is caught and quarantined."""
+    conn = init_corpus_db(Path(":memory:"))
+    try:
+        repo = CorpusMarketsRepo(conn)
+        _seed_unbackfilled(repo, "malformed-event", "0xmal")
+
+        gamma = AsyncMock()
+        gamma.get_event_by_slug.side_effect = TypeError("expected JSON object, got list")
+
+        summary = await run_backfill_gamma_tags(conn=conn, gamma=gamma, limit=None)
+
+        row = conn.execute(
+            "SELECT tags_json FROM corpus_markets WHERE condition_id = '0xmal'"
+        ).fetchone()
+        assert row["tags_json"] == "__ERROR__"
+        assert summary.markets_quarantined == 1
+    finally:
+        conn.close()
+
+
 async def test_backfill_idempotent_skip() -> None:
     """A second run is a no-op when all rows are populated or quarantined."""
     conn = init_corpus_db(Path(":memory:"))
