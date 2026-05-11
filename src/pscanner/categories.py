@@ -221,20 +221,18 @@ def primary_category(tags: Iterable[str]) -> Category:
     return Category.THESIS
 
 
-def categorize_event(event: Event) -> frozenset[Category]:
-    """Categorize an :class:`Event` by its tags.
-
-    Returns every :class:`Category` whose tag labels match the event's
-    tags. Task 9 will route this through :func:`primary_category` and
-    restore the ``-> Category`` return type.
+def categorize_event(event: Event) -> Category:
+    """Categorize an :class:`Event` by its tags via priority dispatch.
 
     Args:
         event: Polymarket event whose ``tags`` drive categorisation.
 
     Returns:
-        A non-empty :class:`frozenset` of matching categories.
+        The :class:`Category` returned by :func:`primary_category` on the
+        event's tags. Kept single-valued for backward compat at the
+        mispricing detector's dispatch site.
     """
-    return categorize_tags(event.tags)
+    return primary_category(event.tags)
 
 
 def settings_for(category: Category) -> CategorySettings:

@@ -188,9 +188,7 @@ def test_categorize_tags_returns_multiple_matches_for_macro_election_event() -> 
 
 def test_crypto_prices_event_does_not_match_crypto() -> None:
     """Decision A4: tag_exclusions prevents Crypto-Prices recurring markets from CRYPTO."""
-    assert categorize_tags(["Crypto", "Crypto Prices", "Recurring"]) == frozenset(
-        {Category.THESIS}
-    )
+    assert categorize_tags(["Crypto", "Crypto Prices", "Recurring"]) == frozenset({Category.THESIS})
 
 
 def test_crypto_with_no_exclusion_tag_matches_crypto() -> None:
@@ -200,9 +198,7 @@ def test_crypto_with_no_exclusion_tag_matches_crypto() -> None:
 
 def test_crypto_excluded_returns_only_other_matching_categories() -> None:
     """If excluded from CRYPTO, sports still appears in the result set."""
-    assert categorize_tags(["Sports", "Crypto", "Crypto Prices"]) == frozenset(
-        {Category.SPORTS}
-    )
+    assert categorize_tags(["Sports", "Crypto", "Crypto Prices"]) == frozenset({Category.SPORTS})
 
 
 def test_primary_category_returns_single_category() -> None:
@@ -223,3 +219,9 @@ def test_primary_category_empty_tags_is_thesis() -> None:
 
 def test_primary_category_honors_tag_exclusions() -> None:
     assert primary_category(["Crypto", "Crypto Prices"]) is Category.THESIS
+
+
+def test_categorize_event_returns_priority_first_match() -> None:
+    """``categorize_event`` returns a single Category via priority dispatch."""
+    event = _event(tags=["Fed Rates", "Global Elections"])
+    assert categorize_event(event) is Category.MACRO
