@@ -173,6 +173,40 @@ async def test_enumerate_propagates_real_4xx(tmp_corpus_db: sqlite3.Connection) 
 
 
 @pytest.mark.asyncio
+async def test_enumerate_writes_tags_and_categories_on_new_inserts(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """Newly inserted rows must carry tags_json and categories_json from the event."""
+    repo = CorpusMarketsRepo(tmp_corpus_db)
+    event = Event.model_validate(
+        {
+            "id": "nba-okc-phx-2026-id",
+            "title": "T",
+            "slug": "nba-okc-phx-2026",
+            "markets": [_market("0xc1", 1_500_000.0).model_dump(by_alias=True)],
+            "active": False,
+            "closed": True,
+            "tags": [{"label": "Sports"}, {"label": "NBA"}],
+        }
+    )
+    inserted = await enumerate_closed_markets(
+        gamma=_fake_gamma([event]),
+        repo=repo,
+        now_ts=0,
+        since_ts=None,
+    )
+    assert inserted == 1
+    row = tmp_corpus_db.execute(
+        "SELECT tags_json, categories_json, category FROM corpus_markets"
+        " WHERE condition_id = '0xc1'"
+    ).fetchone()
+    assert row is not None
+    assert row["tags_json"] == '["Sports", "NBA"]'
+    assert '"sports"' in row["categories_json"]
+    assert row["category"] == "sports"
+
+
+@pytest.mark.asyncio
 async def test_enumerate_uses_per_category_gate(tmp_corpus_db: sqlite3.Connection) -> None:
     """Esports markets clear at $100K, but thesis markets at the same volume don't.
 
