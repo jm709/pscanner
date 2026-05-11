@@ -46,6 +46,10 @@ class CategorySettings:
             an event to this category. The first taxonomy entry whose labels
             match wins; an entry with an empty ``tag_labels`` tuple is the
             fallback bucket.
+        tag_exclusions: Polymarket gamma tag labels (case-insensitive) that
+            disqualify an event from this category match even if a label in
+            ``tag_labels`` is present. Used to prevent automated recurring
+            markets (e.g. ``Crypto Prices``) from sweeping into CRYPTO.
     """
 
     category: Category
@@ -53,6 +57,7 @@ class CategorySettings:
     convergence_window_seconds: int
     mispricing_skip: bool
     tag_labels: tuple[str, ...]
+    tag_exclusions: tuple[str, ...] = ()
 
 
 # Default taxonomy. Numbers preserve current production behavior:

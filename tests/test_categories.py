@@ -9,6 +9,7 @@ import pytest
 from pscanner.categories import (
     DEFAULT_TAXONOMY,
     Category,
+    CategorySettings,
     categorize_event,
     categorize_tags,
     settings_for,
@@ -106,3 +107,26 @@ def test_default_taxonomy_covers_every_category_member() -> None:
     """Every Category enum member must have a settings row."""
     covered = {entry.category for entry in DEFAULT_TAXONOMY}
     assert covered == set(Category)
+
+
+def test_category_settings_default_tag_exclusions_is_empty() -> None:
+    settings = CategorySettings(
+        category=Category.THESIS,
+        min_edge=0.05,
+        convergence_window_seconds=48 * 3600,
+        mispricing_skip=False,
+        tag_labels=(),
+    )
+    assert settings.tag_exclusions == ()
+
+
+def test_category_settings_accepts_tag_exclusions() -> None:
+    settings = CategorySettings(
+        category=Category.THESIS,
+        min_edge=0.05,
+        convergence_window_seconds=48 * 3600,
+        mispricing_skip=False,
+        tag_labels=("Crypto",),
+        tag_exclusions=("Crypto Prices",),
+    )
+    assert settings.tag_exclusions == ("Crypto Prices",)
