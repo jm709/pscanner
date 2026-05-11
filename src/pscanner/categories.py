@@ -160,33 +160,37 @@ DEFAULT_TAXONOMY: tuple[CategorySettings, ...] = (
 )
 
 
-def categorize_tags(tags: Iterable[str]) -> Category:
-    """Return the Category that matches the first applicable tag.
+def categorize_tags(tags: Iterable[str]) -> frozenset[Category]:
+    """Return every :class:`Category` whose tag labels match ``tags``.
 
-    Falls back to :attr:`Category.THESIS` if no tag matches a labelled
-    category. Match is case-insensitive. Non-string entries in ``tags``
-    are ignored.
+    Match is case-insensitive. A taxonomy entry is skipped when any of its
+    ``tag_exclusions`` is present in the input tag set, even if its
+    ``tag_labels`` would otherwise match. Non-string entries in ``tags``
+    are ignored. When no labelled entry matches the input, the returned
+    set contains only :attr:`Category.THESIS` (the fallback bucket).
 
-    A taxonomy entry is skipped when any of its ``tag_exclusions`` is
-    present in the input tag set, even if its ``tag_labels`` would
-    otherwise match.
+    Use :func:`primary_category` when a single :class:`Category` is needed
+    for detector behaviour dispatch.
 
     Args:
         tags: Iterable of tag label strings.
 
     Returns:
-        The matched :class:`Category`, or :attr:`Category.THESIS` when no
-        labelled entry matches.
+        A non-empty :class:`frozenset` of matching categories. The empty
+        case is replaced by ``frozenset({Category.THESIS})``.
     """
     lower = {tag.lower() for tag in tags if isinstance(tag, str)}
+    matched: set[Category] = set()
     for settings in DEFAULT_TAXONOMY:
         if not settings.tag_labels:
             continue
         if any(label.lower() in lower for label in settings.tag_exclusions):
             continue
         if any(label.lower() in lower for label in settings.tag_labels):
-            return settings.category
-    return Category.THESIS
+            matched.add(settings.category)
+    if not matched:
+        return frozenset({Category.THESIS})
+    return frozenset(matched)
 
 
 def primary_category(tags: Iterable[str]) -> Category:
@@ -217,14 +221,18 @@ def primary_category(tags: Iterable[str]) -> Category:
     return Category.THESIS
 
 
-def categorize_event(event: Event) -> Category:
+def categorize_event(event: Event) -> frozenset[Category]:
     """Categorize an :class:`Event` by its tags.
+
+    Returns every :class:`Category` whose tag labels match the event's
+    tags. Task 9 will route this through :func:`primary_category` and
+    restore the ``-> Category`` return type.
 
     Args:
         event: Polymarket event whose ``tags`` drive categorisation.
 
     Returns:
-        The matched :class:`Category`.
+        A non-empty :class:`frozenset` of matching categories.
     """
     return categorize_tags(event.tags)
 
