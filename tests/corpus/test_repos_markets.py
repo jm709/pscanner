@@ -327,3 +327,200 @@ def test_insert_pending_backfill_does_not_overwrite_existing_slug(
         "SELECT market_slug FROM corpus_markets WHERE condition_id = 'cond1'"
     ).fetchone()
     assert row["market_slug"] == "original-slug"
+
+
+def test_corpus_market_default_tags_json_is_empty_list() -> None:
+    market = CorpusMarket(
+        condition_id="0xc1",
+        event_slug="test",
+        category="thesis",
+        closed_at=0,
+        total_volume_usd=0.0,
+        enumerated_at=0,
+        market_slug="",
+    )
+    assert market.tags_json == "[]"
+    assert market.categories_json == "[]"
+
+
+def test_corpus_market_accepts_explicit_tags_json() -> None:
+    market = CorpusMarket(
+        condition_id="0xc1",
+        event_slug="test",
+        category="thesis",
+        closed_at=0,
+        total_volume_usd=0.0,
+        enumerated_at=0,
+        market_slug="",
+        tags_json='["Sports", "NBA"]',
+        categories_json='["sports"]',
+    )
+    assert market.tags_json == '["Sports", "NBA"]'
+    assert market.categories_json == '["sports"]'
+
+
+def test_insert_pending_writes_tags_and_categories_json(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    repo = CorpusMarketsRepo(tmp_corpus_db)
+    market = CorpusMarket(
+        condition_id="0xc1",
+        event_slug="nba-final",
+        category="sports",
+        closed_at=0,
+        total_volume_usd=1.0,
+        enumerated_at=0,
+        market_slug="nba-final-okc",
+        tags_json='["Sports", "NBA"]',
+        categories_json='["sports"]',
+    )
+    repo.insert_pending(market)
+    row = tmp_corpus_db.execute(
+        "SELECT tags_json, categories_json FROM corpus_markets WHERE condition_id = '0xc1'"
+    ).fetchone()
+    assert row["tags_json"] == '["Sports", "NBA"]'
+    assert row["categories_json"] == '["sports"]'
+
+
+def test_insert_pending_defaults_keep_existing_callers_working(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """A market constructed without tag fields lands with '[]' defaults."""
+    repo = CorpusMarketsRepo(tmp_corpus_db)
+    market = CorpusMarket(
+        condition_id="0xc2",
+        event_slug="ev",
+        category="thesis",
+        closed_at=0,
+        total_volume_usd=1.0,
+        enumerated_at=0,
+        market_slug="",
+    )
+    repo.insert_pending(market)
+    row = tmp_corpus_db.execute(
+        "SELECT tags_json, categories_json FROM corpus_markets WHERE condition_id = '0xc2'"
+    ).fetchone()
+    assert row["tags_json"] == "[]"
+    assert row["categories_json"] == "[]"
+
+
+def test_iter_unbackfilled_tags_returns_only_default_rows(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """Rows with non-default tags_json are skipped."""
+    repo = CorpusMarketsRepo(tmp_corpus_db)
+    unbackfilled = CorpusMarket(
+        condition_id="0xun",
+        event_slug="unbackfilled",
+        category="thesis",
+        closed_at=0,
+        total_volume_usd=1.0,
+        enumerated_at=0,
+        market_slug="",
+    )
+    already_done = CorpusMarket(
+        condition_id="0xdone",
+        event_slug="done",
+        category="sports",
+        closed_at=0,
+        total_volume_usd=1.0,
+        enumerated_at=0,
+        market_slug="",
+        tags_json='["Sports"]',
+        categories_json='["sports"]',
+    )
+    repo.insert_pending(unbackfilled)
+    repo.insert_pending(already_done)
+    slugs = [m.event_slug for m in repo.iter_unbackfilled_tags(limit=100)]
+    assert slugs == ["unbackfilled"]
+
+
+def test_iter_unbackfilled_tags_skips_error_sentinel(tmp_corpus_db: sqlite3.Connection) -> None:
+    """Rows quarantined with tags_json='__ERROR__' are NOT returned."""
+    repo = CorpusMarketsRepo(tmp_corpus_db)
+    repo.insert_pending(
+        CorpusMarket(
+            condition_id="0xer",
+            event_slug="err",
+            category="thesis",
+            closed_at=0,
+            total_volume_usd=1.0,
+            enumerated_at=0,
+            market_slug="",
+            tags_json="__ERROR__",
+        )
+    )
+    rows = list(repo.iter_unbackfilled_tags(limit=100))
+    assert rows == []
+
+
+def test_iter_unbackfilled_tags_honors_limit(tmp_corpus_db: sqlite3.Connection) -> None:
+    repo = CorpusMarketsRepo(tmp_corpus_db)
+    for i in range(5):
+        repo.insert_pending(
+            CorpusMarket(
+                condition_id=f"0x{i}",
+                event_slug=f"e{i}",
+                category="thesis",
+                closed_at=0,
+                total_volume_usd=float(i),
+                enumerated_at=0,
+                market_slug="",
+            )
+        )
+    rows = list(repo.iter_unbackfilled_tags(limit=3))
+    assert len(rows) == 3
+
+
+def test_set_gamma_tags_writes_all_three_columns(tmp_corpus_db: sqlite3.Connection) -> None:
+    repo = CorpusMarketsRepo(tmp_corpus_db)
+    repo.insert_pending(
+        CorpusMarket(
+            condition_id="0xc1",
+            event_slug="ev",
+            category="thesis",  # will be overwritten by set_gamma_tags
+            closed_at=0,
+            total_volume_usd=1.0,
+            enumerated_at=0,
+            market_slug="",
+        )
+    )
+    repo.set_gamma_tags(
+        condition_id="0xc1",
+        tags_json='["Fed Rates", "Economy"]',
+        categories_json='["macro"]',
+        category="macro",
+    )
+    row = tmp_corpus_db.execute(
+        "SELECT category, tags_json, categories_json FROM corpus_markets "
+        "WHERE condition_id = '0xc1'"
+    ).fetchone()
+    assert row["category"] == "macro"
+    assert row["tags_json"] == '["Fed Rates", "Economy"]'
+    assert row["categories_json"] == '["macro"]'
+
+
+def test_set_gamma_tags_error_quarantines_with_sentinel(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    repo = CorpusMarketsRepo(tmp_corpus_db)
+    repo.insert_pending(
+        CorpusMarket(
+            condition_id="0xc1",
+            event_slug="dead-slug",
+            category="thesis",
+            closed_at=0,
+            total_volume_usd=1.0,
+            enumerated_at=0,
+            market_slug="",
+        )
+    )
+    repo.set_gamma_tags_error(condition_id="0xc1")
+    row = tmp_corpus_db.execute(
+        "SELECT tags_json, categories_json, category FROM corpus_markets "
+        "WHERE condition_id = '0xc1'"
+    ).fetchone()
+    assert row["tags_json"] == "__ERROR__"
+    # categories_json and category are left untouched on error
+    assert row["categories_json"] == "[]"
+    assert row["category"] == "thesis"

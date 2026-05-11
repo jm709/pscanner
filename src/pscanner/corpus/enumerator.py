@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Final
 
 import httpx
 import structlog
 
-from pscanner.categories import Category, categorize_event
+from pscanner.categories import Category, categorize_tags, primary_category
 from pscanner.corpus.repos import CorpusMarket, CorpusMarketsRepo
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.models import Event
@@ -52,8 +53,12 @@ def _qualifying_markets(event: Event, now_ts: int) -> list[CorpusMarket]:
     """Return CorpusMarket rows for every market on ``event`` that qualifies."""
     if not event.closed:
         return []
-    category = categorize_event(event)
-    gate = _volume_gate_for(category)
+    tags = list(event.tags)
+    primary = primary_category(tags)
+    matched = categorize_tags(tags)
+    gate = _volume_gate_for(primary)
+    tags_json = json.dumps(tags)
+    categories_json = json.dumps(sorted(c.value for c in matched))
     out: list[CorpusMarket] = []
     for market in event.markets:
         if not market.closed:
@@ -67,11 +72,13 @@ def _qualifying_markets(event: Event, now_ts: int) -> list[CorpusMarket]:
             CorpusMarket(
                 condition_id=str(market.condition_id),
                 event_slug=event.slug,
-                category=str(category),
+                category=str(primary),
                 closed_at=now_ts,  # placeholder; mark_complete rewrites this to MAX(trade_ts) once backfill finishes  # noqa: E501
                 total_volume_usd=volume,
                 enumerated_at=now_ts,
                 market_slug=market.slug,
+                tags_json=tags_json,
+                categories_json=categories_json,
             )
         )
     return out

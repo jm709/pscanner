@@ -20,6 +20,12 @@ class CorpusMarket:
     Identifies a closed market by ``(platform, condition_id)``. The
     ``backfill_state`` is tracked separately on the row and progresses
     ``pending → in_progress → complete | failed``.
+
+    ``tags_json`` stores the raw gamma tag list as JSON-encoded text;
+    ``categories_json`` stores the derived multi-label category set
+    (per :func:`pscanner.categories.categorize_tags`). Both default to
+    ``'[]'`` so callers that don't yet have tags can construct a row
+    pending backfill (issue #121).
     """
 
     condition_id: str
@@ -30,6 +36,8 @@ class CorpusMarket:
     enumerated_at: int
     market_slug: str
     platform: str = "polymarket"
+    tags_json: str = "[]"
+    categories_json: str = "[]"
 
 
 class CorpusMarketsRepo:
@@ -57,8 +65,8 @@ class CorpusMarketsRepo:
             """
             INSERT OR IGNORE INTO corpus_markets (
               platform, condition_id, event_slug, category, closed_at, total_volume_usd,
-              market_slug, backfill_state, enumerated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+              market_slug, backfill_state, enumerated_at, tags_json, categories_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
             """,
             (
                 market.platform,
@@ -69,6 +77,8 @@ class CorpusMarketsRepo:
                 market.total_volume_usd,
                 market.market_slug,
                 market.enumerated_at,
+                market.tags_json,
+                market.categories_json,
             ),
         )
         inserted = cur.rowcount or 0
@@ -116,6 +126,56 @@ class CorpusMarketsRepo:
             )
             for row in rows
         ]
+
+    def iter_unbackfilled_tags(
+        self,
+        *,
+        limit: int | None = None,
+        platform: str = "polymarket",
+    ) -> Iterator[CorpusMarket]:
+        """Yield markets with empty ``tags_json`` (i.e. not yet backfilled).
+
+        Skips rows quarantined with ``tags_json = '__ERROR__'`` — operators
+        re-run those separately by filtering on the sentinel explicitly.
+
+        Args:
+            limit: Cap the number of rows returned. ``None`` returns all
+                unbackfilled rows.
+            platform: Scope to a single platform (default ``polymarket``).
+
+        Yields:
+            ``CorpusMarket`` rows ordered by ``enumerated_at DESC`` so the
+            newest pending rows are processed first.
+        """
+        params: list[object] = [platform]
+        sql = (
+            "SELECT condition_id, event_slug, category, closed_at, "
+            "total_volume_usd, market_slug, enumerated_at, tags_json, categories_json "
+            "FROM corpus_markets "
+            "WHERE platform = ? AND tags_json = '[]' "
+            "ORDER BY enumerated_at DESC"
+        )
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        # Materialize via fetchall() so the SELECT cursor doesn't pin the WAL
+        # snapshot while the caller commits row-by-row UPDATEs. See
+        # feedback_sqlite_wal_long_reads.md for the prior incident; mirrors
+        # the iter_chronological pattern in this file.
+        rows = self._conn.execute(sql, params).fetchall()
+        for row in rows:
+            yield CorpusMarket(
+                condition_id=row["condition_id"],
+                event_slug=row["event_slug"],
+                category=row["category"],
+                closed_at=row["closed_at"],
+                total_volume_usd=row["total_volume_usd"],
+                market_slug=row["market_slug"] or "",
+                enumerated_at=row["enumerated_at"],
+                platform=platform,
+                tags_json=row["tags_json"],
+                categories_json=row["categories_json"],
+            )
 
     def get_last_offset(self, condition_id: str, *, platform: str = "polymarket") -> int:
         """Return the last offset seen for a market, or 0 if not started."""
@@ -230,6 +290,56 @@ class CorpusMarketsRepo:
             WHERE platform = ? AND condition_id = ?
             """,
             (error_message, platform, condition_id),
+        )
+        self._conn.commit()
+
+    def set_gamma_tags(
+        self,
+        *,
+        condition_id: str,
+        tags_json: str,
+        categories_json: str,
+        category: str,
+        platform: str = "polymarket",
+    ) -> None:
+        """Persist gamma-derived tag data for a market.
+
+        Writes ``tags_json`` (raw gamma payload), ``categories_json``
+        (multi-label set from :func:`pscanner.categories.categorize_tags`),
+        and ``category`` (priority-first from :func:`primary_category`)
+        atomically. Caller is responsible for serialising the lists.
+        """
+        self._conn.execute(
+            """
+            UPDATE corpus_markets
+            SET tags_json = ?,
+                categories_json = ?,
+                category = ?
+            WHERE platform = ? AND condition_id = ?
+            """,
+            (tags_json, categories_json, category, platform, condition_id),
+        )
+        self._conn.commit()
+
+    def set_gamma_tags_error(
+        self,
+        *,
+        condition_id: str,
+        platform: str = "polymarket",
+    ) -> None:
+        """Quarantine a market whose gamma fetch failed (404 / 422 / network).
+
+        Sets ``tags_json = '__ERROR__'`` so :meth:`iter_unbackfilled_tags`
+        skips it on re-runs. Operators can re-run with an explicit filter
+        on the sentinel for triage.
+        """
+        self._conn.execute(
+            """
+            UPDATE corpus_markets
+            SET tags_json = '__ERROR__'
+            WHERE platform = ? AND condition_id = ?
+            """,
+            (platform, condition_id),
         )
         self._conn.commit()
 
