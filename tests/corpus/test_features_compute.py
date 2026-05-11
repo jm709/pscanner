@@ -65,7 +65,7 @@ def _meta(**kwargs: object) -> MarketMetadata:
         "opened_at": 500_000,
     }
     base.update(kwargs)
-    return MarketMetadata(**base)  # type: ignore[arg-type]
+    return MarketMetadata(**base)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
 
 
 def test_compute_features_no_prior_history_yields_nulls() -> None:

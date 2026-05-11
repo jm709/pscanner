@@ -198,10 +198,10 @@ def primary_category(tags: Iterable[str]) -> Category:
 
     Walks :data:`DEFAULT_TAXONOMY` in tuple order; the first entry whose
     ``tag_labels`` match (and whose ``tag_exclusions`` do not match) wins.
-    Equivalent to :func:`categorize_tags` today but kept as a stable
-    single-Category accessor so detector dispatch sites have a clear
-    contract independent of any future move to multi-label
-    :func:`categorize_tags` semantics.
+    Returns the highest-priority element of :func:`categorize_tags`'s
+    result. Kept as a stable single-Category accessor so detector dispatch
+    sites have a clear contract independent of the multi-label
+    :func:`categorize_tags` return type.
 
     Args:
         tags: Iterable of tag label strings.
