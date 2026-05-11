@@ -107,7 +107,7 @@ def _diff_rows(py: dict[str, object], dd: dict[str, object]) -> list[str]:
             if v_py is None or v_dd is None:
                 diffs.append(f"{col}: py={v_py!r} dd={v_dd!r}")
                 continue
-            if not math.isclose(float(v_py), float(v_dd), rel_tol=_FLOAT_RTOL, abs_tol=_FLOAT_ATOL):
+            if not math.isclose(float(v_py), float(v_dd), rel_tol=_FLOAT_RTOL, abs_tol=_FLOAT_ATOL):  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
                 diffs.append(f"{col}: py={v_py!r} dd={v_dd!r}")
         elif v_py != v_dd:
             diffs.append(f"{col}: py={v_py!r} dd={v_dd!r}")
@@ -135,3 +135,41 @@ def test_duckdb_engine_matches_python_engine(parity_dbs: tuple[Path, Path]) -> N
             failures.append(f"row {i} {key}: {'; '.join(diffs)}")
 
     assert not failures, "parity mismatch:\n" + "\n".join(failures)
+
+
+def test_heartbeat_emits_during_long_operation() -> None:
+    """Heartbeat thread fires at least once and stops cleanly on signal."""
+    import threading  # noqa: PLC0415
+
+    from structlog.testing import capture_logs  # noqa: PLC0415
+
+    from pscanner.corpus._duckdb_engine import _heartbeat_loop  # noqa: PLC0415
+
+    stop = threading.Event()
+    counter = {"polls": 0}
+
+    def fake_poll() -> int:
+        counter["polls"] += 1
+        return counter["polls"] * 100
+
+    with capture_logs() as logs:
+        t = threading.Thread(
+            target=_heartbeat_loop,
+            kwargs={
+                "stop": stop,
+                "poll_fn": fake_poll,
+                "interval_seconds": 0.05,
+                "stage": "test_stage",
+            },
+            daemon=True,
+        )
+        t.start()
+        time.sleep(0.20)  # allow at least 2-3 emits
+        stop.set()
+        t.join(timeout=2.0)
+
+    assert not t.is_alive()
+    heartbeats = [r for r in logs if r["event"] == "corpus.build_features.heartbeat"]
+    assert len(heartbeats) >= 2
+    assert all(r["stage"] == "test_stage" for r in heartbeats)
+    assert all("elapsed_seconds" in r and "rows" in r for r in heartbeats)

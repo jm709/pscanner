@@ -8,7 +8,9 @@ in 5-25 min vs 6h. See ``docs/superpowers/plans/2026-05-11-issue-116-duckdb-engi
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 
@@ -19,6 +21,43 @@ _log = structlog.get_logger(__name__)
 
 _V2_TABLE: Final[str] = "training_examples_v2"
 _V2_INDEX_PREFIX: Final[str] = "idx_te_v2_"
+
+
+def _heartbeat_loop(
+    *,
+    stop: threading.Event,
+    poll_fn: Callable[[], int],
+    interval_seconds: float,
+    stage: str,
+) -> None:
+    """Emit a heartbeat every ``interval_seconds`` until ``stop`` is set.
+
+    ``poll_fn`` returns a snapshot of "how many rows landed so far" (or
+    any integer progress signal). Errors in ``poll_fn`` are caught so a
+    transient hiccup doesn't kill observability.
+    """
+    started = time.monotonic()
+    while not stop.wait(interval_seconds):
+        try:
+            n = poll_fn()
+        except Exception as exc:  # observability must not propagate
+            _log.warning("corpus.build_features.heartbeat_poll_failed", error=str(exc))
+            continue
+        _log.info(
+            "corpus.build_features.heartbeat",
+            stage=stage,
+            elapsed_seconds=round(time.monotonic() - started, 1),
+            rows=n,
+        )
+
+
+def _count_v2_safe(duck: duckdb.DuckDBPyConnection) -> int:
+    """Heartbeat-safe row count. Returns 0 if v2 doesn't exist yet."""
+    try:
+        row = duck.execute(f"SELECT COUNT(*) FROM corpus.{_V2_TABLE}").fetchone()  # noqa: S608
+        return int(row[0]) if row else 0
+    except duckdb.Error:
+        return 0
 
 
 def build_features_duckdb(
@@ -56,7 +95,26 @@ def build_features_duckdb(
         _configure_duckdb(duck, memory_limit=memory_limit, temp_dir=temp_dir, threads=threads)
         _attach_corpus(duck, db_path=db_path)
         _materialize_trades(duck, platform=platform)
-        _build_training_examples_v2(duck, platform=platform, now_ts=now_ts)
+
+        stop = threading.Event()
+        heartbeat = threading.Thread(
+            target=_heartbeat_loop,
+            kwargs={
+                "stop": stop,
+                "poll_fn": lambda: _count_v2_safe(duck),
+                "interval_seconds": 30.0,
+                "stage": "duckdb_build_v2",
+            },
+            daemon=True,
+            name="build_features_heartbeat",
+        )
+        heartbeat.start()
+        try:
+            _build_training_examples_v2(duck, platform=platform, now_ts=now_ts)
+        finally:
+            stop.set()
+            heartbeat.join(timeout=5.0)
+
         n_rows = _count_v2(duck)
         corpus_path = _detach_corpus(duck)
         _atomic_swap(corpus_path)
