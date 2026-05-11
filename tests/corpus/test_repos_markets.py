@@ -223,6 +223,23 @@ def test_state_repo_get_int(tmp_corpus_db: sqlite3.Connection) -> None:
     assert repo.get_int("missing") is None
 
 
+def test_corpus_state_delete_removes_key(tmp_corpus_db: sqlite3.Connection) -> None:
+    repo = CorpusStateRepo(tmp_corpus_db)
+    repo.set("transient_flag", "1", updated_at=1_000_000)
+    assert repo.get("transient_flag") == "1"
+
+    repo.delete("transient_flag")
+
+    assert repo.get("transient_flag") is None
+
+
+def test_corpus_state_delete_unknown_key_is_noop(tmp_corpus_db: sqlite3.Connection) -> None:
+    repo = CorpusStateRepo(tmp_corpus_db)
+    repo.delete("never_set")  # must not raise
+
+    assert repo.get("never_set") is None
+
+
 def test_insert_pending_backfills_market_slug_on_existing_row(
     tmp_corpus_db: sqlite3.Connection,
 ) -> None:
