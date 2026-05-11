@@ -157,8 +157,8 @@ def _check_col(
             a is None
             or b is None
             or not math.isclose(
-                float(a),
-                float(b),
+                float(a),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+                float(b),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
                 rel_tol=_FLOAT_RTOL,
                 abs_tol=_FLOAT_ATOL,  # type: ignore[arg-type]
             )
