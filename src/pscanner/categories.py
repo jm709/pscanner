@@ -29,6 +29,12 @@ class Category(StrEnum):
     THESIS = "thesis"
     SPORTS = "sports"
     ESPORTS = "esports"
+    MACRO = "macro"
+    ELECTIONS = "elections"
+    CRYPTO = "crypto"
+    GEOPOLITICS = "geopolitics"
+    TECH = "tech"
+    CULTURE = "culture"
 
 
 @dataclass(frozen=True, slots=True)

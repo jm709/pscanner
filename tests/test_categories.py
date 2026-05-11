@@ -130,3 +130,12 @@ def test_category_settings_accepts_tag_exclusions() -> None:
         tag_exclusions=("Crypto Prices",),
     )
     assert settings.tag_exclusions == ("Crypto Prices",)
+
+
+def test_category_enum_contains_six_new_members() -> None:
+    assert Category.MACRO.value == "macro"
+    assert Category.ELECTIONS.value == "elections"
+    assert Category.CRYPTO.value == "crypto"
+    assert Category.GEOPOLITICS.value == "geopolitics"
+    assert Category.TECH.value == "tech"
+    assert Category.CULTURE.value == "culture"
