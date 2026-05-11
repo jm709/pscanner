@@ -127,12 +127,20 @@ class MarketState:
 
 @dataclass(frozen=True)
 class MarketMetadata:
-    """Static per-market metadata. Does not change with time."""
+    """Static per-market metadata. Does not change with time.
+
+    ``categories`` is the multi-label set of every taxonomy category that
+    matches the market's gamma tags (see :func:`pscanner.categories.categorize_tags`).
+    Defaults to ``()`` so callers that only know the primary string
+    ``category`` keep working unchanged; consumers that need multi-label
+    behaviour read ``categories or (category,)`` as the fallback.
+    """
 
     condition_id: str
     category: str
     closed_at: int
     opened_at: int
+    categories: tuple[str, ...] = ()
 
 
 def empty_wallet_state(*, first_seen_ts: int) -> WalletState:

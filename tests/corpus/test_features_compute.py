@@ -168,3 +168,19 @@ def test_compute_features_volatility_null_with_few_prices() -> None:
     )
     features = compute_features(_trade(), history)
     assert features.price_volatility_recent is None
+
+
+def test_market_metadata_categories_defaults_to_empty_tuple() -> None:
+    meta = MarketMetadata(condition_id="0xc1", category="thesis", closed_at=0, opened_at=0)
+    assert meta.categories == ()
+
+
+def test_market_metadata_accepts_explicit_categories() -> None:
+    meta = MarketMetadata(
+        condition_id="0xc1",
+        category="thesis",
+        closed_at=0,
+        opened_at=0,
+        categories=("macro", "elections"),
+    )
+    assert meta.categories == ("macro", "elections")
