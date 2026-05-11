@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import sqlite3
 from pathlib import Path
 
@@ -31,7 +30,8 @@ def test_build_features_parser_defaults_to_python_engine() -> None:
     assert args.force is False
 
 
-def test_build_features_refuses_with_existing_sentinel(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_build_features_refuses_with_existing_sentinel(tmp_path: Path) -> None:
     """End-to-end: sentinel set → dispatch raises SentinelAlreadySetError."""
     db = tmp_path / "corpus.sqlite3"
     build_fixture_db(db)
@@ -52,4 +52,4 @@ def test_build_features_refuses_with_existing_sentinel(tmp_path: Path) -> None:
         duckdb_threads=2,
     )
     with pytest.raises(SentinelAlreadySetError):
-        asyncio.run(_cmd_build_features(args))
+        await _cmd_build_features(args)
