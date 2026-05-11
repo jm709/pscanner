@@ -416,6 +416,64 @@ def _build_training_examples_v2(
                 COUNT(DISTINCT category) AS category_diversity
             FROM wallet_cat_prior_counts
             GROUP BY wallet_address, event_ts, kind_priority, tx_hash, asset_id
+        ),
+        -- Per-market running aggregates over BUY + SELL events (is_trade=1).
+        -- RESOLUTION events don't update market state in Python, so they are
+        -- excluded here.
+        market_acc AS (
+            SELECT
+                e.condition_id, e.event_ts, e.kind_priority,
+                e.tx_hash, e.asset_id,
+                COALESCE(SUM(e.notional_usd) OVER w_strict, 0.0)
+                    AS market_volume_so_far_w,
+                -- LAST_VALUE with IGNORE NULLS picks the latest non-NULL price
+                -- strictly prior to this row (matching Python's market.last_trade_price).
+                LAST_VALUE(e.price IGNORE NULLS) OVER w_strict AS last_trade_price_w,
+                -- 20-row volatility window matches Python's tuple[-20:] buffer.
+                STDDEV_POP(e.price) OVER w_strict_20 AS price_volatility_w,
+                COUNT(e.price) OVER w_strict_20 AS price_count_20
+            FROM events e
+            WHERE e.is_trade = 1
+            WINDOW
+                w_strict AS (
+                    PARTITION BY condition_id
+                    ORDER BY event_ts, kind_priority, tx_hash, asset_id
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                ),
+                w_strict_20 AS (
+                    PARTITION BY condition_id
+                    ORDER BY event_ts, kind_priority, tx_hash, asset_id
+                    ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING
+                )
+        ),
+        -- Unique traders so far per market: count distinct wallets that traded
+        -- the market BEFORE the current row. Per (market, wallet) find the
+        -- wallet's first trade in the market via ROW_NUMBER=1, then
+        -- cumulative-sum those first-trade flags over the strict-prior window.
+        market_first_trade AS (
+            SELECT
+                e.condition_id, e.wallet_address, e.event_ts,
+                e.kind_priority, e.tx_hash, e.asset_id,
+                CAST(
+                    ROW_NUMBER() OVER (
+                        PARTITION BY condition_id, wallet_address
+                        ORDER BY event_ts, kind_priority, tx_hash, asset_id
+                    ) = 1
+                    AS INTEGER
+                ) AS is_first_trade_in_market
+            FROM events e
+            WHERE e.is_trade = 1
+        ),
+        market_unique_acc AS (
+            SELECT
+                m.condition_id, m.event_ts, m.kind_priority,
+                m.tx_hash, m.asset_id,
+                COALESCE(SUM(m.is_first_trade_in_market) OVER (
+                    PARTITION BY m.condition_id
+                    ORDER BY m.event_ts, m.kind_priority, m.tx_hash, m.asset_id
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                ), 0) AS market_unique_traders_so_far_w
+            FROM market_first_trade m
         )
         SELECT
             '{platform}' AS platform,
@@ -462,13 +520,15 @@ def _build_training_examples_v2(
             wa.outcome_side AS side,
             wa.price AS implied_prob_at_buy,
             wa.category AS market_category,
-            CAST(0.0 AS DOUBLE) AS market_volume_so_far_usd,  -- Task 10
-            CAST(0 AS INTEGER) AS market_unique_traders_so_far,  -- Task 10
+            COALESCE(ma.market_volume_so_far_w, 0.0) AS market_volume_so_far_usd,
+            CAST(COALESCE(mua.market_unique_traders_so_far_w, 0) AS INTEGER)
+                AS market_unique_traders_so_far,
             CAST(wa.event_ts - COALESCE(wa.market_first_prior_ts_w, 0) AS INTEGER)
                 AS market_age_seconds,
             CAST(wa.closed_at - wa.event_ts AS INTEGER) AS time_to_resolution_seconds,
-            CAST(NULL AS DOUBLE) AS last_trade_price,        -- Task 10
-            CAST(NULL AS DOUBLE) AS price_volatility_recent, -- Task 10
+            ma.last_trade_price_w AS last_trade_price,
+            CASE WHEN ma.price_count_20 >= 2 THEN ma.price_volatility_w ELSE NULL END
+                AS price_volatility_recent,
             CASE
                 WHEN (r.outcome_yes_won = 1 AND wa.outcome_side = 'YES')
                   OR (r.outcome_yes_won = 0 AND wa.outcome_side = 'NO')
@@ -479,6 +539,10 @@ def _build_training_examples_v2(
         JOIN resolutions r USING (condition_id)
         LEFT JOIN wallet_cat_summary wcs
             USING (wallet_address, event_ts, kind_priority, tx_hash, asset_id)
+        LEFT JOIN market_acc ma
+            USING (condition_id, event_ts, kind_priority, tx_hash, asset_id)
+        LEFT JOIN market_unique_acc mua
+            USING (condition_id, event_ts, kind_priority, tx_hash, asset_id)
         WHERE wa.is_buy_only = 1
         """  # noqa: S608
     )
