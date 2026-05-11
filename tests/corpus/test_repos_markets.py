@@ -470,3 +470,57 @@ def test_iter_unbackfilled_tags_honors_limit(tmp_corpus_db: sqlite3.Connection) 
         )
     rows = list(repo.iter_unbackfilled_tags(limit=3))
     assert len(rows) == 3
+
+
+def test_set_gamma_tags_writes_all_three_columns(tmp_corpus_db: sqlite3.Connection) -> None:
+    repo = CorpusMarketsRepo(tmp_corpus_db)
+    repo.insert_pending(
+        CorpusMarket(
+            condition_id="0xc1",
+            event_slug="ev",
+            category="thesis",  # will be overwritten by set_gamma_tags
+            closed_at=0,
+            total_volume_usd=1.0,
+            enumerated_at=0,
+            market_slug="",
+        )
+    )
+    repo.set_gamma_tags(
+        condition_id="0xc1",
+        tags_json='["Fed Rates", "Economy"]',
+        categories_json='["macro"]',
+        category="macro",
+    )
+    row = tmp_corpus_db.execute(
+        "SELECT category, tags_json, categories_json FROM corpus_markets "
+        "WHERE condition_id = '0xc1'"
+    ).fetchone()
+    assert row["category"] == "macro"
+    assert row["tags_json"] == '["Fed Rates", "Economy"]'
+    assert row["categories_json"] == '["macro"]'
+
+
+def test_set_gamma_tags_error_quarantines_with_sentinel(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    repo = CorpusMarketsRepo(tmp_corpus_db)
+    repo.insert_pending(
+        CorpusMarket(
+            condition_id="0xc1",
+            event_slug="dead-slug",
+            category="thesis",
+            closed_at=0,
+            total_volume_usd=1.0,
+            enumerated_at=0,
+            market_slug="",
+        )
+    )
+    repo.set_gamma_tags_error(condition_id="0xc1")
+    row = tmp_corpus_db.execute(
+        "SELECT tags_json, categories_json, category FROM corpus_markets "
+        "WHERE condition_id = '0xc1'"
+    ).fetchone()
+    assert row["tags_json"] == "__ERROR__"
+    # categories_json and category are left untouched on error
+    assert row["categories_json"] == "[]"
+    assert row["category"] == "thesis"

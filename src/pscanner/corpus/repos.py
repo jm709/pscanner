@@ -289,6 +289,56 @@ class CorpusMarketsRepo:
         )
         self._conn.commit()
 
+    def set_gamma_tags(
+        self,
+        *,
+        condition_id: str,
+        tags_json: str,
+        categories_json: str,
+        category: str,
+        platform: str = "polymarket",
+    ) -> None:
+        """Persist gamma-derived tag data for a market.
+
+        Writes ``tags_json`` (raw gamma payload), ``categories_json``
+        (multi-label set from :func:`pscanner.categories.categorize_tags`),
+        and ``category`` (priority-first from :func:`primary_category`)
+        atomically. Caller is responsible for serialising the lists.
+        """
+        self._conn.execute(
+            """
+            UPDATE corpus_markets
+            SET tags_json = ?,
+                categories_json = ?,
+                category = ?
+            WHERE platform = ? AND condition_id = ?
+            """,
+            (tags_json, categories_json, category, platform, condition_id),
+        )
+        self._conn.commit()
+
+    def set_gamma_tags_error(
+        self,
+        *,
+        condition_id: str,
+        platform: str = "polymarket",
+    ) -> None:
+        """Quarantine a market whose gamma fetch failed (404 / 422 / network).
+
+        Sets ``tags_json = '__ERROR__'`` so :meth:`iter_unbackfilled_tags`
+        skips it on re-runs. Operators can re-run with an explicit filter
+        on the sentinel for triage.
+        """
+        self._conn.execute(
+            """
+            UPDATE corpus_markets
+            SET tags_json = '__ERROR__'
+            WHERE platform = ? AND condition_id = ?
+            """,
+            (platform, condition_id),
+        )
+        self._conn.commit()
+
 
 class CorpusStateRepo:
     """Tiny key/value cursor table for cross-cutting orchestrator state."""
