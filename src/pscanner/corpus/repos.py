@@ -158,8 +158,12 @@ class CorpusMarketsRepo:
         if limit is not None:
             sql += " LIMIT ?"
             params.append(limit)
-        cur = self._conn.execute(sql, params)
-        for row in cur:
+        # Materialize via fetchall() so the SELECT cursor doesn't pin the WAL
+        # snapshot while the caller commits row-by-row UPDATEs. See
+        # feedback_sqlite_wal_long_reads.md for the prior incident; mirrors
+        # the iter_chronological pattern in this file.
+        rows = self._conn.execute(sql, params).fetchall()
+        for row in rows:
             yield CorpusMarket(
                 condition_id=row["condition_id"],
                 event_slug=row["event_slug"],
