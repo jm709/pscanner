@@ -401,6 +401,87 @@ async def test_refresh_populates_provider_metadata_for_every_candidate(
 
 
 @pytest.mark.asyncio
+async def test_refresh_populates_market_metadata_categories() -> None:
+    """Every market that passes the filter lands with ``MarketMetadata.categories``
+    populated to the multi-label set, not just a single primary string.
+    """
+    cfg = GateModelMarketFilterConfig(
+        enabled=True,
+        accepted_categories=("esports",),
+        min_volume_24h_usd=100_000,
+        max_markets=50,
+    )
+    event = _make_event(
+        slug="ev-esports",
+        tags=["Esports"],
+        markets=[_make_market(condition_id="0xc1", volume=200_000)],
+    )
+    gamma = _FakeGammaClient([event])
+    data = _FakeDataClient({})
+    conn = init_db(Path(":memory:"))
+    try:
+        provider = LiveHistoryProvider(conn=conn, metadata={})
+        collector = MarketScopedTradeCollector(
+            config=cfg,
+            gamma=gamma,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+            data_client=data,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+            provider=provider,
+        )
+        await collector.refresh_market_set()
+        meta = provider.market_metadata("0xc1")
+        # categories should be populated from categorize_tags(event.tags)
+        assert "esports" in meta.categories
+        # primary category string still single-valued (priority-first)
+        assert meta.category == "esports"
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_refresh_accepts_multi_label_event_via_intersection() -> None:
+    """A multi-tag event passes the filter when any of its categories
+    intersects ``accepted_categories``, even if the primary doesn't.
+
+    Differentiating case: tags = ["Fed Rates", "Global Elections"] ->
+    primary_category = MACRO, categorize_tags = {MACRO, ELECTIONS}.
+    With accepted_categories = ("elections",), the legacy single-string
+    filter rejects (primary "macro" not in accepted); the new set-intersection
+    filter accepts.
+    """
+    cfg = GateModelMarketFilterConfig(
+        enabled=True,
+        accepted_categories=("elections",),
+        min_volume_24h_usd=100_000,
+        max_markets=50,
+    )
+    event = _make_event(
+        slug="ev-fed-during-election",
+        tags=["Fed Rates", "Global Elections"],
+        markets=[_make_market(condition_id="0xc1", volume=200_000)],
+    )
+    gamma = _FakeGammaClient([event])
+    data = _FakeDataClient({})
+    conn = init_db(Path(":memory:"))
+    try:
+        provider = LiveHistoryProvider(conn=conn, metadata={})
+        collector = MarketScopedTradeCollector(
+            config=cfg,
+            gamma=gamma,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+            data_client=data,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+            provider=provider,
+        )
+        selected = await collector.refresh_market_set()
+        assert "0xc1" in selected
+        meta = provider.market_metadata("0xc1")
+        assert "macro" in meta.categories
+        assert "elections" in meta.categories
+        # Primary remains the highest-priority match (MACRO precedes ELECTIONS).
+        assert meta.category == "macro"
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
 async def test_refresh_upserts_market_cache_for_every_candidate(
     tmp_path: Path,
 ) -> None:

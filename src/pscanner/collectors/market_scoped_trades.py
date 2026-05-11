@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from pscanner.categories import categorize_event
+from pscanner.categories import categorize_tags, primary_category
 from pscanner.corpus.features import MarketMetadata
 from pscanner.poly.ids import AssetId, ConditionId
 from pscanner.store.repo import WalletTrade
@@ -87,9 +87,12 @@ class MarketScopedTradeCollector:
         floor = self._config.min_volume_24h_usd
         candidates: list[tuple[float, str]] = []
         async for event in self._gamma.iter_events():
-            category = categorize_event(event).value
-            if category not in accepted:
+            tags = list(event.tags)
+            categories_set = {c.value for c in categorize_tags(tags)}
+            if not categories_set.intersection(accepted):
                 continue
+            primary = primary_category(tags).value
+            categories_tuple = tuple(sorted(categories_set))
             for market in event.markets:
                 cond_id = market.condition_id
                 if cond_id is None:
@@ -101,16 +104,18 @@ class MarketScopedTradeCollector:
                 candidates.append((volume, cond_id_str))
                 if self._provider is not None:
                     # Live market: no resolution timestamp yet. closed_at/opened_at
-                    # default to 0 — only `category` is load-bearing at inference.
-                    # `time_to_resolution_seconds` reads `closed_at` but is in
-                    # LEAKAGE_COLS and dropped before the booster sees it.
+                    # default to 0 — only the category fields are load-bearing at
+                    # inference. ``categories`` is the multi-label set used by
+                    # GateModelDetector's set-intersection gate (#123); ``category``
+                    # is the priority-first primary for backward-compat consumers.
                     self._provider.set_market_metadata(
                         cond_id_str,
                         MarketMetadata(
                             condition_id=cond_id_str,
-                            category=category,
+                            category=primary,
                             closed_at=0,
                             opened_at=0,
+                            categories=categories_tuple,
                         ),
                     )
                 if self._market_cache is not None:
