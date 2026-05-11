@@ -27,7 +27,7 @@ import structlog
 
 from pscanner.alerts.models import Alert, Severity
 from pscanner.alerts.sink import AlertSink
-from pscanner.categories import Category, categorize_tags
+from pscanner.categories import Category, primary_category
 from pscanner.config import SmartMoneyConfig
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
@@ -356,7 +356,7 @@ class SmartMoneyDetector:
                 event_slug=event_slug,
                 tag_count=len(tags),
             )
-        return categorize_tags(tags)
+        return primary_category(tags)
 
     async def poll_positions(self, sink: AlertSink) -> None:
         """Diff every tracked wallet's open positions and emit alerts.
