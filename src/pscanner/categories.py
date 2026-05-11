@@ -66,14 +66,16 @@ class CategorySettings:
     tag_exclusions: tuple[str, ...] = ()
 
 
-# Default taxonomy. Numbers preserve current production behavior:
-# - sports: 0.10 edge floor, 6h convergence window, mispricing-skipped
-# - esports: 0.05 edge floor, 24h convergence window, mispricing-skipped
-# - thesis: 0.05 edge floor, 48h convergence window, mispricing-eligible
-#
-# Sports is listed first so it wins over esports when both tags are
-# present, mirroring the legacy ``_categorize`` helpers. Thesis carries
-# an empty ``tag_labels`` tuple and is the default fallback.
+# Default taxonomy. SPORTS / ESPORTS retain their priority spots and legacy
+# detector tuning. The 6 named subdomains (MACRO, CRYPTO, ELECTIONS,
+# GEOPOLITICS, TECH, CULTURE) carve the former THESIS bucket along
+# polymarket gamma tag families — see #119 for motivation. Priority is
+# most-specific-first so a Fed-decision-during-election event resolves to
+# MACRO. THESIS keeps an empty ``tag_labels`` tuple and is the default
+# fallback for events that match no labelled entry. Detector knobs
+# (min_edge, convergence_window, mispricing_skip) on the new entries
+# default to legacy THESIS values — tuning per-subdomain is a separate
+# follow-up.
 DEFAULT_TAXONOMY: tuple[CategorySettings, ...] = (
     CategorySettings(
         category=Category.SPORTS,
@@ -88,6 +90,65 @@ DEFAULT_TAXONOMY: tuple[CategorySettings, ...] = (
         convergence_window_seconds=24 * 3600,
         mispricing_skip=True,
         tag_labels=("Esports",),
+    ),
+    CategorySettings(
+        category=Category.MACRO,
+        min_edge=0.05,
+        convergence_window_seconds=48 * 3600,
+        mispricing_skip=False,
+        tag_labels=("Fed Rates", "Fed", "fomc", "Jerome Powell", "Economic Policy"),
+    ),
+    CategorySettings(
+        category=Category.CRYPTO,
+        min_edge=0.05,
+        convergence_window_seconds=48 * 3600,
+        mispricing_skip=False,
+        tag_labels=(
+            "Crypto",
+            "Bitcoin",
+            "Ethereum",
+            "Solana",
+            "XRP",
+            "Ripple",
+            "Dogecoin",
+            "BNB",
+            "$TRUMP",
+        ),
+        tag_exclusions=("Crypto Prices", "Recurring", "Up or Down", "Hide From New"),
+    ),
+    CategorySettings(
+        category=Category.ELECTIONS,
+        min_edge=0.05,
+        convergence_window_seconds=48 * 3600,
+        mispricing_skip=False,
+        tag_labels=(
+            "Global Elections",
+            "World Elections",
+            "US Election",
+            "Mayoral Elections",
+            "Elections",
+        ),
+    ),
+    CategorySettings(
+        category=Category.GEOPOLITICS,
+        min_edge=0.05,
+        convergence_window_seconds=48 * 3600,
+        mispricing_skip=False,
+        tag_labels=("Geopolitics", "Foreign Policy", "Middle East"),
+    ),
+    CategorySettings(
+        category=Category.TECH,
+        min_edge=0.05,
+        convergence_window_seconds=48 * 3600,
+        mispricing_skip=False,
+        tag_labels=("AI", "Big Tech", "Tech"),
+    ),
+    CategorySettings(
+        category=Category.CULTURE,
+        min_edge=0.05,
+        convergence_window_seconds=48 * 3600,
+        mispricing_skip=False,
+        tag_labels=("Culture", "Movies", "Celebrities"),
     ),
     CategorySettings(
         category=Category.THESIS,

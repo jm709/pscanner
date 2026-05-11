@@ -139,3 +139,44 @@ def test_category_enum_contains_six_new_members() -> None:
     assert Category.GEOPOLITICS.value == "geopolitics"
     assert Category.TECH.value == "tech"
     assert Category.CULTURE.value == "culture"
+
+
+def test_macro_tag_classifies_as_macro() -> None:
+    assert categorize_tags(["Fed Rates"]) is Category.MACRO
+
+
+def test_elections_us_tag_classifies_as_elections() -> None:
+    assert categorize_tags(["US Election"]) is Category.ELECTIONS
+
+
+def test_crypto_bitcoin_classifies_as_crypto() -> None:
+    assert categorize_tags(["Bitcoin"]) is Category.CRYPTO
+
+
+def test_crypto_solana_classifies_as_crypto() -> None:
+    """Decision A: cover the high-volume tokens missed in the original proposal."""
+    assert categorize_tags(["Solana"]) is Category.CRYPTO
+
+
+def test_geopolitics_middle_east_classifies_as_geopolitics() -> None:
+    assert categorize_tags(["Middle East"]) is Category.GEOPOLITICS
+
+
+def test_geopolitics_drops_country_specific_labels() -> None:
+    """Decision D: Iran/Israel/Ukraine are caught via umbrella labels; not in tag_labels."""
+    assert categorize_tags(["Iran"]) is Category.THESIS
+    assert categorize_tags(["Israel"]) is Category.THESIS
+    assert categorize_tags(["Ukraine"]) is Category.THESIS
+
+
+def test_tech_ai_classifies_as_tech() -> None:
+    assert categorize_tags(["AI"]) is Category.TECH
+
+
+def test_culture_movies_classifies_as_culture() -> None:
+    assert categorize_tags(["Movies"]) is Category.CULTURE
+
+
+def test_fed_event_macro_wins_over_elections_via_priority() -> None:
+    """Multi-tag Fed-during-election event: MACRO wins (higher priority)."""
+    assert categorize_tags(["Fed Rates", "Global Elections"]) is Category.MACRO
