@@ -46,11 +46,15 @@ def build_features_duckdb(
     temp_dir.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
 
+    # Pre-create v2 via stdlib sqlite3 BEFORE DuckDB opens the file.
+    # DuckDB's attached-SQLite CREATE TABLE rewrites types and strips
+    # DEFAULT / CHECK clauses, so we must own schema creation here.
+    _create_v2_via_sqlite3(db_path=db_path)
+
     duck = duckdb.connect(":memory:")
     try:
         _configure_duckdb(duck, memory_limit=memory_limit, temp_dir=temp_dir, threads=threads)
         _attach_corpus(duck, db_path=db_path)
-        _drop_stale_v2(duck)
         _materialize_trades(duck, platform=platform)
         _build_training_examples_v2(duck, platform=platform, now_ts=now_ts)
         n_rows = _count_v2(duck)
@@ -84,11 +88,77 @@ def _attach_corpus(duck: duckdb.DuckDBPyConnection, *, db_path: Path) -> None:
     duck.execute(f"ATTACH '{db_path}' AS corpus (TYPE sqlite)")
 
 
-def _drop_stale_v2(duck: duckdb.DuckDBPyConnection) -> None:
-    """Clean up any v2 leftovers from a prior crashed run."""
-    duck.execute(f"DROP TABLE IF EXISTS corpus.{_V2_TABLE}")
-    for col in ("condition", "wallet", "label"):
-        duck.execute(f"DROP INDEX IF EXISTS corpus.{_V2_INDEX_PREFIX}{col}")
+def _create_v2_via_sqlite3(*, db_path: Path) -> None:
+    """Create training_examples_v2 with the canonical SQLite DDL.
+
+    Run via stdlib sqlite3 (NOT DuckDB) because DuckDB's attached-SQLite
+    CREATE TABLE rewrites types and strips ``DEFAULT`` / ``CHECK`` clauses.
+    Pre-creating v2 here means DuckDB's INSERT can target the canonical
+    schema, and the post-swap production table keeps its constraints.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        # Drop any stale artifacts from a prior crashed run.
+        conn.execute(f"DROP TABLE IF EXISTS {_V2_TABLE}")
+        for suffix in ("condition", "wallet", "label"):
+            conn.execute(f"DROP INDEX IF EXISTS {_V2_INDEX_PREFIX}{suffix}")
+
+        # Canonical training_examples DDL with table+index names suffixed.
+        # Keep in sync with src/pscanner/corpus/db.py:_SCHEMA_STATEMENTS.
+        conn.execute(
+            f"""
+            CREATE TABLE {_V2_TABLE} (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              platform TEXT NOT NULL DEFAULT 'polymarket'
+                CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
+              tx_hash TEXT NOT NULL,
+              asset_id TEXT NOT NULL,
+              wallet_address TEXT NOT NULL,
+              condition_id TEXT NOT NULL,
+              trade_ts INTEGER NOT NULL,
+              built_at INTEGER NOT NULL,
+              prior_trades_count INTEGER NOT NULL,
+              prior_buys_count INTEGER NOT NULL,
+              prior_resolved_buys INTEGER NOT NULL,
+              prior_wins INTEGER NOT NULL,
+              prior_losses INTEGER NOT NULL,
+              win_rate REAL,
+              avg_implied_prob_paid REAL,
+              realized_edge_pp REAL,
+              prior_realized_pnl_usd REAL NOT NULL DEFAULT 0,
+              avg_bet_size_usd REAL,
+              median_bet_size_usd REAL,
+              wallet_age_days REAL NOT NULL,
+              seconds_since_last_trade INTEGER,
+              prior_trades_30d INTEGER NOT NULL,
+              top_category TEXT,
+              category_diversity INTEGER NOT NULL,
+              bet_size_usd REAL NOT NULL,
+              bet_size_rel_to_avg REAL,
+              edge_confidence_weighted REAL NOT NULL DEFAULT 0,
+              win_rate_confidence_weighted REAL NOT NULL DEFAULT 0,
+              is_high_quality_wallet INTEGER NOT NULL DEFAULT 0,
+              bet_size_relative_to_history REAL NOT NULL DEFAULT 1,
+              side TEXT NOT NULL,
+              implied_prob_at_buy REAL NOT NULL,
+              market_category TEXT NOT NULL,
+              market_volume_so_far_usd REAL NOT NULL,
+              market_unique_traders_so_far INTEGER NOT NULL,
+              market_age_seconds INTEGER NOT NULL,
+              time_to_resolution_seconds INTEGER,
+              last_trade_price REAL,
+              price_volatility_recent REAL,
+              label_won INTEGER NOT NULL,
+              UNIQUE (platform, tx_hash, asset_id, wallet_address)
+            )
+            """
+        )
+        conn.execute(f"CREATE INDEX {_V2_INDEX_PREFIX}condition ON {_V2_TABLE}(condition_id)")
+        conn.execute(f"CREATE INDEX {_V2_INDEX_PREFIX}wallet ON {_V2_TABLE}(wallet_address)")
+        conn.execute(f"CREATE INDEX {_V2_INDEX_PREFIX}label ON {_V2_TABLE}(label_won)")
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _materialize_trades(duck: duckdb.DuckDBPyConnection, *, platform: str) -> None:
@@ -119,58 +189,14 @@ def _materialize_trades(duck: duckdb.DuckDBPyConnection, *, platform: str) -> No
 def _build_training_examples_v2(
     duck: duckdb.DuckDBPyConnection, *, platform: str, now_ts: int
 ) -> None:
-    """Stub: create v2 with the same schema as v1 but no rows.
+    """Stub: v2 is pre-created via stdlib sqlite3; this leaves it empty.
 
-    Tasks 7-11 will replace this with the real CTE chain.
+    Tasks 7-11 will replace this with the real CTE chain that INSERTs rows
+    into the pre-existing v2 table.
     """
-    duck.execute(
-        f"""
-        CREATE TABLE corpus.{_V2_TABLE} (
-            id INTEGER PRIMARY KEY,
-            platform TEXT NOT NULL,
-            tx_hash TEXT NOT NULL,
-            asset_id TEXT NOT NULL,
-            wallet_address TEXT NOT NULL,
-            condition_id TEXT NOT NULL,
-            trade_ts INTEGER NOT NULL,
-            built_at INTEGER NOT NULL,
-            prior_trades_count INTEGER NOT NULL,
-            prior_buys_count INTEGER NOT NULL,
-            prior_resolved_buys INTEGER NOT NULL,
-            prior_wins INTEGER NOT NULL,
-            prior_losses INTEGER NOT NULL,
-            win_rate REAL,
-            avg_implied_prob_paid REAL,
-            realized_edge_pp REAL,
-            prior_realized_pnl_usd REAL NOT NULL DEFAULT 0,
-            avg_bet_size_usd REAL,
-            median_bet_size_usd REAL,
-            wallet_age_days REAL NOT NULL,
-            seconds_since_last_trade INTEGER,
-            prior_trades_30d INTEGER NOT NULL,
-            top_category TEXT,
-            category_diversity INTEGER NOT NULL,
-            bet_size_usd REAL NOT NULL,
-            bet_size_rel_to_avg REAL,
-            edge_confidence_weighted REAL NOT NULL DEFAULT 0,
-            win_rate_confidence_weighted REAL NOT NULL DEFAULT 0,
-            is_high_quality_wallet INTEGER NOT NULL DEFAULT 0,
-            bet_size_relative_to_history REAL NOT NULL DEFAULT 1,
-            side TEXT NOT NULL,
-            implied_prob_at_buy REAL NOT NULL,
-            market_category TEXT NOT NULL,
-            market_volume_so_far_usd REAL NOT NULL,
-            market_unique_traders_so_far INTEGER NOT NULL,
-            market_age_seconds INTEGER NOT NULL,
-            time_to_resolution_seconds INTEGER,
-            last_trade_price REAL,
-            price_volatility_recent REAL,
-            label_won INTEGER NOT NULL,
-            UNIQUE (platform, tx_hash, asset_id, wallet_address)
-        )
-        """
-    )
-    # Tasks 7-11 will populate this. Skeleton keeps it empty so parity
+    # v2 table already exists (created by _create_v2_via_sqlite3 with the
+    # canonical DDL including DEFAULT 'polymarket' and CHECK constraints).
+    # Tasks 7-11 will populate it. Skeleton keeps it empty so the parity
     # test fails on row count, not on a crash.
     del platform, now_ts  # unused in skeleton
 
