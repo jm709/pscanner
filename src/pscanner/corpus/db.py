@@ -37,6 +37,8 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
       market_slug TEXT,
       onchain_trades_count INTEGER,
       onchain_processed_at INTEGER,
+      tags_json TEXT NOT NULL DEFAULT '[]',
+      categories_json TEXT NOT NULL DEFAULT '[]',
       PRIMARY KEY (platform, condition_id)
     )
     """,
@@ -218,6 +220,11 @@ _MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE training_examples ADD COLUMN win_rate_confidence_weighted REAL NOT NULL DEFAULT 0",
     "ALTER TABLE training_examples ADD COLUMN is_high_quality_wallet INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE training_examples ADD COLUMN bet_size_relative_to_history REAL NOT NULL DEFAULT 1",
+    # Raw gamma tag list (JSON-encoded) and the derived multi-label category set
+    # for the corpus market. Populated by `pscanner corpus backfill-gamma-tags`
+    # (issue #121) and by `enumerate_closed_markets` on new inserts going forward.
+    "ALTER TABLE corpus_markets ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE corpus_markets ADD COLUMN categories_json TEXT NOT NULL DEFAULT '[]'",
     # Path A perf (#114): the existing 4-column index was non-covering for the
     # build-features chronological scan, so each fetched row triggered a heap
     # rowid lookup. Replace with an 11-column index that covers every column the
