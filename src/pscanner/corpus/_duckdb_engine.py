@@ -512,10 +512,40 @@ def _build_training_examples_v2(
             wcs.top_category,
             CAST(COALESCE(wcs.category_diversity, 0) AS INTEGER) AS category_diversity,
             wa.notional_usd AS bet_size_usd,
-            CAST(NULL AS DOUBLE) AS bet_size_rel_to_avg,  -- Task 11
-            CAST(0.0 AS DOUBLE) AS edge_confidence_weighted,  -- Task 11
-            CAST(0.0 AS DOUBLE) AS win_rate_confidence_weighted,  -- Task 11
-            CAST(0 AS INTEGER) AS is_high_quality_wallet,  -- Task 11
+            CASE
+                WHEN COALESCE(wa.bet_size_count_w, 0) > 0
+                 AND wa.bet_size_sum_w > 0
+                THEN wa.notional_usd / (wa.bet_size_sum_w / wa.bet_size_count_w)
+                ELSE NULL
+            END AS bet_size_rel_to_avg,
+            CASE
+                WHEN wa.prior_resolved_buys_w > 0
+                 AND COALESCE(wa.bet_size_count_w, 0) > 0
+                THEN (
+                    (CAST(wa.prior_wins_w AS DOUBLE) / wa.prior_resolved_buys_w
+                     - wa.cumulative_buy_price_sum_w / wa.bet_size_count_w)
+                    * LEAST(1.0, CAST(wa.prior_resolved_buys_w AS DOUBLE) / 20.0)
+                )
+                ELSE 0.0
+            END AS edge_confidence_weighted,
+            CASE
+                WHEN wa.prior_resolved_buys_w > 0
+                THEN (
+                    (CAST(wa.prior_wins_w AS DOUBLE) / wa.prior_resolved_buys_w - 0.5)
+                    * LEAST(1.0, CAST(wa.prior_resolved_buys_w AS DOUBLE) / 20.0)
+                )
+                ELSE 0.0
+            END AS win_rate_confidence_weighted,
+            CAST(
+                CASE
+                    WHEN wa.prior_resolved_buys_w >= 20
+                     AND (
+                        CAST(wa.prior_wins_w AS DOUBLE)
+                        / NULLIF(wa.prior_resolved_buys_w, 0)
+                     ) > 0.55
+                    THEN 1 ELSE 0
+                END AS INTEGER
+            ) AS is_high_quality_wallet,
             CAST(1.0 AS DOUBLE) AS bet_size_relative_to_history,
             wa.outcome_side AS side,
             wa.price AS implied_prob_at_buy,
