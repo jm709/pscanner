@@ -65,8 +65,8 @@ class CorpusMarketsRepo:
             """
             INSERT OR IGNORE INTO corpus_markets (
               platform, condition_id, event_slug, category, closed_at, total_volume_usd,
-              market_slug, backfill_state, enumerated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+              market_slug, backfill_state, enumerated_at, tags_json, categories_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
             """,
             (
                 market.platform,
@@ -77,6 +77,8 @@ class CorpusMarketsRepo:
                 market.total_volume_usd,
                 market.market_slug,
                 market.enumerated_at,
+                market.tags_json,
+                market.categories_json,
             ),
         )
         inserted = cur.rowcount or 0

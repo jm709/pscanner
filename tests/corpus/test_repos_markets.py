@@ -357,3 +357,48 @@ def test_corpus_market_accepts_explicit_tags_json() -> None:
     )
     assert market.tags_json == '["Sports", "NBA"]'
     assert market.categories_json == '["sports"]'
+
+
+def test_insert_pending_writes_tags_and_categories_json(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    repo = CorpusMarketsRepo(tmp_corpus_db)
+    market = CorpusMarket(
+        condition_id="0xc1",
+        event_slug="nba-final",
+        category="sports",
+        closed_at=0,
+        total_volume_usd=1.0,
+        enumerated_at=0,
+        market_slug="nba-final-okc",
+        tags_json='["Sports", "NBA"]',
+        categories_json='["sports"]',
+    )
+    repo.insert_pending(market)
+    row = tmp_corpus_db.execute(
+        "SELECT tags_json, categories_json FROM corpus_markets WHERE condition_id = '0xc1'"
+    ).fetchone()
+    assert row["tags_json"] == '["Sports", "NBA"]'
+    assert row["categories_json"] == '["sports"]'
+
+
+def test_insert_pending_defaults_keep_existing_callers_working(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """A market constructed without tag fields lands with '[]' defaults."""
+    repo = CorpusMarketsRepo(tmp_corpus_db)
+    market = CorpusMarket(
+        condition_id="0xc2",
+        event_slug="ev",
+        category="thesis",
+        closed_at=0,
+        total_volume_usd=1.0,
+        enumerated_at=0,
+        market_slug="",
+    )
+    repo.insert_pending(market)
+    row = tmp_corpus_db.execute(
+        "SELECT tags_json, categories_json FROM corpus_markets WHERE condition_id = '0xc2'"
+    ).fetchone()
+    assert row["tags_json"] == "[]"
+    assert row["categories_json"] == "[]"
