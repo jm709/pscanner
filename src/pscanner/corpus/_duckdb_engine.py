@@ -350,6 +350,72 @@ def _build_training_examples_v2(
                     ORDER BY event_ts, kind_priority, tx_hash, asset_id
                     ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
                 )
+        ),
+        -- Per-(wallet, category) first-seen metadata used for tie-breaking.
+        -- Only BUYs contribute to category_counts in Python (see
+        -- apply_buy_to_state vs apply_sell_to_state in features.py).
+        -- insertion_rank assigns 1 to the earliest-inserted category per wallet,
+        -- matching Python's dict-iteration-order tiebreak: when two categories
+        -- have the same count, the one with the lower rank (inserted first) wins.
+        wallet_cat_buys AS (
+            SELECT wallet_address, event_ts, kind_priority, tx_hash, asset_id, category,
+                   MIN(event_ts) OVER (PARTITION BY wallet_address, category) AS cat_first_ts,
+                   MIN(tx_hash) OVER (PARTITION BY wallet_address, category) AS cat_first_tx
+            FROM events
+            WHERE is_buy_only = 1 AND is_trade = 1
+        ),
+        wallet_cat_rank AS (
+            SELECT DISTINCT
+                wallet_address, category,
+                DENSE_RANK() OVER (
+                    PARTITION BY wallet_address
+                    ORDER BY cat_first_ts ASC, cat_first_tx ASC
+                ) AS insertion_rank
+            FROM wallet_cat_buys
+        ),
+        -- For each target event, count prior BUYs per category by joining all
+        -- BUY events that are strictly before this event (strict-< on the
+        -- canonical sort key: event_ts, kind_priority, tx_hash, asset_id).
+        wallet_cat_prior_counts AS (
+            SELECT
+                te.wallet_address, te.event_ts, te.kind_priority,
+                te.tx_hash, te.asset_id,
+                wcr.category, wcr.insertion_rank,
+                COUNT(*) AS cat_count_prior
+            FROM events te
+            JOIN wallet_cat_buys b
+                ON  b.wallet_address = te.wallet_address
+                AND (
+                    b.event_ts < te.event_ts
+                    OR (b.event_ts = te.event_ts AND b.kind_priority < te.kind_priority)
+                    OR (b.event_ts = te.event_ts AND b.kind_priority = te.kind_priority
+                        AND b.tx_hash < te.tx_hash)
+                    OR (b.event_ts = te.event_ts AND b.kind_priority = te.kind_priority
+                        AND b.tx_hash = te.tx_hash AND b.asset_id < te.asset_id)
+                )
+            JOIN wallet_cat_rank wcr
+                ON  wcr.wallet_address = b.wallet_address
+                AND wcr.category = b.category
+            WHERE te.is_trade = 1
+            GROUP BY
+                te.wallet_address, te.event_ts, te.kind_priority,
+                te.tx_hash, te.asset_id,
+                wcr.category, wcr.insertion_rank
+        ),
+        -- Collapse per-(event, category) rows to per-event (top_category, diversity).
+        -- ARG_MAX key: primary = cat_count_prior DESC (higher count wins),
+        -- secondary = insertion_rank DESC (lower rank = earlier insertion, so
+        -- negating means higher neg_rank → larger key → ARG_MAX picks the winner).
+        wallet_cat_summary AS (
+            SELECT
+                wallet_address, event_ts, kind_priority, tx_hash, asset_id,
+                ARG_MAX(category, STRUCT_PACK(
+                    cnt := cat_count_prior,
+                    neg_rank := -insertion_rank
+                )) AS top_category,
+                COUNT(DISTINCT category) AS category_diversity
+            FROM wallet_cat_prior_counts
+            GROUP BY wallet_address, event_ts, kind_priority, tx_hash, asset_id
         )
         SELECT
             '{platform}' AS platform,
@@ -385,8 +451,8 @@ def _build_training_examples_v2(
                  THEN CAST(wa.event_ts - wa.last_trade_ts_w AS INTEGER)
                  ELSE NULL END AS seconds_since_last_trade,
             CAST(COALESCE(wa.prior_trades_30d_w, 0) AS INTEGER) AS prior_trades_30d,
-            CAST(NULL AS VARCHAR) AS top_category,        -- Task 9
-            CAST(0 AS INTEGER) AS category_diversity,     -- Task 9
+            wcs.top_category,
+            CAST(COALESCE(wcs.category_diversity, 0) AS INTEGER) AS category_diversity,
             wa.notional_usd AS bet_size_usd,
             CAST(NULL AS DOUBLE) AS bet_size_rel_to_avg,  -- Task 11
             CAST(0.0 AS DOUBLE) AS edge_confidence_weighted,  -- Task 11
@@ -411,6 +477,8 @@ def _build_training_examples_v2(
         FROM wallet_acc wa
         JOIN wallet_first_seen wfs USING (wallet_address)
         JOIN resolutions r USING (condition_id)
+        LEFT JOIN wallet_cat_summary wcs
+            USING (wallet_address, event_ts, kind_priority, tx_hash, asset_id)
         WHERE wa.is_buy_only = 1
         """  # noqa: S608
     )
