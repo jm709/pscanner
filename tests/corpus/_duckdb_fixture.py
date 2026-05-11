@@ -82,7 +82,7 @@ def _insert_trades(conn: sqlite3.Connection) -> None:
       1_000_000 W1 BUY  MKT_A  YES @ 0.40  size=100 notional=40
       1_000_000 W1 BUY  MKT_B  YES @ 0.30  size=100 notional=30   (same ts; tiebreak by tx_hash)
       1_000_500 W2 BUY  MKT_A  NO  @ 0.55  size=50  notional=27.5
-      1_001_000 W1 SELL MKT_A  YES @ 0.45  size=10  notional=4.5  (below floor; filtered out)
+      1_001_000 W1 SELL MKT_A  YES @ 0.45  size=30  notional=13.5
       1_500_000 W3 BUY  MKT_C  YES @ 0.20  size=200 notional=40
       1_900_000 W1 BUY  MKT_C  NO  @ 0.85  size=50  notional=42.5
       2_000_000 (RESOLUTION MKT_A yes_won=1)                       (same ts as next BUY)
@@ -91,9 +91,8 @@ def _insert_trades(conn: sqlite3.Connection) -> None:
       2_001_000 (RESOLUTION MKT_C yes_won=1)
       2_100_000 W1 BUY  MKT_D  YES @ 0.50  size=40  notional=20   (MKT_D never resolves)
 
-    Note: tx_d (SELL at 4.5 notional) is below the $10 polymarket floor and
-    will be silently filtered by insert_batch; the fixture lands 7 rows not 8.
-    The smoke test accounts for this by expecting trades=7.
+    All trades pass the $10 notional floor. The SELL (tx_d) exercises
+    the edge case of recency-only updates that don't affect BUY aggregates.
     """
     def _t(
         tx: str,
@@ -113,7 +112,7 @@ def _insert_trades(conn: sqlite3.Connection) -> None:
         _t("tx_a", "asset_a_yes", "0xw1", "MKT_A", "YES", "BUY",  0.40, 100.0,  40.0, 1_000_000),
         _t("tx_b", "asset_b_yes", "0xw1", "MKT_B", "YES", "BUY",  0.30, 100.0,  30.0, 1_000_000),
         _t("tx_c", "asset_a_no",  "0xw2", "MKT_A", "NO",  "BUY",  0.55,  50.0,  27.5, 1_000_500),
-        _t("tx_d", "asset_a_yes", "0xw1", "MKT_A", "YES", "SELL", 0.45,  10.0,   4.5, 1_001_000),
+        _t("tx_d", "asset_a_yes", "0xw1", "MKT_A", "YES", "SELL", 0.45,  30.0,  13.5, 1_001_000),
         _t("tx_e", "asset_c_yes", "0xw3", "MKT_C", "YES", "BUY",  0.20, 200.0,  40.0, 1_500_000),
         _t("tx_f", "asset_c_no",  "0xw1", "MKT_C", "NO",  "BUY",  0.85,  50.0,  42.5, 1_900_000),
         _t("tx_g", "asset_b_no",  "0xw2", "MKT_B", "NO",  "BUY",  0.65,  80.0,  52.0, 2_000_000),
