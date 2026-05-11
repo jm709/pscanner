@@ -364,8 +364,16 @@ def _build_training_examples_v2(
             CASE WHEN wa.prior_resolved_buys_w > 0
                  THEN CAST(wa.prior_wins_w AS DOUBLE) / wa.prior_resolved_buys_w
                  ELSE NULL END AS win_rate,
-            CAST(NULL AS DOUBLE) AS avg_implied_prob_paid,  -- Task 8
-            CAST(NULL AS DOUBLE) AS realized_edge_pp,       -- Task 8
+            CASE WHEN COALESCE(wa.bet_size_count_w, 0) > 0
+                 THEN wa.cumulative_buy_price_sum_w / wa.bet_size_count_w
+                 ELSE NULL END AS avg_implied_prob_paid,
+            CASE
+                WHEN wa.prior_resolved_buys_w > 0
+                 AND COALESCE(wa.bet_size_count_w, 0) > 0
+                THEN (CAST(wa.prior_wins_w AS DOUBLE) / wa.prior_resolved_buys_w)
+                     - (wa.cumulative_buy_price_sum_w / wa.bet_size_count_w)
+                ELSE NULL
+            END AS realized_edge_pp,
             wa.prior_realized_pnl_w AS prior_realized_pnl_usd,
             CASE WHEN COALESCE(wa.bet_size_count_w, 0) > 0
                  THEN wa.bet_size_sum_w / wa.bet_size_count_w
