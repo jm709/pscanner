@@ -327,3 +327,33 @@ def test_insert_pending_backfill_does_not_overwrite_existing_slug(
         "SELECT market_slug FROM corpus_markets WHERE condition_id = 'cond1'"
     ).fetchone()
     assert row["market_slug"] == "original-slug"
+
+
+def test_corpus_market_default_tags_json_is_empty_list() -> None:
+    market = CorpusMarket(
+        condition_id="0xc1",
+        event_slug="test",
+        category="thesis",
+        closed_at=0,
+        total_volume_usd=0.0,
+        enumerated_at=0,
+        market_slug="",
+    )
+    assert market.tags_json == "[]"
+    assert market.categories_json == "[]"
+
+
+def test_corpus_market_accepts_explicit_tags_json() -> None:
+    market = CorpusMarket(
+        condition_id="0xc1",
+        event_slug="test",
+        category="thesis",
+        closed_at=0,
+        total_volume_usd=0.0,
+        enumerated_at=0,
+        market_slug="",
+        tags_json='["Sports", "NBA"]',
+        categories_json='["sports"]',
+    )
+    assert market.tags_json == '["Sports", "NBA"]'
+    assert market.categories_json == '["sports"]'

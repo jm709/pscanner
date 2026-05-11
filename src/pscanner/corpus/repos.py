@@ -20,6 +20,12 @@ class CorpusMarket:
     Identifies a closed market by ``(platform, condition_id)``. The
     ``backfill_state`` is tracked separately on the row and progresses
     ``pending → in_progress → complete | failed``.
+
+    ``tags_json`` stores the raw gamma tag list as JSON-encoded text;
+    ``categories_json`` stores the derived multi-label category set
+    (per :func:`pscanner.categories.categorize_tags`). Both default to
+    ``'[]'`` so callers that don't yet have tags can construct a row
+    pending backfill (issue #121).
     """
 
     condition_id: str
@@ -30,6 +36,8 @@ class CorpusMarket:
     enumerated_at: int
     market_slug: str
     platform: str = "polymarket"
+    tags_json: str = "[]"
+    categories_json: str = "[]"
 
 
 class CorpusMarketsRepo:
