@@ -15,8 +15,11 @@ import time
 from contextlib import AsyncExitStack
 from pathlib import Path
 
+import psutil
 import structlog
 
+from pscanner.corpus._build_features_sentinel import check_and_set_sentinel, clear_sentinel
+from pscanner.corpus._duckdb_engine import build_features_duckdb
 from pscanner.corpus.db import apply_read_pragmas, init_corpus_db
 from pscanner.corpus.enumerator import enumerate_closed_markets
 from pscanner.corpus.examples import build_features
@@ -122,6 +125,43 @@ def build_corpus_parser() -> argparse.ArgumentParser:
         choices=["polymarket", "manifold"],
         default="polymarket",
         help="Platform whose corpus rows feed the training_examples build.",
+    )
+    bf.add_argument(
+        "--engine",
+        type=str,
+        choices=["python", "duckdb"],
+        default="python",
+        help=(
+            "Build engine. `python` is the row-by-row streaming fold (6h on "
+            "the production corpus). `duckdb` is the SQL-pipeline rewrite "
+            "(target 5-25 min). See issue #116. Default `python` until "
+            "parity is gated."
+        ),
+    )
+    bf.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Override the build_features_in_progress sentinel if a prior "
+            "run crashed without clearing it."
+        ),
+    )
+    bf.add_argument(
+        "--duckdb-memory",
+        type=str,
+        default=None,
+        help=(
+            "DuckDB memory_limit (e.g. '6GB'). Default: min(available//2, 12GB). "
+            "Only relevant with --engine duckdb."
+        ),
+    )
+    bf.add_argument(
+        "--duckdb-threads",
+        type=int,
+        default=None,
+        help=(
+            "DuckDB thread count. Default: min(cpu_count, 8). Only relevant with --engine duckdb."
+        ),
     )
     ob = sub.add_parser(
         "onchain-backfill",
@@ -552,31 +592,90 @@ async def _run_kalshi_refresh(args: argparse.Namespace) -> int:
 
 
 async def _cmd_build_features(args: argparse.Namespace) -> int:
-    """Rebuild the training_examples table from raw corpus_trades + resolutions."""
+    """Rebuild the training_examples table. Dispatches on ``--engine``."""
     db_path = Path(args.db)
+    now_ts = int(time.time())
+
+    # Sentinel guard runs for BOTH engines: a crashed Python build also
+    # needs --force on retry, since training_examples may be half-truncated.
+    sentinel_conn = init_corpus_db(db_path)
+    try:
+        check_and_set_sentinel(
+            CorpusStateRepo(sentinel_conn),
+            now_ts=now_ts,
+            force=bool(getattr(args, "force", False)),
+        )
+    finally:
+        sentinel_conn.close()
+
+    engine = getattr(args, "engine", "python")
+    try:
+        if engine == "duckdb":
+            written = _run_duckdb_engine(args=args, db_path=db_path, now_ts=now_ts)
+        else:
+            written = _run_python_engine(args=args, db_path=db_path, now_ts=now_ts)
+    except BaseException:
+        # Leave the sentinel set so the operator must --force to recover.
+        # This is intentional: a partial rebuild left the table in an
+        # inconsistent state (Python: truncated; DuckDB: pre-swap with v2 lingering).
+        raise
+
+    # DuckDB engine clears the sentinel inside the swap txn. Python engine
+    # has no swap; clear here on success.
+    if engine != "duckdb":
+        clear_conn = init_corpus_db(db_path)
+        try:
+            clear_sentinel(CorpusStateRepo(clear_conn))
+        finally:
+            clear_conn.close()
+
+    _log.info("corpus.build_features_done", written=written, engine=engine)
+    return 0
+
+
+def _run_python_engine(*, args: argparse.Namespace, db_path: Path, now_ts: int) -> int:
+    """Run the row-by-row Python streaming build engine."""
     write_conn = init_corpus_db(db_path)
-    # Dedicated read-only connection for the streaming chronological cursor
-    # so writes (INSERT OR IGNORE) don't contend with the read txn (#110).
-    # Tune for a 32 GB DB: ~4 GB cache + 8 GB mmap window so the heap rowid
-    # lookups don't thrash an 8 MB default cache (#114 Path A, Task 1).
     read_conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     read_conn.row_factory = sqlite3.Row
     apply_read_pragmas(read_conn)
     try:
-        written = build_features(
+        return build_features(
             trades_repo=CorpusTradesRepo(read_conn),
             resolutions_repo=MarketResolutionsRepo(write_conn),
             examples_repo=TrainingExamplesRepo(write_conn),
             markets_conn=write_conn,
-            now_ts=int(time.time()),
+            now_ts=now_ts,
             rebuild=bool(getattr(args, "rebuild", False)),
             platform=args.platform,
         )
-        _log.info("corpus.build_features_done", written=written)
-        return 0
     finally:
         read_conn.close()
         write_conn.close()
+
+
+def _run_duckdb_engine(*, args: argparse.Namespace, db_path: Path, now_ts: int) -> int:
+    """Run the DuckDB SQL-pipeline build engine."""
+    memory_limit = getattr(args, "duckdb_memory", None) or _default_duckdb_memory()
+    threads = getattr(args, "duckdb_threads", None) or min(os.cpu_count() or 4, 8)
+    temp_dir = db_path.parent / "duckdb_spill"
+
+    return build_features_duckdb(
+        db_path=db_path,
+        platform=args.platform,
+        now_ts=now_ts,
+        memory_limit=memory_limit,
+        temp_dir=temp_dir,
+        threads=threads,
+    )
+
+
+def _default_duckdb_memory() -> str:
+    """Default to min(available_memory // 2, 12GB) as bytes-string."""
+    half = psutil.virtual_memory().available // 2
+    cap = 12 * 1024 * 1024 * 1024
+    chosen = min(half, cap)
+    return str(chosen)
 
 
 async def _cmd_onchain_backfill(args: argparse.Namespace) -> int:
