@@ -42,13 +42,20 @@ def build_fixture_db(path: Path) -> None:
 
 
 def _insert_markets(conn: sqlite3.Connection) -> None:
-    """Four markets: 3 resolved (sports/esports/politics), 1 unresolved."""
+    """Four markets: 3 resolved (sports/esports/politics), 1 unresolved.
+
+    ``categories_json`` is populated for MKT_A (multi-label: sports + thesis)
+    and MKT_B (single-label: esports) to exercise both paths through the
+    ``cat_*`` indicator logic. MKT_C and MKT_D use the default ``'[]'`` so the
+    fallback-to-primary-category path is covered too.
+    """
     rows = [
         (
             "polymarket",
             "MKT_A",
             "ev-a",
             "sports",
+            '["sports","thesis"]',
             2_000_000,
             5000.0,
             "complete",
@@ -68,6 +75,7 @@ def _insert_markets(conn: sqlite3.Connection) -> None:
             "MKT_B",
             "ev-b",
             "esports",
+            '["esports"]',
             2_000_500,
             7000.0,
             "complete",
@@ -87,6 +95,7 @@ def _insert_markets(conn: sqlite3.Connection) -> None:
             "MKT_C",
             "ev-c",
             "politics",
+            "[]",
             2_001_000,
             3000.0,
             "complete",
@@ -106,6 +115,7 @@ def _insert_markets(conn: sqlite3.Connection) -> None:
             "MKT_D",
             "ev-d",
             "sports",
+            "[]",
             0,
             1000.0,
             "complete",
@@ -124,12 +134,12 @@ def _insert_markets(conn: sqlite3.Connection) -> None:
     conn.executemany(
         """
         INSERT INTO corpus_markets (
-          platform, condition_id, event_slug, category, closed_at,
+          platform, condition_id, event_slug, category, categories_json, closed_at,
           total_volume_usd, backfill_state, last_offset_seen,
           trades_pulled_count, truncated_at_offset_cap, error_message,
           enumerated_at, backfill_started_at, backfill_completed_at,
           market_slug, onchain_trades_count, onchain_processed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )

@@ -197,6 +197,15 @@ def _create_v2_via_sqlite3(*, db_path: Path) -> None:
               win_rate_confidence_weighted REAL NOT NULL DEFAULT 0,
               is_high_quality_wallet INTEGER NOT NULL DEFAULT 0,
               bet_size_relative_to_history REAL NOT NULL DEFAULT 1,
+              cat_sports INTEGER NOT NULL DEFAULT 0,
+              cat_esports INTEGER NOT NULL DEFAULT 0,
+              cat_thesis INTEGER NOT NULL DEFAULT 0,
+              cat_macro INTEGER NOT NULL DEFAULT 0,
+              cat_elections INTEGER NOT NULL DEFAULT 0,
+              cat_crypto INTEGER NOT NULL DEFAULT 0,
+              cat_geopolitics INTEGER NOT NULL DEFAULT 0,
+              cat_tech INTEGER NOT NULL DEFAULT 0,
+              cat_culture INTEGER NOT NULL DEFAULT 0,
               side TEXT NOT NULL,
               implied_prob_at_buy REAL NOT NULL,
               market_category TEXT NOT NULL,
@@ -227,7 +236,7 @@ def _materialize_trades(duck: duckdb.DuckDBPyConnection, *, platform: str) -> No
         SELECT
             t.tx_hash, t.asset_id, t.wallet_address, t.condition_id,
             t.outcome_side, t.bs, t.price, t.size, t.notional_usd, t.ts,
-            m.category, m.closed_at, m.enumerated_at
+            m.category, m.categories_json, m.closed_at, m.enumerated_at
         FROM corpus.corpus_trades t
         JOIN corpus.corpus_markets m
           ON m.platform = t.platform AND m.condition_id = t.condition_id
@@ -278,6 +287,8 @@ def _build_training_examples_v2(
             category_diversity, bet_size_usd, bet_size_rel_to_avg,
             edge_confidence_weighted, win_rate_confidence_weighted,
             is_high_quality_wallet, bet_size_relative_to_history,
+            cat_sports, cat_esports, cat_thesis, cat_macro, cat_elections,
+            cat_crypto, cat_geopolitics, cat_tech, cat_culture,
             side, implied_prob_at_buy, market_category, market_volume_so_far_usd,
             market_unique_traders_so_far, market_age_seconds,
             time_to_resolution_seconds, last_trade_price, price_volatility_recent,
@@ -293,7 +304,7 @@ def _build_training_examples_v2(
             SELECT
                 t.wallet_address, t.condition_id, t.ts AS event_ts,
                 t.tx_hash, t.asset_id, t.bs, t.outcome_side,
-                t.price, t.size, t.notional_usd, t.category,
+                t.price, t.size, t.notional_usd, t.category, t.categories_json,
                 t.closed_at, t.enumerated_at,
                 -- kind_priority=0 for trades (BUY/SELL) so they sort BEFORE
                 -- same-ts resolution events (kind_priority=1).  Python's heap
@@ -320,6 +331,7 @@ def _build_training_examples_v2(
                 CAST(NULL AS DOUBLE) AS size,
                 CAST(NULL AS DOUBLE) AS notional_usd,
                 CAST(NULL AS VARCHAR) AS category,
+                CAST(NULL AS VARCHAR) AS categories_json,
                 CAST(NULL AS INTEGER) AS closed_at,
                 CAST(NULL AS INTEGER) AS enumerated_at,
                 -- kind_priority=1 for resolutions: sorts AFTER same-ts BUYs.
@@ -605,6 +617,101 @@ def _build_training_examples_v2(
                 END AS INTEGER
             ) AS is_high_quality_wallet,
             CAST(1.0 AS DOUBLE) AS bet_size_relative_to_history,
+            -- cat_* indicator columns: 1 if the category label appears in
+            -- categories_json (multi-label set), else 0. When categories_json
+            -- is empty or NULL, fall back to checking the primary category
+            -- column — matches Python's ``category_set = set(meta.categories
+            -- or (meta.category,))`` logic in features.py.
+            CAST(
+                CASE
+                    WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
+                    THEN list_contains(
+                        CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]),
+                        'sports'
+                    )
+                    ELSE wa.category = 'sports'
+                END
+            AS INTEGER) AS cat_sports,
+            CAST(
+                CASE
+                    WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
+                    THEN list_contains(
+                        CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]),
+                        'esports'
+                    )
+                    ELSE wa.category = 'esports'
+                END
+            AS INTEGER) AS cat_esports,
+            CAST(
+                CASE
+                    WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
+                    THEN list_contains(
+                        CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]),
+                        'thesis'
+                    )
+                    ELSE wa.category = 'thesis'
+                END
+            AS INTEGER) AS cat_thesis,
+            CAST(
+                CASE
+                    WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
+                    THEN list_contains(
+                        CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]),
+                        'macro'
+                    )
+                    ELSE wa.category = 'macro'
+                END
+            AS INTEGER) AS cat_macro,
+            CAST(
+                CASE
+                    WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
+                    THEN list_contains(
+                        CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]),
+                        'elections'
+                    )
+                    ELSE wa.category = 'elections'
+                END
+            AS INTEGER) AS cat_elections,
+            CAST(
+                CASE
+                    WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
+                    THEN list_contains(
+                        CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]),
+                        'crypto'
+                    )
+                    ELSE wa.category = 'crypto'
+                END
+            AS INTEGER) AS cat_crypto,
+            CAST(
+                CASE
+                    WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
+                    THEN list_contains(
+                        CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]),
+                        'geopolitics'
+                    )
+                    ELSE wa.category = 'geopolitics'
+                END
+            AS INTEGER) AS cat_geopolitics,
+            CAST(
+                CASE
+                    WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
+                    THEN list_contains(
+                        CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]),
+                        'tech'
+                    )
+                    ELSE wa.category = 'tech'
+                END
+            AS INTEGER) AS cat_tech,
+            CAST(
+                CASE
+                    WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
+                    THEN list_contains(
+                        CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]),
+                        'culture'
+                    )
+                    ELSE wa.category = 'culture'
+                END
+            AS INTEGER) AS cat_culture,
             wa.outcome_side AS side,
             wa.price AS implied_prob_at_buy,
             wa.category AS market_category,
