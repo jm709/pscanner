@@ -317,6 +317,15 @@ class FeatureRow:
     implied_prob_at_buy: float
     market_category: str
     market_categories: tuple[str, ...]
+    cat_sports: int
+    cat_esports: int
+    cat_thesis: int
+    cat_macro: int
+    cat_elections: int
+    cat_crypto: int
+    cat_geopolitics: int
+    cat_tech: int
+    cat_culture: int
     market_volume_so_far_usd: float
     market_unique_traders_so_far: int
     market_age_seconds: int
@@ -411,6 +420,7 @@ def compute_features(trade: Trade, history: HistoryProvider) -> FeatureRow:
         else None
     )
     time_to_resolution = meta.closed_at - trade.ts
+    category_set = set(meta.categories or (meta.category,))
 
     return FeatureRow(
         prior_trades_count=wallet.prior_trades_count,
@@ -439,6 +449,15 @@ def compute_features(trade: Trade, history: HistoryProvider) -> FeatureRow:
         implied_prob_at_buy=implied_prob,
         market_category=meta.category,
         market_categories=meta.categories or (meta.category,),
+        cat_sports=int("sports" in category_set),
+        cat_esports=int("esports" in category_set),
+        cat_thesis=int("thesis" in category_set),
+        cat_macro=int("macro" in category_set),
+        cat_elections=int("elections" in category_set),
+        cat_crypto=int("crypto" in category_set),
+        cat_geopolitics=int("geopolitics" in category_set),
+        cat_tech=int("tech" in category_set),
+        cat_culture=int("culture" in category_set),
         market_volume_so_far_usd=market.volume_so_far_usd,
         market_unique_traders_so_far=market.unique_traders_count,
         market_age_seconds=trade.ts - market.market_age_start_ts,
