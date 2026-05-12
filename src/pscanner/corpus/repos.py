@@ -377,6 +377,11 @@ class CorpusStateRepo:
         )
         self._conn.commit()
 
+    def delete(self, key: str) -> None:
+        """Remove ``key`` if present. No-op if absent."""
+        self._conn.execute("DELETE FROM corpus_state WHERE key = ?", (key,))
+        self._conn.commit()
+
 
 _NOTIONAL_FLOORS: Final[dict[str, float]] = {
     "polymarket": 10.0,
