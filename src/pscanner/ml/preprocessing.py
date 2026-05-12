@@ -175,7 +175,17 @@ class OneHotEncoder:
 # anyway — excluding them at the SQL boundary avoids loading ~1+ GB of
 # hex-string columns (tx_hash, asset_id, wallet_address are 42-66 chars
 # x 5M rows each) only to drop them.
-_NEVER_LOAD_COLS: frozenset[str] = frozenset({"id", "platform", *LEAKAGE_COLS})
+_NEVER_LOAD_COLS: frozenset[str] = frozenset(
+    {
+        "id",
+        "platform",
+        # market_category is a TEXT column superseded by the 9 pre-binarized
+        # cat_* indicator columns added in #122; exclude it at SELECT time so it
+        # never reaches build_feature_matrix as an unconvertible string.
+        "market_category",
+        *LEAKAGE_COLS,
+    }
+)
 
 
 def build_feature_matrix(
