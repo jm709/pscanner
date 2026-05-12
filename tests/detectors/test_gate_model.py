@@ -46,6 +46,7 @@ def _train_dummy_model(
     (out_dir / "preprocessor.json").write_text(
         json.dumps(
             {
+                "version": 2,
                 "leakage_cols": [],
                 "carrier_cols": [],
                 "encoder": {"levels": {}},
@@ -663,3 +664,23 @@ def test_feature_cols_parity_against_training_derive_feature_names(tmp_path: Pat
     # appear in either side (it's a LEAKAGE_COL).
     assert "time_to_resolution_seconds" not in training_cols
     assert "time_to_resolution_seconds" not in detector._feature_cols
+
+
+@pytest.mark.asyncio
+async def test_loader_rejects_v1_preprocessor_artifact(tmp_path: Path) -> None:
+    """A preprocessor.json without ``version: 2`` must fail loading."""
+    artifact_dir = tmp_path / "model"
+    artifact_dir.mkdir()
+    _train_dummy_model(artifact_dir)
+    payload = json.loads((artifact_dir / "preprocessor.json").read_text())
+    payload.pop("version", None)
+    (artifact_dir / "preprocessor.json").write_text(json.dumps(payload))
+    cfg = GateModelConfig(enabled=True, artifact_dir=artifact_dir)
+    conn = _new_db()
+    try:
+        provider = LiveHistoryProvider(conn=conn, metadata={})
+        alerts_repo = AlertsRepo(conn)
+        with pytest.raises(ValueError, match=r"preprocessor\.json version"):
+            GateModelDetector(config=cfg, provider=provider, alerts_repo=alerts_repo)
+    finally:
+        conn.close()
