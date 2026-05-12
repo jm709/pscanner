@@ -592,6 +592,59 @@ def test_apply_migrations_is_idempotent_for_new_columns() -> None:
         conn.close()
 
 
+def test_training_examples_has_cat_columns() -> None:
+    conn = init_corpus_db(Path(":memory:"))
+    try:
+        info = conn.execute("PRAGMA table_info(training_examples)").fetchall()
+        cols = {row["name"] for row in info}
+        expected = {
+            "cat_sports",
+            "cat_esports",
+            "cat_thesis",
+            "cat_macro",
+            "cat_elections",
+            "cat_crypto",
+            "cat_geopolitics",
+            "cat_tech",
+            "cat_culture",
+        }
+        assert expected.issubset(cols)
+    finally:
+        conn.close()
+
+
+def test_training_examples_cat_columns_default_to_zero() -> None:
+    """A row inserted without specifying cat_* columns gets 0 defaults."""
+    conn = init_corpus_db(Path(":memory:"))
+    try:
+        conn.execute(
+            """
+            INSERT INTO training_examples (
+              platform, tx_hash, asset_id, wallet_address, condition_id, trade_ts,
+              built_at, prior_trades_count, prior_buys_count, prior_resolved_buys,
+              prior_wins, prior_losses, prior_realized_pnl_usd,
+              wallet_age_days, prior_trades_30d, category_diversity, bet_size_usd,
+              side, implied_prob_at_buy, market_category, market_volume_so_far_usd,
+              market_unique_traders_so_far, market_age_seconds, label_won
+            ) VALUES (
+              'polymarket', '0xa', '0xb', '0xc', '0xc1', 0,
+              0, 0, 0, 0, 0, 0, 0,
+              0.0, 0, 0, 1.0,
+              'YES', 0.5, 'sports', 0.0, 0, 0, 0
+            )
+            """
+        )
+        row = conn.execute(
+            "SELECT cat_sports, cat_esports, cat_thesis, cat_macro, cat_elections, "
+            "cat_crypto, cat_geopolitics, cat_tech, cat_culture FROM training_examples "
+            "WHERE tx_hash = '0xa'"
+        ).fetchone()
+        for col in row.keys():
+            assert row[col] == 0, f"{col} should default to 0"
+    finally:
+        conn.close()
+
+
 def test_cross_platform_rows_coexist() -> None:
     """Same condition_id under different platforms = two distinct rows."""
     conn = init_corpus_db(Path(":memory:"))
