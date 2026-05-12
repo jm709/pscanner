@@ -132,6 +132,15 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
       time_to_resolution_seconds INTEGER,
       last_trade_price REAL,
       price_volatility_recent REAL,
+      cat_sports INTEGER NOT NULL DEFAULT 0,
+      cat_esports INTEGER NOT NULL DEFAULT 0,
+      cat_thesis INTEGER NOT NULL DEFAULT 0,
+      cat_macro INTEGER NOT NULL DEFAULT 0,
+      cat_elections INTEGER NOT NULL DEFAULT 0,
+      cat_crypto INTEGER NOT NULL DEFAULT 0,
+      cat_geopolitics INTEGER NOT NULL DEFAULT 0,
+      cat_tech INTEGER NOT NULL DEFAULT 0,
+      cat_culture INTEGER NOT NULL DEFAULT 0,
       label_won INTEGER NOT NULL,
       UNIQUE (platform, tx_hash, asset_id, wallet_address)
     )
@@ -225,6 +234,17 @@ _MIGRATIONS: tuple[str, ...] = (
     # (issue #121) and by `enumerate_closed_markets` on new inserts going forward.
     "ALTER TABLE corpus_markets ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'",
     "ALTER TABLE corpus_markets ADD COLUMN categories_json TEXT NOT NULL DEFAULT '[]'",
+    # Multi-label category indicator columns (issue #122). One per Category
+    # enum member; build-features writes 0/1 per row from `features.market_categories`.
+    "ALTER TABLE training_examples ADD COLUMN cat_sports INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE training_examples ADD COLUMN cat_esports INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE training_examples ADD COLUMN cat_thesis INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE training_examples ADD COLUMN cat_macro INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE training_examples ADD COLUMN cat_elections INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE training_examples ADD COLUMN cat_crypto INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE training_examples ADD COLUMN cat_geopolitics INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE training_examples ADD COLUMN cat_tech INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE training_examples ADD COLUMN cat_culture INTEGER NOT NULL DEFAULT 0",
     # Path A perf (#114): the existing 4-column index was non-covering for the
     # build-features chronological scan, so each fetched row triggered a heap
     # rowid lookup. Replace with an 11-column index that covers every column the
@@ -497,6 +517,15 @@ def _migrate_training_examples_add_platform(conn: sqlite3.Connection) -> None:
               time_to_resolution_seconds INTEGER,
               last_trade_price REAL,
               price_volatility_recent REAL,
+              cat_sports INTEGER NOT NULL DEFAULT 0,
+              cat_esports INTEGER NOT NULL DEFAULT 0,
+              cat_thesis INTEGER NOT NULL DEFAULT 0,
+              cat_macro INTEGER NOT NULL DEFAULT 0,
+              cat_elections INTEGER NOT NULL DEFAULT 0,
+              cat_crypto INTEGER NOT NULL DEFAULT 0,
+              cat_geopolitics INTEGER NOT NULL DEFAULT 0,
+              cat_tech INTEGER NOT NULL DEFAULT 0,
+              cat_culture INTEGER NOT NULL DEFAULT 0,
               label_won INTEGER NOT NULL,
               UNIQUE (platform, tx_hash, asset_id, wallet_address)
             )
@@ -521,6 +550,8 @@ def _migrate_training_examples_add_platform(conn: sqlite3.Connection) -> None:
               side, implied_prob_at_buy, market_category, market_volume_so_far_usd,
               market_unique_traders_so_far, market_age_seconds,
               time_to_resolution_seconds, last_trade_price, price_volatility_recent,
+              cat_sports, cat_esports, cat_thesis, cat_macro, cat_elections,
+              cat_crypto, cat_geopolitics, cat_tech, cat_culture,
               label_won
             )
             SELECT
@@ -536,6 +567,7 @@ def _migrate_training_examples_add_platform(conn: sqlite3.Connection) -> None:
               side, implied_prob_at_buy, market_category, market_volume_so_far_usd,
               market_unique_traders_so_far, market_age_seconds,
               time_to_resolution_seconds, last_trade_price, price_volatility_recent,
+              0, 0, 0, 0, 0, 0, 0, 0, 0,
               label_won
             FROM training_examples
             """

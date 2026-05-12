@@ -23,7 +23,7 @@ import dataclasses
 import hashlib
 import json
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import numpy as np
 import polars as pl
@@ -46,6 +46,8 @@ if TYPE_CHECKING:
     from pscanner.store.repo import AlertsRepo, MarketCacheRepo, WalletTrade
 
 _LOG = structlog.get_logger(__name__)
+
+_REQUIRED_PREPROCESSOR_VERSION: Final[int] = 2
 
 
 class GateModelDetector(TradeDrivenDetector):
@@ -82,6 +84,14 @@ class GateModelDetector(TradeDrivenDetector):
         self._booster = xgb.Booster()
         self._booster.load_model(str(artifact_dir / "model.json"))
         payload = json.loads((artifact_dir / "preprocessor.json").read_text())
+        version = payload.get("version", 1)
+        if version < _REQUIRED_PREPROCESSOR_VERSION:
+            msg = (
+                f"preprocessor.json version {version} is older than "
+                f"required version {_REQUIRED_PREPROCESSOR_VERSION}; "
+                f"retrain with the current pipeline (#122)."
+            )
+            raise ValueError(msg)
         self._encoder = OneHotEncoder.from_json({"levels": payload["encoder"]["levels"]})
         cfg_categories = config.accepted_categories
         if cfg_categories is None:
@@ -302,7 +312,7 @@ class GateModelDetector(TradeDrivenDetector):
                 "implied_prob_at_buy": float(features.implied_prob_at_buy),
                 "pred": float(pred),
                 "edge": float(edge),
-                "top_category": features.market_category,
+                "market_category": features.market_category,
                 "model_version": self._model_version,
                 "trade_ts": trade.timestamp,
                 "bet_size_usd": float(trade.usd_value),

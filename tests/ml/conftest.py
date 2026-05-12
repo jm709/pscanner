@@ -20,6 +20,26 @@ from pscanner.corpus.db import init_corpus_db
 _BASE_RESOLVED_AT = 1_700_000_000
 _DAY_SECONDS = 86_400
 
+_CAT_CANONICAL = frozenset(
+    {
+        "sports",
+        "esports",
+        "thesis",
+        "macro",
+        "elections",
+        "crypto",
+        "geopolitics",
+        "tech",
+        "culture",
+    }
+)
+
+
+def _cat_indicators(category: str | None) -> dict[str, int]:
+    """Multi-hot one for the named category, zero everywhere else."""
+    c = category if category in _CAT_CANONICAL else None
+    return {f"cat_{name}": int(c == name) for name in sorted(_CAT_CANONICAL)}
+
 
 def _seed_db_from_synthetic(
     conn: sqlite3.Connection,
@@ -153,6 +173,7 @@ def _make_synthetic_examples(
                     "side": side,
                     "implied_prob_at_buy": implied_prob,
                     "market_category": str(rng.choice(["sports", "esports", "thesis", "unknown"])),
+                    **_cat_indicators(top_cat),
                     "market_volume_so_far_usd": float(rng.uniform(1000, 1e6)),
                     "market_unique_traders_so_far": int(rng.integers(1, 500)),
                     "market_age_seconds": int(rng.integers(60, _DAY_SECONDS * 30)),

@@ -6,7 +6,8 @@ and the corpus, replicates the temporal test split, then prints:
 * Test AUC
 * Top-N features by xgboost gain
 * Top-N features by mean(|SHAP|) — global importance via ``pred_contribs``
-* Per-``top_category`` accuracy and realized-edge breakdown
+* Per-``top_category`` accuracy and realized-edge breakdown (wallet-level)
+* Per-``cat_*`` accuracy and realized-edge breakdown (market-level, multi-label, #122)
 
 Doesn't pull in the ``shap`` package — uses xgboost's native ``pred_contribs``
 which gives the same global mean(|SHAP|) without the extra dependency.
@@ -23,7 +24,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 from pathlib import Path
+from typing import Final
 
 import numpy as np
 import xgboost as xgb
@@ -32,6 +35,18 @@ from pscanner.ml.preprocessing import OneHotEncoder
 from pscanner.ml.streaming import open_dataset
 
 _BINARY_DECISION_THRESHOLD = 0.5
+
+_CAT_COLUMNS: Final[tuple[str, ...]] = (
+    "cat_sports",
+    "cat_esports",
+    "cat_thesis",
+    "cat_macro",
+    "cat_elections",
+    "cat_crypto",
+    "cat_geopolitics",
+    "cat_tech",
+    "cat_culture",
+)
 
 
 def _auc(y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
@@ -126,6 +141,88 @@ def _print_per_category_breakdown(
         print(f"  {cat:<20} {n:>10,} {won_rate:>10.4f} {accuracy:>10.4f} {n_taken:>10,} {edge_str}")
 
 
+def _load_test_cat_columns(
+    db_path: Path,
+    test_markets: frozenset[str],
+    *,
+    platform: str = "polymarket",
+) -> dict[str, np.ndarray]:
+    """Re-load the test split's cat_* columns via SQL.
+
+    Returns a dict mapping column name -> 1-D numpy array of length n_test.
+    Row ordering matches ``ds.materialize_test().y`` (uses ORDER BY te.id,
+    the same primary key the streaming iterator uses for chunk pagination).
+    """
+    if not test_markets:
+        return {col: np.zeros(0, dtype=np.int8) for col in _CAT_COLUMNS}
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("DROP TABLE IF EXISTS _analyze_test")
+        conn.execute("CREATE TEMP TABLE _analyze_test (condition_id TEXT PRIMARY KEY)")
+        conn.executemany(
+            "INSERT INTO _analyze_test VALUES (?)",
+            [(cid,) for cid in test_markets],
+        )
+        cols = ", ".join(_CAT_COLUMNS)
+        rows = conn.execute(
+            f"SELECT {cols} FROM training_examples te "  # noqa: S608 -- cols literal
+            "JOIN _analyze_test sm USING (condition_id) "
+            "WHERE te.platform = ? "
+            "ORDER BY te.id",
+            (platform,),
+        ).fetchall()
+    finally:
+        conn.close()
+    out: dict[str, np.ndarray] = {}
+    for col in _CAT_COLUMNS:
+        out[col] = np.array([row[col] for row in rows], dtype=np.int8)
+    return out
+
+
+def _print_per_category_any_breakdown(
+    cat_columns_test: dict[str, np.ndarray],
+    y_true: np.ndarray,
+    y_pred_proba: np.ndarray,
+    implied_prob: np.ndarray,
+) -> None:
+    """Print accuracy + realized edge stratified by multi-label cat_* column.
+
+    Unlike :func:`_print_per_category_breakdown` (which partitions by the
+    wallet-level ``top_category``), this iterates the market-level multi-hot
+    ``cat_*`` columns. A row with multiple cat_* columns set to 1 contributes
+    to every matching category's metric — so the row counts sum to MORE than
+    the test rowcount. That's the deliberate trade-off for cross-cutting
+    signal visibility (Decision E on #119).
+    """
+    print("\nPer-category breakdown (any-of-set, multi-label, #122):")
+    print("  Note: rows can appear in multiple buckets; sum(n) > test_rowcount.")
+    print(
+        f"  {'category':<20} {'n':>10} {'won_rate':>10} {'accuracy':>10} "
+        f"{'n_taken':>10} {'edge':>10}"
+    )
+    for cat_col in _CAT_COLUMNS:
+        mask = cat_columns_test[cat_col].astype(bool)
+        n = int(mask.sum())
+        if n == 0:
+            continue
+        won_rate = float(y_true[mask].mean())
+        pred_class = (y_pred_proba[mask] >= _BINARY_DECISION_THRESHOLD).astype(int)
+        accuracy = float((pred_class == y_true[mask]).mean())
+        take = y_pred_proba[mask] > implied_prob[mask]
+        n_taken = int(take.sum())
+        if n_taken > 0:
+            edge = float((y_true[mask][take] - implied_prob[mask][take]).mean())
+            edge_str = f"{edge:>10.4f}"
+        else:
+            edge_str = f"{'-':>10}"
+        # Strip the ``cat_`` prefix for display.
+        label = cat_col[4:]
+        print(
+            f"  {label:<20} {n:>10,} {won_rate:>10.4f} {accuracy:>10.4f} {n_taken:>10,} {edge_str}"
+        )
+
+
 def analyze(model_dir: Path, db_path: Path, top_k: int, platform: str = "polymarket") -> None:
     """End-to-end analysis: replicate test split, predict, print diagnostics."""
     print(f"Loading model from {model_dir}")
@@ -147,6 +244,7 @@ def analyze(model_dir: Path, db_path: Path, top_k: int, platform: str = "polymar
                 "model may be stale relative to the current corpus."
             )
         feature_cols = list(ds.feature_names)
+        test_markets_set = frozenset(ds._test_markets)
         test = ds.materialize_test()
 
     x_test = test.x
@@ -180,6 +278,19 @@ def analyze(model_dir: Path, db_path: Path, top_k: int, platform: str = "polymar
     _print_shap_importance(booster, dtest, feature_names=feature_cols, top_k=top_k)
     _print_per_category_breakdown(
         top_categories=top_categories,
+        y_true=y_test,
+        y_pred_proba=p_test,
+        implied_prob=implied_test,
+    )
+
+    # Multi-label per_category_any (Decision E on #119, #122).
+    cat_columns_test = _load_test_cat_columns(
+        db_path=db_path,
+        test_markets=test_markets_set,
+        platform=platform,
+    )
+    _print_per_category_any_breakdown(
+        cat_columns_test=cat_columns_test,
         y_true=y_test,
         y_pred_proba=p_test,
         implied_prob=implied_test,

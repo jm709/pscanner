@@ -690,6 +690,15 @@ class TrainingExample:
     price_volatility_recent: float | None
     label_won: int
     platform: str = "polymarket"
+    cat_sports: int = 0
+    cat_esports: int = 0
+    cat_thesis: int = 0
+    cat_macro: int = 0
+    cat_elections: int = 0
+    cat_crypto: int = 0
+    cat_geopolitics: int = 0
+    cat_tech: int = 0
+    cat_culture: int = 0
 
 
 # Secondary indexes on training_examples — dropped before --rebuild and
@@ -742,9 +751,12 @@ class TrainingExamplesRepo:
               side, implied_prob_at_buy, market_category, market_volume_so_far_usd,
               market_unique_traders_so_far, market_age_seconds,
               time_to_resolution_seconds, last_trade_price, price_volatility_recent,
+              cat_sports, cat_esports, cat_thesis, cat_macro, cat_elections,
+              cat_crypto, cat_geopolitics, cat_tech, cat_culture,
               label_won
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -850,6 +862,15 @@ def _example_to_row(ex: TrainingExample) -> tuple[object, ...]:
         ex.time_to_resolution_seconds,
         ex.last_trade_price,
         ex.price_volatility_recent,
+        ex.cat_sports,
+        ex.cat_esports,
+        ex.cat_thesis,
+        ex.cat_macro,
+        ex.cat_elections,
+        ex.cat_crypto,
+        ex.cat_geopolitics,
+        ex.cat_tech,
+        ex.cat_culture,
         ex.label_won,
     )
 

@@ -13,6 +13,7 @@ import json
 import os
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Final
 
 import numpy as np
 import optuna
@@ -38,6 +39,7 @@ _NUM_BOOST_ROUND = 2000
 _EARLY_STOPPING_ROUNDS = 50
 _BINARY_DECISION_THRESHOLD = 0.5
 _DEFAULT_ACCEPTED_CATEGORIES: tuple[str, ...] = (Category.SPORTS, Category.ESPORTS)
+_PREPROCESSOR_VERSION: Final[int] = 2
 
 
 def _rss_mb() -> int:
@@ -324,6 +326,7 @@ def _dump_artifacts(
     """Write model, preprocessor, and metrics to ``output_dir``."""
     booster.save_model(str(output_dir / "model.json"))
     preprocessor = {
+        "version": _PREPROCESSOR_VERSION,
         "leakage_cols": list(LEAKAGE_COLS),
         "carrier_cols": list(CARRIER_COLS),
         "encoder": encoder.to_json(),

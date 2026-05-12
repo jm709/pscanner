@@ -192,3 +192,48 @@ def test_feature_row_has_market_categories_field() -> None:
     names = {f.name for f in fields(FeatureRow)}
     assert "market_categories" in names
     assert "market_category" in names  # legacy single-string field is retained
+
+
+def test_feature_row_has_cat_indicator_fields() -> None:
+    """``FeatureRow`` carries 9 binary cat_* indicator fields."""
+    names = {f.name for f in fields(FeatureRow)}
+    expected = {
+        "cat_sports",
+        "cat_esports",
+        "cat_thesis",
+        "cat_macro",
+        "cat_elections",
+        "cat_crypto",
+        "cat_geopolitics",
+        "cat_tech",
+        "cat_culture",
+    }
+    assert expected.issubset(names)
+
+
+def test_compute_features_populates_cat_columns_from_market_categories() -> None:
+    """``compute_features`` sets cat_X=1 iff X is in features.market_categories."""
+    trade = _trade(category="sports")
+    history = _StubHistory(
+        wallet=empty_wallet_state(first_seen_ts=1_000_000),
+        market=empty_market_state(market_age_start_ts=500_000),
+        meta=_meta(category="sports", categories=("sports", "esports")),
+    )
+    features = compute_features(trade, history)
+    assert features.cat_sports == 1
+    assert features.cat_esports == 1
+    assert features.cat_macro == 0
+    assert features.cat_thesis == 0
+
+
+def test_compute_features_cat_columns_default_to_primary_when_categories_empty() -> None:
+    """When ``meta.categories=()`` the indicator for ``meta.category`` is set."""
+    trade = _trade(category="macro")
+    history = _StubHistory(
+        wallet=empty_wallet_state(first_seen_ts=1_000_000),
+        market=empty_market_state(market_age_start_ts=500_000),
+        meta=_meta(category="macro"),  # categories=() default
+    )
+    features = compute_features(trade, history)
+    assert features.cat_macro == 1
+    assert features.cat_sports == 0

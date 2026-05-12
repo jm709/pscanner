@@ -9,7 +9,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from pscanner.corpus import examples as examples_module
-from pscanner.corpus.examples import build_features
+from pscanner.corpus.examples import _load_market_metadata, build_features
 from pscanner.corpus.repos import (
     CorpusMarket,
     CorpusMarketsRepo,
@@ -672,3 +672,73 @@ def test_build_features_does_not_warn_when_resolutions_present(
 
     warns = [log for log in logs if log.get("event") == "corpus.build_features_missing_resolutions"]
     assert warns == []
+
+
+def test_load_market_metadata_populates_categories_from_json(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """When ``corpus_markets.categories_json`` is populated, the loaded
+    MarketMetadata carries the parsed tuple."""
+    repo = CorpusMarketsRepo(tmp_corpus_db)
+    repo.insert_pending(
+        CorpusMarket(
+            condition_id="0xc1",
+            event_slug="ev",
+            category="macro",
+            closed_at=0,
+            total_volume_usd=1.0,
+            enumerated_at=0,
+            market_slug="",
+            tags_json='["Fed Rates", "Global Elections"]',
+            categories_json='["macro", "elections"]',
+        )
+    )
+    metadata = _load_market_metadata(tmp_corpus_db)
+    meta = metadata["0xc1"]
+    assert meta.category == "macro"
+    assert set(meta.categories) == {"macro", "elections"}
+
+
+def test_load_market_metadata_handles_empty_categories_json(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """An empty / default categories_json yields an empty categories tuple."""
+    repo = CorpusMarketsRepo(tmp_corpus_db)
+    repo.insert_pending(
+        CorpusMarket(
+            condition_id="0xc2",
+            event_slug="ev",
+            category="thesis",
+            closed_at=0,
+            total_volume_usd=1.0,
+            enumerated_at=0,
+            market_slug="",
+        )  # tags_json and categories_json default to '[]' from dataclass
+    )
+    metadata = _load_market_metadata(tmp_corpus_db)
+    meta = metadata["0xc2"]
+    assert meta.category == "thesis"
+    assert meta.categories == ()
+
+
+def test_load_market_metadata_handles_malformed_categories_json(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """The ``__ERROR__`` sentinel (from #121 quarantine) yields an empty tuple."""
+    repo = CorpusMarketsRepo(tmp_corpus_db)
+    repo.insert_pending(
+        CorpusMarket(
+            condition_id="0xerr",
+            event_slug="ev",
+            category="thesis",
+            closed_at=0,
+            total_volume_usd=1.0,
+            enumerated_at=0,
+            market_slug="",
+            tags_json="__ERROR__",
+            categories_json="__ERROR__",
+        )
+    )
+    metadata = _load_market_metadata(tmp_corpus_db)
+    meta = metadata["0xerr"]
+    assert meta.categories == ()

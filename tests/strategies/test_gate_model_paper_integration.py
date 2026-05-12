@@ -49,7 +49,7 @@ def _gate_buy_alert(
             "implied_prob_at_buy": implied,
             "pred": pred,
             "edge": pred - implied,
-            "top_category": "esports",
+            "market_category": "esports",
             "model_version": "abc123",
             "trade_ts": _NOW,
             "bet_size_usd": 42.0,

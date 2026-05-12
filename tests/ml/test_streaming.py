@@ -209,10 +209,11 @@ def test_encoder_fits_on_train_levels_only(
     with open_dataset(db_path) as ds:
         assert ds.encoder is not None
 
-        # Synthetic encoder always fits 'side', 'top_category', 'market_category'
+        # Encoder fits 'side' and 'top_category' only — market_category dropped
+        # in #122, replaced by 9 pre-binarized cat_* indicator columns.
         assert "side" in ds.encoder.levels
         assert "top_category" in ds.encoder.levels
-        assert "market_category" in ds.encoder.levels
+        assert "market_category" not in ds.encoder.levels
 
         # Side is ('YES', 'NO'); both levels show up given enough rows
         assert set(ds.encoder.levels["side"]).issubset({"YES", "NO"})

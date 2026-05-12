@@ -90,6 +90,7 @@ def _train_dummy_model(out_dir: Path) -> None:
     (out_dir / "preprocessor.json").write_text(
         json.dumps(
             {
+                "version": 2,
                 "leakage_cols": [],
                 "carrier_cols": [],
                 "encoder": {"levels": {}},

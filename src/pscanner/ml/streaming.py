@@ -294,15 +294,17 @@ def _fit_encoder_on_train(
 ) -> OneHotEncoder:
     """Run P2: fit a OneHotEncoder on the train split's categorical levels.
 
-    SELECTs DISTINCT side, top_category, market_category from training_examples
-    joined on the _p2_train temp table. Belt-and-suspenders ``WHERE platform = ?``
+    SELECTs DISTINCT side, top_category from training_examples joined on the
+    _p2_train temp table. ``market_category`` was dropped from the categorical
+    set in #122 — it's replaced by 9 pre-binarized ``cat_*`` indicator columns
+    that bypass the encoder entirely. Belt-and-suspenders ``WHERE platform = ?``
     is added because after RFC #35 PR A, two platforms can share the same
     ``condition_id`` string; the temp-table partition isolates split membership,
     the platform predicate isolates platform membership.
     """
     _populate_temp_table(conn, "_p2_train", train_markets)
     rows = conn.execute(
-        "SELECT DISTINCT side, top_category, market_category "
+        "SELECT DISTINCT side, top_category "
         "FROM training_examples te "
         "JOIN _p2_train tm USING (condition_id) "
         "WHERE te.platform = ?",
@@ -313,7 +315,6 @@ def _fit_encoder_on_train(
         schema={
             "side": pl.String,
             "top_category": pl.String,
-            "market_category": pl.String,
         },
         orient="row",
     )

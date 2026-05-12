@@ -12,6 +12,7 @@ size) — true watermark-incremental is deferred to v2.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from typing import Final
@@ -52,24 +53,40 @@ _PROGRESS_EVERY_N_BATCHES: Final[int] = 10
 def _load_market_metadata(
     conn: sqlite3.Connection, *, platform: str = "polymarket"
 ) -> dict[str, MarketMetadata]:
-    """Load ``MarketMetadata`` for every row in ``corpus_markets`` for ``platform``."""
+    """Load ``MarketMetadata`` for every row in ``corpus_markets`` for ``platform``.
+
+    Parses ``categories_json`` into ``MarketMetadata.categories``; if absent
+    or malformed (the ``__ERROR__`` sentinel from #121 quarantines), falls
+    back to an empty tuple — consumers (e.g. ``compute_features``) coerce
+    that to ``(meta.category,)`` for downstream use.
+    """
     rows = conn.execute(
         """
-        SELECT condition_id, category, closed_at, enumerated_at
+        SELECT condition_id, category, closed_at, enumerated_at, categories_json
         FROM corpus_markets
         WHERE platform = ?
         """,
         (platform,),
     ).fetchall()
-    return {
-        row["condition_id"]: MarketMetadata(
+    out: dict[str, MarketMetadata] = {}
+    for row in rows:
+        primary = row["category"] or "unknown"
+        raw = row["categories_json"]
+        try:
+            parsed = json.loads(raw) if raw else []
+        except (TypeError, ValueError):
+            parsed = []
+        if not isinstance(parsed, list):
+            parsed = []
+        categories = tuple(str(c) for c in parsed) if parsed else ()
+        out[row["condition_id"]] = MarketMetadata(
             condition_id=row["condition_id"],
-            category=row["category"] or "unknown",
+            category=primary,
             closed_at=row["closed_at"],
             opened_at=row["enumerated_at"],
+            categories=categories,
         )
-        for row in rows
-    }
+    return out
 
 
 def _example_from_features(
@@ -119,6 +136,15 @@ def _example_from_features(
         time_to_resolution_seconds=features.time_to_resolution_seconds,
         last_trade_price=features.last_trade_price,
         price_volatility_recent=features.price_volatility_recent,
+        cat_sports=features.cat_sports,
+        cat_esports=features.cat_esports,
+        cat_thesis=features.cat_thesis,
+        cat_macro=features.cat_macro,
+        cat_elections=features.cat_elections,
+        cat_crypto=features.cat_crypto,
+        cat_geopolitics=features.cat_geopolitics,
+        cat_tech=features.cat_tech,
+        cat_culture=features.cat_culture,
         label_won=label_won,
     )
 
