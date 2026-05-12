@@ -24,7 +24,9 @@ from pscanner.store.db import init_db
 from pscanner.store.repo import AlertsRepo, CachedMarket, MarketCacheRepo, WalletTrade
 
 
-def _train_dummy_model(out_dir: Path) -> None:
+def _train_dummy_model(
+    out_dir: Path, *, accepted_categories: tuple[str, ...] = ("esports",)
+) -> None:
     """Train a 1-feature stub model and persist artifacts in the layout the detector expects."""
     rng = np.random.default_rng(0)
     x = rng.uniform(0, 1, size=(200, 1))
@@ -47,7 +49,7 @@ def _train_dummy_model(out_dir: Path) -> None:
                 "leakage_cols": [],
                 "carrier_cols": [],
                 "encoder": {"levels": {}},
-                "accepted_categories": ["esports"],
+                "accepted_categories": list(accepted_categories),
                 "platform": "polymarket",
             }
         )
@@ -278,6 +280,114 @@ async def test_evaluate_skips_when_category_not_accepted(tmp_path: Path) -> None
                 category="politics",  # NOT in accepted_categories=("esports",)
                 closed_at=1_700_100_000,
                 opened_at=1_699_900_000,
+            )
+        }
+        cfg = GateModelConfig(enabled=True, artifact_dir=artifact_dir, min_pred=0.5)
+        provider = LiveHistoryProvider(conn=conn, metadata=metadata)
+        alerts_repo = AlertsRepo(conn)
+        detector = GateModelDetector(config=cfg, provider=provider, alerts_repo=alerts_repo)
+        detector._predict_one = lambda _: 0.85  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
+        detector._resolve_outcome_side = lambda _trade: "YES"  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
+        detector._sink = AlertSink(alerts_repo=alerts_repo)
+        trade = _make_wallet_trade(condition_id="0xc1", price=0.40)
+        await detector.evaluate(trade)
+        recent = alerts_repo.recent(detector="gate_buy", limit=10)
+    finally:
+        conn.close()
+    assert recent == []
+
+
+@pytest.mark.asyncio
+async def test_evaluate_accepts_multi_label_market_via_intersection(tmp_path: Path) -> None:
+    """Differentiating case: primary ``market_category`` is NOT in
+    ``accepted_categories``, but a secondary category in ``market_categories``
+    IS. Set-intersection accepts; legacy single-string membership rejects.
+    """
+    conn = _new_db()
+    try:
+        artifact_dir = tmp_path / "model"
+        _train_dummy_model(artifact_dir, accepted_categories=("elections",))
+        metadata = {
+            "0xc1": MarketMetadata(
+                condition_id="0xc1",
+                category="macro",  # primary — NOT in accepted
+                closed_at=1_700_100_000,
+                opened_at=1_699_900_000,
+                categories=("macro", "elections"),  # contains elections — IS in accepted
+            )
+        }
+        cfg = GateModelConfig(enabled=True, artifact_dir=artifact_dir, min_pred=0.5)
+        provider = LiveHistoryProvider(conn=conn, metadata=metadata)
+        alerts_repo = AlertsRepo(conn)
+        detector = GateModelDetector(config=cfg, provider=provider, alerts_repo=alerts_repo)
+        detector._predict_one = lambda _: 0.85  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
+        detector._resolve_outcome_side = lambda _trade: "YES"  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
+        detector._sink = AlertSink(alerts_repo=alerts_repo)
+        trade = _make_wallet_trade(condition_id="0xc1", price=0.40)
+        await detector.evaluate(trade)
+        recent = alerts_repo.recent(detector="gate_buy", limit=10)
+    finally:
+        conn.close()
+    assert len(recent) == 1
+
+
+@pytest.mark.asyncio
+async def test_evaluate_falls_back_to_primary_category_when_categories_empty(
+    tmp_path: Path,
+) -> None:
+    """A market with ``MarketMetadata.categories=()`` (un-backfilled corpus
+    row, pending #121) still gates correctly because ``compute_features``
+    falls back to ``(meta.category,)`` for ``features.market_categories``.
+    Decision C from #119 — preserves backward compatibility before #121's
+    gamma backfill completes.
+    """
+    conn = _new_db()
+    try:
+        artifact_dir = tmp_path / "model"
+        _train_dummy_model(artifact_dir, accepted_categories=("esports",))
+        metadata = {
+            "0xc1": MarketMetadata(
+                condition_id="0xc1",
+                category="esports",  # primary string
+                closed_at=1_700_100_000,
+                opened_at=1_699_900_000,
+                # categories=() (default — un-backfilled)
+            )
+        }
+        cfg = GateModelConfig(enabled=True, artifact_dir=artifact_dir, min_pred=0.5)
+        provider = LiveHistoryProvider(conn=conn, metadata=metadata)
+        alerts_repo = AlertsRepo(conn)
+        detector = GateModelDetector(config=cfg, provider=provider, alerts_repo=alerts_repo)
+        detector._predict_one = lambda _: 0.85  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
+        detector._resolve_outcome_side = lambda _trade: "YES"  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
+        detector._sink = AlertSink(alerts_repo=alerts_repo)
+        trade = _make_wallet_trade(condition_id="0xc1", price=0.40)
+        await detector.evaluate(trade)
+        recent = alerts_repo.recent(detector="gate_buy", limit=10)
+    finally:
+        conn.close()
+    assert len(recent) == 1
+
+
+@pytest.mark.asyncio
+async def test_evaluate_rejects_when_no_category_set_member_accepted(
+    tmp_path: Path,
+) -> None:
+    """A multi-label market with no category in ``accepted_categories`` is rejected.
+
+    Sanity guard: even with set semantics, a disjoint set produces zero alerts.
+    """
+    conn = _new_db()
+    try:
+        artifact_dir = tmp_path / "model"
+        _train_dummy_model(artifact_dir, accepted_categories=("esports",))
+        metadata = {
+            "0xc1": MarketMetadata(
+                condition_id="0xc1",
+                category="macro",
+                closed_at=1_700_100_000,
+                opened_at=1_699_900_000,
+                categories=("macro", "elections"),
             )
         }
         cfg = GateModelConfig(enabled=True, artifact_dir=artifact_dir, min_pred=0.5)
