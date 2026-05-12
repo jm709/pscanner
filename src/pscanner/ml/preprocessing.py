@@ -23,20 +23,22 @@ import numpy as np
 import polars as pl
 
 # Low-cardinality string columns cast to Categorical at load time.
-# condition_id has ~50K unique values; top_category/market_category/side
-# each have single-digit cardinality.  Categorical storage avoids
-# materialising the full 66-char hex strings (condition_id) or repeated
-# string literals across millions of rows.
+# condition_id has ~50K unique values; top_category/side each have
+# single-digit cardinality.  Categorical storage avoids materialising the
+# full 66-char hex strings (condition_id) or repeated string literals
+# across millions of rows.  market_category was removed in #122 — it is
+# replaced by 9 pre-binarized cat_* indicator columns loaded as Int32.
 _CATEGORICAL_CAST_COLS: tuple[str, ...] = (
     "condition_id",
     "top_category",
-    "market_category",
     "side",
 )
 
 # Integer columns safe to narrow from Int64 → Int32.  All values are
-# counts / durations that fit comfortably in 32 bits; the resulting numpy
-# matrix is float32 anyway, so the narrowing costs nothing in precision.
+# counts / durations / 0-1 indicators that fit comfortably in 32 bits;
+# the resulting numpy matrix is float32 anyway, so the narrowing costs
+# nothing in precision.  The 9 cat_* columns are the multi-label category
+# indicators added by build-features in #122; they bypass the encoder.
 _INT32_COLS: tuple[str, ...] = (
     "prior_trades_count",
     "prior_buys_count",
@@ -49,6 +51,15 @@ _INT32_COLS: tuple[str, ...] = (
     "is_high_quality_wallet",
     "market_unique_traders_so_far",
     "market_age_seconds",
+    "cat_sports",
+    "cat_esports",
+    "cat_thesis",
+    "cat_macro",
+    "cat_elections",
+    "cat_crypto",
+    "cat_geopolitics",
+    "cat_tech",
+    "cat_culture",
     "label_won",
 )
 
@@ -86,7 +97,7 @@ LEAKAGE_COLS: tuple[str, ...] = (
 
 CARRIER_COLS: tuple[str, ...] = ("condition_id", "trade_ts", "resolved_at")
 
-CATEGORICAL_COLS: tuple[str, ...] = ("side", "top_category", "market_category")
+CATEGORICAL_COLS: tuple[str, ...] = ("side", "top_category")
 
 
 def drop_leakage_cols(df: pl.DataFrame) -> pl.DataFrame:

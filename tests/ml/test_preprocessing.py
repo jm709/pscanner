@@ -9,6 +9,7 @@ import numpy as np
 import polars as pl
 
 from pscanner.ml.preprocessing import (
+    _INT32_COLS,
     CARRIER_COLS,
     CATEGORICAL_COLS,
     LEAKAGE_COLS,
@@ -33,8 +34,28 @@ def test_carrier_cols_lists_documented_carriers() -> None:
     assert set(CARRIER_COLS) == {"condition_id", "trade_ts", "resolved_at"}
 
 
-def test_categorical_cols_lists_documented_categoricals() -> None:
-    assert set(CATEGORICAL_COLS) == {"side", "top_category", "market_category"}
+def test_categorical_cols_excludes_market_category() -> None:
+    """``market_category`` is no longer one-hot-encoded — it's replaced by
+    9 binary ``cat_*`` columns populated by build-features (#122).
+    """
+    assert "market_category" not in CATEGORICAL_COLS
+    assert set(CATEGORICAL_COLS) == {"side", "top_category"}
+
+
+def test_int32_cols_includes_cat_indicators() -> None:
+    """Multi-label category indicators are int32 (0/1)."""
+    expected = {
+        "cat_sports",
+        "cat_esports",
+        "cat_thesis",
+        "cat_macro",
+        "cat_elections",
+        "cat_crypto",
+        "cat_geopolitics",
+        "cat_tech",
+        "cat_culture",
+    }
+    assert expected.issubset(set(_INT32_COLS))
 
 
 def test_drop_leakage_cols_removes_each_documented_col(
