@@ -6,7 +6,8 @@ and the corpus, replicates the temporal test split, then prints:
 * Test AUC
 * Top-N features by xgboost gain
 * Top-N features by mean(|SHAP|) — global importance via ``pred_contribs``
-* Per-``top_category`` accuracy and realized-edge breakdown
+* Per-``top_category`` accuracy and realized-edge breakdown (wallet-level)
+* Per-``cat_*`` accuracy and realized-edge breakdown (market-level, multi-label, #122)
 
 Doesn't pull in the ``shap`` package — uses xgboost's native ``pred_contribs``
 which gives the same global mean(|SHAP|) without the extra dependency.

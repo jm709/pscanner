@@ -639,7 +639,7 @@ def test_training_examples_cat_columns_default_to_zero() -> None:
             "cat_crypto, cat_geopolitics, cat_tech, cat_culture FROM training_examples "
             "WHERE tx_hash = '0xa'"
         ).fetchone()
-        for col in row.keys():
+        for col in row:
             assert row[col] == 0, f"{col} should default to 0"
     finally:
         conn.close()

@@ -129,14 +129,14 @@ def test_examples_repo_isolates_platforms(tmp_corpus_db: sqlite3.Connection) -> 
                 tx_hash="0xtx",
                 asset_id="a1",
                 wallet_address="0xw",
-                **base_kwargs,  # type: ignore[arg-type]
+                **base_kwargs,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
                 platform="polymarket",
             ),
             TrainingExample(
                 tx_hash="kx-1",
                 asset_id="KX-Y",
                 wallet_address="anon",
-                **base_kwargs,  # type: ignore[arg-type]
+                **base_kwargs,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
                 platform="kalshi",
             ),
         ]
