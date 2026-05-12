@@ -119,6 +119,15 @@ def _example_from_features(
         time_to_resolution_seconds=features.time_to_resolution_seconds,
         last_trade_price=features.last_trade_price,
         price_volatility_recent=features.price_volatility_recent,
+        cat_sports=features.cat_sports,
+        cat_esports=features.cat_esports,
+        cat_thesis=features.cat_thesis,
+        cat_macro=features.cat_macro,
+        cat_elections=features.cat_elections,
+        cat_crypto=features.cat_crypto,
+        cat_geopolitics=features.cat_geopolitics,
+        cat_tech=features.cat_tech,
+        cat_culture=features.cat_culture,
         label_won=label_won,
     )
 

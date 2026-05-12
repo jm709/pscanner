@@ -150,3 +150,29 @@ def test_examples_repo_isolates_platforms(tmp_corpus_db: sqlite3.Connection) -> 
     repo.truncate(platform="kalshi")
     assert repo.existing_keys(platform="kalshi") == set()
     assert repo.existing_keys(platform="polymarket") == {("0xtx", "a1", "0xw")}
+
+
+def test_insert_or_ignore_round_trips_cat_columns(tmp_corpus_db: sqlite3.Connection) -> None:
+    """Cat indicators round-trip through INSERT and SELECT."""
+    repo = TrainingExamplesRepo(tmp_corpus_db)
+    ex = _example(
+        condition_id="0xc1",
+        market_category="macro",
+        cat_sports=0,
+        cat_esports=0,
+        cat_thesis=0,
+        cat_macro=1,
+        cat_elections=1,
+        cat_crypto=0,
+        cat_geopolitics=0,
+        cat_tech=0,
+        cat_culture=0,
+    )
+    repo.insert_or_ignore([ex])
+    row = tmp_corpus_db.execute(
+        "SELECT cat_macro, cat_elections, cat_sports FROM training_examples "
+        "WHERE condition_id = '0xc1'"
+    ).fetchone()
+    assert row["cat_macro"] == 1
+    assert row["cat_elections"] == 1
+    assert row["cat_sports"] == 0
