@@ -39,7 +39,7 @@ def _make_gate_alert(*, key: str, ts: int, condition_id: str = "0xc1") -> Alert:
             "implied_prob_at_buy": 0.5,
             "pred": 0.8,
             "edge": 0.3,
-            "top_category": "esports",
+            "market_category": "esports",
             "model_version": "v1",
             "trade_ts": ts,
             "bet_size_usd": 100.0,

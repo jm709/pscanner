@@ -312,7 +312,7 @@ class GateModelDetector(TradeDrivenDetector):
                 "implied_prob_at_buy": float(features.implied_prob_at_buy),
                 "pred": float(pred),
                 "edge": float(edge),
-                "top_category": features.market_category,
+                "market_category": features.market_category,
                 "model_version": self._model_version,
                 "trade_ts": trade.timestamp,
                 "bet_size_usd": float(trade.usd_value),
