@@ -25,6 +25,8 @@ _V2_TABLE: Final[str] = "training_examples_v2"
 _V2_INDEX_PREFIX: Final[str] = "idx_te_v2_"
 _PLATFORMS: Final[frozenset[str]] = frozenset({"polymarket", "kalshi", "manifold"})
 _SCRATCH_FILENAME: Final[str] = "build_scratch.duckdb"
+_TE_LOCAL_TABLE: Final[str] = "training_examples_v2_local"
+_COPY_BATCH_SIZE: Final[int] = 10000
 
 # Categories that may appear in events.category. Drawn from
 # pscanner.categories.Category enum plus the "unknown" sentinel used
@@ -149,6 +151,11 @@ def build_features_duckdb(
             name="final_join",
             fn=lambda: _final_join_to_v2(scratch, platform=platform, now_ts=now_ts),
         )
+        _run_stage(
+            scratch,
+            name="copy_to_sqlite",
+            fn=lambda: _copy_to_sqlite(scratch, db_path=db_path),
+        )
 
         n_rows = _count_v2(scratch)
         corpus_path = _detach_corpus(scratch)
@@ -170,7 +177,7 @@ def _run_stage(
     scratch: duckdb.DuckDBPyConnection,
     *,
     name: str,
-    fn: Callable[[], None],
+    fn: Callable[[], object],
 ) -> None:
     """Run a single stage with logging + heartbeat thread.
 
@@ -185,7 +192,8 @@ def _run_stage(
         "stage2_wallet_aggs": "wallet_aggs",
         "stage3_market_aggs": "market_aggs",
         "stage4_wallet_cat": "wallet_cat_summary",
-        "final_join": f"corpus.{_V2_TABLE}",
+        "final_join": _TE_LOCAL_TABLE,
+        "copy_to_sqlite": f"corpus.{_V2_TABLE}",
     }.get(name)
     heartbeat = threading.Thread(
         target=_heartbeat_loop,
@@ -660,41 +668,46 @@ def _stage4_wallet_cat(scratch: duckdb.DuckDBPyConnection) -> None:
 
 
 def _final_join_to_v2(scratch: duckdb.DuckDBPyConnection, *, platform: str, now_ts: int) -> None:
-    """Join the four stage outputs and INSERT into corpus.training_examples_v2.
+    """Build training_examples_v2_local as a DuckDB-native table in scratch.
 
     All staged inputs live in the scratch DuckDB. ``resolutions`` is the
-    TEMP table from _materialize_trades; ``corpus`` is the attached
-    SQLite database the v2 table lives in.
+    TEMP table from _materialize_trades; ``wallet_aggs`` / ``market_aggs``
+    / ``wallet_cat_summary`` are the prior stages' outputs.
 
     ``platform`` and ``now_ts`` are passed via DuckDB ? bindings, NOT
     f-string interpolation, preserving Task 3's parameterization defense.
-    The only f-string interpolation in this SQL is _V2_TABLE (table name)
+    The only f-string interpolation in this SQL is the local table name
     and col_list (derived from canonical TRAINING_EXAMPLES_COLUMNS).
 
-    Dedup contract: ``training_examples_v2`` has a UNIQUE constraint on
-    ``(platform, tx_hash, asset_id, wallet_address)``. ``corpus_trades``
-    nominally enforces the same key via its PRIMARY KEY, but legacy
-    on-disk corpora (rows that predate the constraint) may contain
-    duplicates. The python engine swallows these via ``INSERT OR IGNORE``
-    on ``training_examples``; DuckDB's sqlite_scanner extension rejects
-    both ``INSERT OR IGNORE`` and ``ON CONFLICT DO NOTHING`` ("Database
-    type 'sqlite' does not support MERGE INTO or ON CONFLICT"), so we
-    dedup at the SELECT source via ``QUALIFY ROW_NUMBER() = 1``.
+    Why DuckDB-native instead of cross-database INSERT into the attached
+    SQLite ``training_examples_v2``:
 
-    Subtle parity caveat: with both engines deduping, they agree on row
-    count and primary key but may disagree on row CONTENTS for duplicate
-    keys. Python iterates ``corpus_trades`` ordered by ``(ts, tx_hash,
-    asset_id)`` and ``INSERT OR IGNORE`` keeps the FIRST-iterated row
-    (earliest ts). We mirror that here by partitioning on the v2 unique
-    key and ordering by ``(wa.event_ts, wa.kind_priority, wa.tx_hash,
-    wa.asset_id)``. The real fix is at the ingest layer (don't re-insert
-    overlapping trades); this guarantees the build doesn't crash on
-    legacy corpora that already have the dups.
+      * The cross-database INSERT through DuckDB's sqlite_scanner extension
+        crashed at production scale with a UNIQUE constraint violation we
+        could not explain via the SELECT semantics (corpus_trades was
+        verified dup-free at the source PRIMARY KEY level, and the
+        pipeline SQL was verified fanout-free on a 50K-trade slice).
+      * The previous workaround was a ``QUALIFY ROW_NUMBER() OVER
+        (PARTITION BY tx_hash, asset_id, wallet_address ORDER BY ...) = 1``
+        clause on the SELECT, which dedup'd correctly but cost ~35 GB
+        of spill and ~14 min of runtime at production scale.
+      * Writing to a DuckDB-native intermediate sidesteps the
+        sqlite_scanner extension's INSERT path entirely, eliminates the
+        QUALIFY window, and pushes dedup responsibility to the next
+        stage (_copy_to_sqlite) which uses Python's stdlib sqlite3 with
+        ``INSERT OR IGNORE`` (matching the python engine's
+        ``repos._INSERT_SQL`` semantics on duplicate keys).
+
+    Tradeoff: removing QUALIFY drops the explicit chronological tiebreak
+    (earliest-ts dup wins). The python engine's tiebreak is dict-insertion
+    order in CPython, which is iter_chronological-driven and thus de-facto
+    earliest, but it isn't a hard guarantee either. In practice
+    ``corpus_trades`` is dup-free at the source, so this tradeoff only
+    matters for legacy on-disk corpora that predate the PRIMARY KEY.
     """
-    col_list = ", ".join(TRAINING_EXAMPLES_COLUMNS)
     scratch.execute(
         f"""
-        INSERT INTO corpus.{_V2_TABLE} ({col_list})
+        CREATE OR REPLACE TABLE {_TE_LOCAL_TABLE} AS
         SELECT
             ? AS platform,
             wa.tx_hash,
@@ -844,18 +857,62 @@ def _final_join_to_v2(scratch: duckdb.DuckDBPyConnection, *, platform: str, now_
         LEFT JOIN market_aggs ma
             USING (condition_id, event_ts, kind_priority, tx_hash, asset_id)
         WHERE wa.is_buy_only = 1
-        -- Match python engine's INSERT OR IGNORE semantics on duplicate
-        -- (tx_hash, asset_id, wallet_address) tuples in legacy corpora.
-        -- ORDER BY (event_ts, kind_priority, tx_hash, asset_id) mirrors
-        -- python's iter_chronological order so the kept row is the
-        -- earliest-ts dup (see docstring).
-        QUALIFY ROW_NUMBER() OVER (
-            PARTITION BY wa.tx_hash, wa.asset_id, wa.wallet_address
-            ORDER BY wa.event_ts, wa.kind_priority, wa.tx_hash, wa.asset_id
-        ) = 1
-        """,  # noqa: S608 — _V2_TABLE is a module-level literal; platform/now_ts bound below
+        """,  # noqa: S608 — _TE_LOCAL_TABLE is a module-level literal; platform/now_ts bound below
         [platform, now_ts],
     )
+
+
+def _copy_to_sqlite(scratch: duckdb.DuckDBPyConnection, *, db_path: Path) -> int:
+    """Stream training_examples_v2_local from scratch DuckDB to SQLite.
+
+    Uses Python's stdlib sqlite3 with ``INSERT OR IGNORE`` to match the
+    python engine's ``repos._INSERT_SQL`` semantics on duplicate keys.
+    Bypasses DuckDB's sqlite_scanner extension's INSERT path (which
+    doesn't support INSERT OR IGNORE or ON CONFLICT DO NOTHING and
+    crashed at production scale with an unexplained UNIQUE conflict).
+
+    Returns the number of rows that landed in SQLite (after dedup). If
+    that's less than the source row count, emits a
+    ``corpus.copy_to_sqlite.dups_dropped`` WARN log as a diagnostic
+    signal — duplicate keys in the SELECT output indicate either a
+    legacy on-disk corpus shape (corpus_trades predates the PRIMARY KEY)
+    or a real fanout bug in the pipeline.
+    """
+    col_list = ", ".join(TRAINING_EXAMPLES_COLUMNS)
+    placeholders = ", ".join(["?"] * len(TRAINING_EXAMPLES_COLUMNS))
+    insert_sql = f"INSERT OR IGNORE INTO {_V2_TABLE} ({col_list}) VALUES ({placeholders})"  # noqa: S608 — _V2_TABLE is a module-level literal
+    select_sql = f"SELECT {col_list} FROM {_TE_LOCAL_TABLE}"  # noqa: S608 — _TE_LOCAL_TABLE is a module-level literal
+
+    source_rows = 0
+    cursor = scratch.execute(select_sql)
+    conn = sqlite3.connect(db_path)
+    try:
+        landed_before = conn.execute(
+            f"SELECT COUNT(*) FROM {_V2_TABLE}"  # noqa: S608 — _V2_TABLE is a module-level literal
+        ).fetchone()[0]
+        while True:
+            batch = cursor.fetchmany(_COPY_BATCH_SIZE)
+            if not batch:
+                break
+            source_rows += len(batch)
+            conn.executemany(insert_sql, batch)
+        conn.commit()
+        landed_after = conn.execute(
+            f"SELECT COUNT(*) FROM {_V2_TABLE}"  # noqa: S608 — _V2_TABLE is a module-level literal
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    landed = landed_after - landed_before
+    dups = source_rows - landed
+    if dups > 0:
+        _log.warning(
+            "corpus.copy_to_sqlite.dups_dropped",
+            source_rows=source_rows,
+            landed=landed,
+            dups_dropped=dups,
+        )
+    return landed
 
 
 def _count_v2(duck: duckdb.DuckDBPyConnection) -> int:
