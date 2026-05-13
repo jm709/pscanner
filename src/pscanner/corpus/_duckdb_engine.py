@@ -282,7 +282,8 @@ def _materialize_trades(duck: duckdb.DuckDBPyConnection, *, platform: str) -> No
         SELECT
             t.tx_hash, t.asset_id, t.wallet_address, t.condition_id,
             t.outcome_side, t.bs, t.price, t.size, t.notional_usd, t.ts,
-            m.category, m.categories_json, m.closed_at, m.enumerated_at
+            COALESCE(m.category, 'unknown') AS category,
+            m.categories_json, m.closed_at, m.enumerated_at
         FROM corpus.corpus_trades t
         JOIN corpus.corpus_markets m
           ON m.platform = t.platform AND m.condition_id = t.condition_id

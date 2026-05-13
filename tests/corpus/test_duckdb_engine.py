@@ -551,6 +551,128 @@ def test_final_join_top_category_breaks_tied_ts_by_tx_hash(tmp_path: Path) -> No
     assert third["category_diversity"] == 2
 
 
+def test_materialize_trades_coerces_null_category_to_unknown(tmp_path: Path) -> None:
+    """Legacy markets with ``corpus_markets.category=NULL`` must surface as
+    ``top_category='unknown'`` (matching the python engine's coercion in
+    ``examples.py:73``). Without the COALESCE in ``_materialize_trades``,
+    a wallet whose ONLY prior activity is on a NULL-category market
+    reports ``top_category=NULL`` and ``category_diversity=0`` in DuckDB,
+    while the python engine reports ``top_category='unknown'``
+    and ``category_diversity=1``.
+
+    Sets up two BUYs by the same wallet across two NULL-category markets
+    so that, by the second trade, prior-only running counts have observed
+    a NULL-category trade.
+    """
+    import sqlite3  # noqa: PLC0415
+
+    from pscanner.corpus._duckdb_engine import build_features_duckdb  # noqa: PLC0415
+    from pscanner.corpus.db import init_corpus_db  # noqa: PLC0415
+
+    db_path = tmp_path / "corpus.sqlite3"
+    init_corpus_db(db_path).close()
+    conn = sqlite3.connect(db_path)
+    try:
+        wallet = "0x" + "d" * 40
+        cid_a = "0x" + "a" * 64
+        cid_b = "0x" + "b" * 64
+        for cid, slug in ((cid_a, "legacy-a"), (cid_b, "legacy-b")):
+            conn.execute(
+                """
+                INSERT INTO corpus_markets
+                    (platform, condition_id, event_slug, category, categories_json,
+                     enumerated_at, closed_at, total_volume_usd, backfill_state)
+                VALUES ('polymarket', ?, ?, NULL, '[]',
+                        50, 1000, 1000.0, 'complete')
+                """,
+                (cid, slug),
+            )
+            conn.execute(
+                """
+                INSERT INTO market_resolutions
+                    (platform, condition_id, resolved_at, winning_outcome_index,
+                     outcome_yes_won, source, recorded_at)
+                VALUES ('polymarket', ?, 1000, 0, 1, 'gamma', 1000)
+                """,
+                (cid,),
+            )
+        rows = [
+            (
+                "polymarket",
+                "0x" + "1" * 64,
+                "asset_a",
+                wallet,
+                cid_a,
+                "YES",
+                "BUY",
+                0.5,
+                100.0,
+                50.0,
+                100,
+            ),
+            (
+                "polymarket",
+                "0x" + "2" * 64,
+                "asset_b",
+                wallet,
+                cid_b,
+                "YES",
+                "BUY",
+                0.5,
+                100.0,
+                50.0,
+                500,
+            ),
+        ]
+        conn.executemany(
+            """
+            INSERT INTO corpus_trades
+                (platform, tx_hash, asset_id, wallet_address, condition_id,
+                 outcome_side, bs, price, size, notional_usd, ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    build_features_duckdb(
+        db_path=db_path,
+        platform="polymarket",
+        now_ts=2000,
+        memory_limit="256MB",
+        temp_dir=tmp_path,
+        threads=1,
+    )
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        result_rows = conn.execute(
+            """
+            SELECT trade_ts, top_category, category_diversity, market_category
+            FROM training_examples
+            ORDER BY trade_ts
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(result_rows) == 2
+    # First trade: no prior activity → top_category None, diversity 0.
+    assert result_rows[0]["top_category"] is None
+    assert result_rows[0]["category_diversity"] == 0
+    # market_category is the CURRENT trade's market category — must be
+    # coerced from NULL to 'unknown' both to match python AND because
+    # training_examples.market_category is NOT NULL.
+    assert result_rows[0]["market_category"] == "unknown"
+    # Second trade: one prior NULL-category buy → top_category 'unknown',
+    # diversity 1. Without the COALESCE these would be NULL / 0.
+    assert result_rows[1]["top_category"] == "unknown"
+    assert result_rows[1]["category_diversity"] == 1
+    assert result_rows[1]["market_category"] == "unknown"
+
+
 def test_heartbeat_emits_during_long_operation() -> None:
     """Heartbeat thread fires at least once and stops cleanly on signal."""
     import threading  # noqa: PLC0415
