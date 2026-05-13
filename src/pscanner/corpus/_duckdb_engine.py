@@ -234,6 +234,87 @@ def _materialize_trades(duck: duckdb.DuckDBPyConnection, *, platform: str) -> No
     )
 
 
+def _stage1_events(scratch: duckdb.DuckDBPyConnection) -> None:
+    """Materialize the UNION of trade events + synthetic resolution events.
+
+    Output table ``events`` columns mirror the previous monolithic
+    pipeline's ``events`` CTE: ``wallet_address``, ``condition_id``,
+    ``event_ts``, ``tx_hash``, ``asset_id``, ``bs``, ``outcome_side``,
+    ``price``, ``size``, ``notional_usd``, ``category``, ``categories_json``,
+    ``closed_at``, ``enumerated_at``, ``kind_priority`` (0 for trades, 1 for
+    resolutions), ``is_resolution``, ``res_won_for_this_buy``,
+    ``payout_pnl_increment``, ``is_trade``, ``is_buy_only``, ``buy_price``,
+    ``buy_notional``.
+
+    Reads from the TEMP ``trades`` and ``resolutions`` tables produced by
+    ``_materialize_trades``. Resolution events are emitted only for BUYs on
+    resolved markets where ``t.ts <= r.resolved_at``.
+    """
+    scratch.execute(
+        """
+        CREATE OR REPLACE TABLE events AS
+        WITH buy_events AS (
+            SELECT
+                t.wallet_address, t.condition_id, t.ts AS event_ts,
+                t.tx_hash, t.asset_id, t.bs, t.outcome_side,
+                t.price, t.size, t.notional_usd, t.category, t.categories_json,
+                t.closed_at, t.enumerated_at,
+                CAST(0 AS INTEGER) AS kind_priority,
+                CAST(0 AS INTEGER) AS is_resolution,
+                CAST(NULL AS INTEGER) AS res_won_for_this_buy,
+                CAST(0.0 AS DOUBLE) AS payout_pnl_increment,
+                CAST(1 AS INTEGER) AS is_trade,
+                CAST(CASE WHEN t.bs = 'BUY' THEN 1 ELSE 0 END AS INTEGER) AS is_buy_only,
+                CAST(CASE WHEN t.bs = 'BUY' THEN t.price ELSE NULL END AS DOUBLE) AS buy_price,
+                CAST(CASE WHEN t.bs = 'BUY' THEN t.notional_usd ELSE NULL END AS DOUBLE)
+                    AS buy_notional
+            FROM trades t
+        ),
+        resolution_events AS (
+            SELECT
+                t.wallet_address, t.condition_id, r.resolved_at AS event_ts,
+                t.tx_hash, t.asset_id,
+                CAST(NULL AS VARCHAR) AS bs,
+                CAST(NULL AS VARCHAR) AS outcome_side,
+                CAST(NULL AS DOUBLE) AS price,
+                CAST(NULL AS DOUBLE) AS size,
+                CAST(NULL AS DOUBLE) AS notional_usd,
+                CAST(NULL AS VARCHAR) AS category,
+                CAST(NULL AS VARCHAR) AS categories_json,
+                CAST(NULL AS INTEGER) AS closed_at,
+                CAST(NULL AS INTEGER) AS enumerated_at,
+                CAST(1 AS INTEGER) AS kind_priority,
+                CAST(1 AS INTEGER) AS is_resolution,
+                CAST(
+                    CASE
+                        WHEN (r.outcome_yes_won = 1 AND t.outcome_side = 'YES')
+                          OR (r.outcome_yes_won = 0 AND t.outcome_side = 'NO')
+                        THEN 1 ELSE 0
+                    END AS INTEGER
+                ) AS res_won_for_this_buy,
+                CAST(
+                    CASE
+                        WHEN (r.outcome_yes_won = 1 AND t.outcome_side = 'YES')
+                          OR (r.outcome_yes_won = 0 AND t.outcome_side = 'NO')
+                        THEN t.size - t.notional_usd
+                        ELSE -t.notional_usd
+                    END AS DOUBLE
+                ) AS payout_pnl_increment,
+                CAST(0 AS INTEGER) AS is_trade,
+                CAST(0 AS INTEGER) AS is_buy_only,
+                CAST(NULL AS DOUBLE) AS buy_price,
+                CAST(NULL AS DOUBLE) AS buy_notional
+            FROM trades t
+            JOIN resolutions r USING (condition_id)
+            WHERE t.bs = 'BUY' AND t.ts <= r.resolved_at
+        )
+        SELECT * FROM buy_events
+        UNION ALL
+        SELECT * FROM resolution_events
+        """
+    )
+
+
 def _build_training_examples_v2(
     duck: duckdb.DuckDBPyConnection, *, platform: str, now_ts: int
 ) -> None:

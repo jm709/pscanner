@@ -170,6 +170,55 @@ def test_scratch_db_lifecycle(tmp_path: Path) -> None:
     assert not scratch_path.exists()
 
 
+def test_stage1_events_row_count_and_columns(tmp_path: Path) -> None:
+    """Stage 1 produces an events table whose row count is trades +
+    eligible-resolutions, with the expected column set."""
+    from pscanner.corpus._duckdb_engine import (  # noqa: PLC0415
+        _attach_corpus,
+        _materialize_trades,
+        _open_scratch,
+        _scratch_path,
+        _stage1_events,
+    )
+    from tests.corpus._duckdb_fixture import build_fixture_db  # noqa: PLC0415
+
+    db_path = tmp_path / "corpus.sqlite3"
+    build_fixture_db(db_path)
+
+    scratch = _open_scratch(_scratch_path(tmp_path), memory_limit="256MB", threads=1)
+    try:
+        scratch.execute("INSTALL sqlite")
+        scratch.execute("LOAD sqlite")
+        _attach_corpus(scratch, db_path=db_path)
+        _materialize_trades(scratch, platform="polymarket")
+        _stage1_events(scratch)
+
+        cols = [
+            r[0]
+            for r in scratch.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'events' ORDER BY ordinal_position"
+            ).fetchall()
+        ]
+        assert "wallet_address" in cols
+        assert "condition_id" in cols
+        assert "event_ts" in cols
+        assert "kind_priority" in cols
+        assert "is_resolution" in cols
+        assert "is_buy_only" in cols
+
+        events_row = scratch.execute("SELECT COUNT(*) FROM events").fetchone()
+        trades_row = scratch.execute("SELECT COUNT(*) FROM trades").fetchone()
+        assert events_row is not None
+        assert trades_row is not None
+        n_events = events_row[0]
+        n_trades = trades_row[0]
+        assert n_events >= n_trades
+        assert n_events <= 2 * n_trades
+    finally:
+        scratch.close()
+
+
 def test_heartbeat_emits_during_long_operation() -> None:
     """Heartbeat thread fires at least once and stops cleanly on signal."""
     import threading  # noqa: PLC0415
