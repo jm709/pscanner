@@ -396,6 +396,64 @@ def _stage2_wallet_aggs(scratch: duckdb.DuckDBPyConnection) -> None:
     )
 
 
+def _stage3_market_aggs(scratch: duckdb.DuckDBPyConnection) -> None:
+    """Per-market running aggregates over trade events.
+
+    Inputs are filtered to ``is_trade = 1`` so resolution NULLs cannot
+    pollute LAST_VALUE / STDDEV_POP / COUNT(price) windows. Also owns
+    ``market_first_prior_ts_w`` (moved from stage 2 to keep stage 2
+    leaf-independent on the wallet partition).
+    """
+    scratch.execute(
+        """
+        CREATE OR REPLACE TABLE market_aggs AS
+        WITH market_trades AS (
+            SELECT
+                e.condition_id, e.wallet_address, e.event_ts,
+                e.kind_priority, e.tx_hash, e.asset_id,
+                e.price, e.notional_usd,
+                CAST(
+                    ROW_NUMBER() OVER (
+                        PARTITION BY e.condition_id, e.wallet_address
+                        ORDER BY e.event_ts, e.kind_priority, e.tx_hash, e.asset_id
+                    ) = 1
+                    AS INTEGER
+                ) AS is_first_trade_in_market
+            FROM events e
+            WHERE e.is_trade = 1
+        )
+        SELECT
+            mt.condition_id,
+            mt.wallet_address,
+            mt.event_ts,
+            mt.kind_priority,
+            mt.tx_hash,
+            mt.asset_id,
+            COALESCE(SUM(mt.notional_usd) OVER w_market_strict, 0.0)
+                AS market_volume_so_far_w,
+            COALESCE(SUM(mt.is_first_trade_in_market) OVER w_market_strict, 0)
+                AS market_unique_traders_so_far_w,
+            LAST_VALUE(mt.price IGNORE NULLS) OVER w_market_strict
+                AS last_trade_price_w,
+            STDDEV_POP(mt.price) OVER w_market_recent_20 AS price_volatility_w,
+            COUNT(mt.price) OVER w_market_recent_20 AS price_count_20,
+            MIN(mt.event_ts) OVER w_market_strict AS market_first_prior_ts_w
+        FROM market_trades mt
+        WINDOW
+            w_market_strict AS (
+                PARTITION BY mt.condition_id
+                ORDER BY mt.event_ts, mt.kind_priority, mt.tx_hash, mt.asset_id
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+            ),
+            w_market_recent_20 AS (
+                PARTITION BY mt.condition_id
+                ORDER BY mt.event_ts, mt.kind_priority, mt.tx_hash, mt.asset_id
+                ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING
+            )
+        """
+    )
+
+
 def _build_training_examples_v2(
     duck: duckdb.DuckDBPyConnection, *, platform: str, now_ts: int
 ) -> None:
