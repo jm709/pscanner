@@ -673,6 +673,146 @@ def test_materialize_trades_coerces_null_category_to_unknown(tmp_path: Path) -> 
     assert result_rows[1]["market_category"] == "unknown"
 
 
+def test_final_join_handles_duplicate_corpus_trades(tmp_path: Path) -> None:
+    """corpus_trades may contain duplicate (tx_hash, asset_id, wallet_address)
+    tuples from re-ingesting overlapping on-chain ranges (legacy rows that
+    pre-date the PRIMARY KEY constraint, or rows landed via paths that
+    bypass the constraint). The python engine silently dedupes via
+    INSERT OR IGNORE on training_examples; the DuckDB engine must match.
+
+    Without an equivalent OR IGNORE semantic in the cross-database final
+    join, the INSERT into training_examples_v2 crashes with the same
+    UNIQUE constraint violation surfaced on the production corpus.
+
+    The current canonical corpus_trades schema enforces uniqueness via
+    PRIMARY KEY, so seeding two duplicate rows requires rebuilding the
+    table without that constraint — this mirrors the legacy on-disk
+    corpus shape we need to tolerate.
+    """
+    import sqlite3  # noqa: PLC0415
+
+    from pscanner.corpus._duckdb_engine import build_features_duckdb  # noqa: PLC0415
+    from pscanner.corpus.db import init_corpus_db  # noqa: PLC0415
+
+    db_path = tmp_path / "corpus.sqlite3"
+    init_corpus_db(db_path).close()
+    conn = sqlite3.connect(db_path)
+    try:
+        # Drop and recreate corpus_trades WITHOUT the PRIMARY KEY so we can
+        # seed two rows that share (platform, tx_hash, asset_id,
+        # wallet_address). This emulates legacy on-disk corpora whose
+        # trades table predates the unique constraint.
+        conn.execute("DROP TABLE corpus_trades")
+        conn.execute(
+            """
+            CREATE TABLE corpus_trades (
+              platform TEXT NOT NULL DEFAULT 'polymarket'
+                CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
+              tx_hash TEXT NOT NULL,
+              asset_id TEXT NOT NULL,
+              wallet_address TEXT NOT NULL,
+              condition_id TEXT NOT NULL,
+              outcome_side TEXT NOT NULL,
+              bs TEXT NOT NULL,
+              price REAL NOT NULL,
+              size REAL NOT NULL,
+              notional_usd REAL NOT NULL,
+              ts INTEGER NOT NULL
+            )
+            """
+        )
+        cid = "0x" + "a" * 64
+        wallet = "0x" + "b" * 40
+        tx = "0x" + "c" * 64
+        asset = "asset_yes"
+        conn.execute(
+            """
+            INSERT INTO corpus_markets
+                (platform, condition_id, event_slug, category, categories_json,
+                 enumerated_at, closed_at, total_volume_usd, backfill_state)
+            VALUES ('polymarket', ?, 'slug', 'sports', '["sports"]',
+                    50, 300, 1000.0, 'complete')
+            """,
+            (cid,),
+        )
+        conn.execute(
+            """
+            INSERT INTO market_resolutions
+                (platform, condition_id, resolved_at, winning_outcome_index,
+                 outcome_yes_won, source, recorded_at)
+            VALUES ('polymarket', ?, 300, 0, 1, 'gamma', 300)
+            """,
+            (cid,),
+        )
+        # Two rows with the SAME (tx_hash, asset_id, wallet_address) — only
+        # the ts differs, simulating re-ingest at a slightly different time.
+        # Both are BUYs on a resolved market; either would normally produce
+        # a training_examples row.
+        conn.executemany(
+            """
+            INSERT INTO corpus_trades
+                (platform, tx_hash, asset_id, wallet_address, condition_id,
+                 outcome_side, bs, price, size, notional_usd, ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "polymarket",
+                    tx,
+                    asset,
+                    wallet,
+                    cid,
+                    "YES",
+                    "BUY",
+                    0.5,
+                    100.0,
+                    50.0,
+                    100,
+                ),
+                (
+                    "polymarket",
+                    tx,
+                    asset,
+                    wallet,
+                    cid,
+                    "YES",
+                    "BUY",
+                    0.5,
+                    100.0,
+                    50.0,
+                    101,
+                ),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Without dedup, this raises duckdb.Error: UNIQUE constraint failed
+    build_features_duckdb(
+        db_path=db_path,
+        platform="polymarket",
+        now_ts=1000,
+        memory_limit="256MB",
+        temp_dir=tmp_path,
+        threads=1,
+    )
+
+    # Exactly ONE row landed (the dedup result) — matches python engine semantics
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT tx_hash, asset_id, wallet_address FROM training_examples"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 1
+    assert rows[0]["tx_hash"] == tx
+    assert rows[0]["asset_id"] == asset
+    assert rows[0]["wallet_address"] == wallet
+
+
 def test_heartbeat_emits_during_long_operation() -> None:
     """Heartbeat thread fires at least once and stops cleanly on signal."""
     import threading  # noqa: PLC0415

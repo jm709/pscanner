@@ -670,6 +670,26 @@ def _final_join_to_v2(scratch: duckdb.DuckDBPyConnection, *, platform: str, now_
     f-string interpolation, preserving Task 3's parameterization defense.
     The only f-string interpolation in this SQL is _V2_TABLE (table name)
     and col_list (derived from canonical TRAINING_EXAMPLES_COLUMNS).
+
+    Dedup contract: ``training_examples_v2`` has a UNIQUE constraint on
+    ``(platform, tx_hash, asset_id, wallet_address)``. ``corpus_trades``
+    nominally enforces the same key via its PRIMARY KEY, but legacy
+    on-disk corpora (rows that predate the constraint) may contain
+    duplicates. The python engine swallows these via ``INSERT OR IGNORE``
+    on ``training_examples``; DuckDB's sqlite_scanner extension rejects
+    both ``INSERT OR IGNORE`` and ``ON CONFLICT DO NOTHING`` ("Database
+    type 'sqlite' does not support MERGE INTO or ON CONFLICT"), so we
+    dedup at the SELECT source via ``QUALIFY ROW_NUMBER() = 1``.
+
+    Subtle parity caveat: with both engines deduping, they agree on row
+    count and primary key but may disagree on row CONTENTS for duplicate
+    keys. Python iterates ``corpus_trades`` ordered by ``(ts, tx_hash,
+    asset_id)`` and ``INSERT OR IGNORE`` keeps the FIRST-iterated row
+    (earliest ts). We mirror that here by partitioning on the v2 unique
+    key and ordering by ``(wa.event_ts, wa.kind_priority, wa.tx_hash,
+    wa.asset_id)``. The real fix is at the ingest layer (don't re-insert
+    overlapping trades); this guarantees the build doesn't crash on
+    legacy corpora that already have the dups.
     """
     col_list = ", ".join(TRAINING_EXAMPLES_COLUMNS)
     scratch.execute(
@@ -824,6 +844,15 @@ def _final_join_to_v2(scratch: duckdb.DuckDBPyConnection, *, platform: str, now_
         LEFT JOIN market_aggs ma
             USING (condition_id, event_ts, kind_priority, tx_hash, asset_id)
         WHERE wa.is_buy_only = 1
+        -- Match python engine's INSERT OR IGNORE semantics on duplicate
+        -- (tx_hash, asset_id, wallet_address) tuples in legacy corpora.
+        -- ORDER BY (event_ts, kind_priority, tx_hash, asset_id) mirrors
+        -- python's iter_chronological order so the kept row is the
+        -- earliest-ts dup (see docstring).
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY wa.tx_hash, wa.asset_id, wa.wallet_address
+            ORDER BY wa.event_ts, wa.kind_priority, wa.tx_hash, wa.asset_id
+        ) = 1
         """,  # noqa: S608 — _V2_TABLE is a module-level literal; platform/now_ts bound below
         [platform, now_ts],
     )
