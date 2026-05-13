@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import tempfile
 from pathlib import Path
 
-from pscanner.corpus.db import _SCHEMA_STATEMENTS, _apply_migrations, init_corpus_db
+from pscanner.corpus import repos
+from pscanner.corpus.db import (
+    _SCHEMA_STATEMENTS,
+    TRAINING_EXAMPLES_COLUMNS,
+    _apply_migrations,
+    init_corpus_db,
+    training_examples_ddl,
+)
 
 _EXPECTED_TABLES = {
     "corpus_markets",
@@ -643,6 +651,47 @@ def test_training_examples_cat_columns_default_to_zero() -> None:
             assert row[col] == 0, f"{col} should default to 0"
     finally:
         conn.close()
+
+
+def test_training_examples_ddl_parametrized_table_name(tmp_path: Path) -> None:
+    """training_examples_ddl(name) returns a CREATE TABLE statement that
+    builds a table with the same shape as the canonical schema."""
+    sql = training_examples_ddl("training_examples_x")
+    assert "CREATE TABLE training_examples_x" in sql
+    assert "PRIMARY KEY AUTOINCREMENT" in sql
+    assert "UNIQUE (platform, tx_hash, asset_id, wallet_address)" in sql
+
+
+def test_training_examples_columns_tuple_matches_ddl(tmp_path: Path) -> None:
+    """TRAINING_EXAMPLES_COLUMNS lists every non-identity column in
+    insertion order, matching what the DDL declares."""
+    db_path = tmp_path / "x.sqlite3"
+    conn = init_corpus_db(db_path)
+    try:
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(training_examples)").fetchall()]
+    finally:
+        conn.close()
+    # id + built_at are identity-ish; the tuple lists the columns the
+    # engine INSERTs into.
+    expected_inserted = [c for c in cols if c != "id"]
+    assert list(TRAINING_EXAMPLES_COLUMNS) == expected_inserted
+
+
+def test_training_examples_repo_insert_uses_canonical_column_order() -> None:
+    """Guard against drift between TRAINING_EXAMPLES_COLUMNS and the
+    INSERT statement in TrainingExamplesRepo. If a column is added to
+    the DDL/tuple but not to the INSERT, this test fails."""
+    sql = repos._INSERT_SQL
+    # Extract the column list between "(" and ") VALUES"
+    match = re.search(r"\(([^)]+)\)\s+VALUES", sql)
+    assert match is not None, f"could not parse INSERT column list from: {sql}"
+    cols = [c.strip() for c in match.group(1).split(",")]
+    assert cols == list(TRAINING_EXAMPLES_COLUMNS), (
+        f"INSERT column list drift: SQL has {cols}, canonical has {list(TRAINING_EXAMPLES_COLUMNS)}"
+    )
+    # Also verify placeholder count matches.
+    placeholders = sql.count("?")
+    assert placeholders == len(TRAINING_EXAMPLES_COLUMNS)
 
 
 def test_cross_platform_rows_coexist() -> None:

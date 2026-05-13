@@ -10,16 +10,18 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sqlite3
 import time
 from contextlib import AsyncExitStack
 from pathlib import Path
+from typing import Final
 
 import psutil
 import structlog
 
 from pscanner.corpus._build_features_sentinel import check_and_set_sentinel, clear_sentinel
-from pscanner.corpus._duckdb_engine import build_features_duckdb
+from pscanner.corpus._duckdb_engine import _scratch_path, _wipe_scratch, build_features_duckdb
 from pscanner.corpus.db import apply_read_pragmas, init_corpus_db
 from pscanner.corpus.enumerator import enumerate_closed_markets
 from pscanner.corpus.examples import build_features
@@ -144,6 +146,14 @@ def build_corpus_parser() -> argparse.ArgumentParser:
         help=(
             "Override the build_features_in_progress sentinel if a prior "
             "run crashed without clearing it."
+        ),
+    )
+    bf.add_argument(
+        "--reset-scratch",
+        action="store_true",
+        help=(
+            "Wipe leftover DuckDB scratch file from a prior crashed run. "
+            "Implies --force on the sentinel. Only relevant with --engine duckdb."
         ),
     )
     bf.add_argument(
@@ -598,12 +608,15 @@ async def _cmd_build_features(args: argparse.Namespace) -> int:
 
     # Sentinel guard runs for BOTH engines: a crashed Python build also
     # needs --force on retry, since training_examples may be half-truncated.
+    # --reset-scratch implies --force on the sentinel so operators only
+    # need one flag for crashed-build recovery.
+    force = bool(getattr(args, "force", False) or getattr(args, "reset_scratch", False))
     sentinel_conn = init_corpus_db(db_path)
     try:
         check_and_set_sentinel(
             CorpusStateRepo(sentinel_conn),
             now_ts=now_ts,
-            force=bool(getattr(args, "force", False)),
+            force=force,
         )
     finally:
         sentinel_conn.close()
@@ -656,9 +669,15 @@ def _run_python_engine(*, args: argparse.Namespace, db_path: Path, now_ts: int) 
 
 def _run_duckdb_engine(*, args: argparse.Namespace, db_path: Path, now_ts: int) -> int:
     """Run the DuckDB SQL-pipeline build engine."""
-    memory_limit = getattr(args, "duckdb_memory", None) or _default_duckdb_memory()
+    user_memory = getattr(args, "duckdb_memory", None)
+    if user_memory is not None:
+        _validate_duckdb_memory(user_memory)
+    memory_limit = user_memory or _default_duckdb_memory()
     threads = getattr(args, "duckdb_threads", None) or min(os.cpu_count() or 4, 8)
     temp_dir = db_path.parent / "duckdb_spill"
+
+    if getattr(args, "reset_scratch", False):
+        _wipe_scratch(_scratch_path(temp_dir))
 
     return build_features_duckdb(
         db_path=db_path,
@@ -670,12 +689,66 @@ def _run_duckdb_engine(*, args: argparse.Namespace, db_path: Path, now_ts: int) 
     )
 
 
+_DUCKDB_MEMORY_LARGE_HOST_GB = 16.0
+_DUCKDB_MEMORY_MID_HOST_GB = 10.0
+_DUCKDB_MEMORY_MIN_HOST_GB = 6.0
+
+
+_DUCKDB_MEMORY_RE: Final[re.Pattern[str]] = re.compile(r"^\d+(?:\.\d+)?(?:KB|MB|GB|TB|B)$")
+
+
+def _validate_duckdb_memory(value: str) -> None:
+    """Validate --duckdb-memory matches DuckDB's documented memory-limit syntax.
+
+    DuckDB doesn't support binding ``SET memory_limit = ?`` (PRAGMA values
+    are not parameterizable), so the value is f-string interpolated in
+    ``_open_scratch``. Validate at the CLI boundary to close the
+    injection surface. Mirrors Task 3's allowlist precedent for
+    ``--platform``.
+
+    Accepts: ``"3GB"``, ``"512MB"``, ``"16.5GB"``, ``"1024KB"``, ``"1B"``.
+    Rejects: lowercase units, binary prefixes (KiB), spaces, missing
+    units, injection payloads.
+    """
+    if not _DUCKDB_MEMORY_RE.match(value):
+        raise ValueError(
+            f"invalid --duckdb-memory: {value!r}; "
+            "expected pattern like '6GB', '512MB', '1024KB' "
+            "(no spaces, no lowercase units)"
+        )
+
+
 def _default_duckdb_memory() -> str:
-    """Default to min(available_memory // 2, 12GB) as bytes-string."""
-    half = psutil.virtual_memory().available // 2
-    cap = 12 * 1024 * 1024 * 1024
-    chosen = min(half, cap)
-    return str(chosen)
+    """Bracketed default for DuckDB memory_limit based on host RAM.
+
+    Brackets leave empirical headroom for DuckDB's sort/window spill
+    state, the attached-SQLite buffer cache, scratch DB writer, the
+    python interpreter, and the structlog heartbeat threads. The exact
+    overshoot factor depends on row width, parallelism, and whether
+    external sort kicks in; these brackets were chosen so the
+    12GB-host configuration that OOM'd in #131 (8GB limit -> ~12GB
+    peak) now defaults to 6GB with confirmed headroom on the rewrite.
+
+    These numbers are best-effort defaults; revisit after the at-scale
+    test (Task 14) measures real spill behavior on this host class.
+
+    Returns:
+        Memory-limit string suitable for ``SET memory_limit = '...'``.
+
+    Raises:
+        RuntimeError: host has less than 6GB total RAM -- refuse to run.
+    """
+    total_gb = psutil.virtual_memory().total / 1024**3
+    if total_gb >= _DUCKDB_MEMORY_LARGE_HOST_GB:
+        return "8GB"
+    if total_gb >= _DUCKDB_MEMORY_MID_HOST_GB:
+        return "6GB"
+    if total_gb >= _DUCKDB_MEMORY_MIN_HOST_GB:
+        return "3GB"
+    raise RuntimeError(
+        f"insufficient host memory for DuckDB engine: {total_gb:.1f}GB total, "
+        "need >=6GB. Use --engine python or run on a larger host."
+    )
 
 
 async def _cmd_onchain_backfill(args: argparse.Namespace) -> int:

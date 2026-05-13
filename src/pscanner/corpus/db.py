@@ -16,6 +16,124 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
+
+TRAINING_EXAMPLES_COLUMNS: tuple[str, ...] = (
+    "platform",
+    "tx_hash",
+    "asset_id",
+    "wallet_address",
+    "condition_id",
+    "trade_ts",
+    "built_at",
+    "prior_trades_count",
+    "prior_buys_count",
+    "prior_resolved_buys",
+    "prior_wins",
+    "prior_losses",
+    "win_rate",
+    "avg_implied_prob_paid",
+    "realized_edge_pp",
+    "prior_realized_pnl_usd",
+    "avg_bet_size_usd",
+    "median_bet_size_usd",
+    "wallet_age_days",
+    "seconds_since_last_trade",
+    "prior_trades_30d",
+    "top_category",
+    "category_diversity",
+    "bet_size_usd",
+    "bet_size_rel_to_avg",
+    "edge_confidence_weighted",
+    "win_rate_confidence_weighted",
+    "is_high_quality_wallet",
+    "bet_size_relative_to_history",
+    "side",
+    "implied_prob_at_buy",
+    "market_category",
+    "market_volume_so_far_usd",
+    "market_unique_traders_so_far",
+    "market_age_seconds",
+    "time_to_resolution_seconds",
+    "last_trade_price",
+    "price_volatility_recent",
+    "cat_sports",
+    "cat_esports",
+    "cat_thesis",
+    "cat_macro",
+    "cat_elections",
+    "cat_crypto",
+    "cat_geopolitics",
+    "cat_tech",
+    "cat_culture",
+    "label_won",
+)
+
+
+def training_examples_ddl(table_name: str) -> str:
+    """Canonical CREATE TABLE statement for ``training_examples``.
+
+    Parametrized on ``table_name`` so the DuckDB engine can build
+    ``training_examples_v2`` with identical constraints. Keep in sync
+    with ``TRAINING_EXAMPLES_COLUMNS``: any new column here must also be
+    added there (the engine's column list relies on tuple order).
+    """
+    return f"""
+    CREATE TABLE {table_name} (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      platform TEXT NOT NULL DEFAULT 'polymarket'
+        CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
+      tx_hash TEXT NOT NULL,
+      asset_id TEXT NOT NULL,
+      wallet_address TEXT NOT NULL,
+      condition_id TEXT NOT NULL,
+      trade_ts INTEGER NOT NULL,
+      built_at INTEGER NOT NULL,
+      prior_trades_count INTEGER NOT NULL,
+      prior_buys_count INTEGER NOT NULL,
+      prior_resolved_buys INTEGER NOT NULL,
+      prior_wins INTEGER NOT NULL,
+      prior_losses INTEGER NOT NULL,
+      win_rate REAL,
+      avg_implied_prob_paid REAL,
+      realized_edge_pp REAL,
+      prior_realized_pnl_usd REAL NOT NULL DEFAULT 0,
+      avg_bet_size_usd REAL,
+      median_bet_size_usd REAL,
+      wallet_age_days REAL NOT NULL,
+      seconds_since_last_trade INTEGER,
+      prior_trades_30d INTEGER NOT NULL,
+      top_category TEXT,
+      category_diversity INTEGER NOT NULL,
+      bet_size_usd REAL NOT NULL,
+      bet_size_rel_to_avg REAL,
+      edge_confidence_weighted REAL NOT NULL DEFAULT 0,
+      win_rate_confidence_weighted REAL NOT NULL DEFAULT 0,
+      is_high_quality_wallet INTEGER NOT NULL DEFAULT 0,
+      bet_size_relative_to_history REAL NOT NULL DEFAULT 1,
+      side TEXT NOT NULL,
+      implied_prob_at_buy REAL NOT NULL,
+      market_category TEXT NOT NULL,
+      market_volume_so_far_usd REAL NOT NULL,
+      market_unique_traders_so_far INTEGER NOT NULL,
+      market_age_seconds INTEGER NOT NULL,
+      time_to_resolution_seconds INTEGER,
+      last_trade_price REAL,
+      price_volatility_recent REAL,
+      cat_sports INTEGER NOT NULL DEFAULT 0,
+      cat_esports INTEGER NOT NULL DEFAULT 0,
+      cat_thesis INTEGER NOT NULL DEFAULT 0,
+      cat_macro INTEGER NOT NULL DEFAULT 0,
+      cat_elections INTEGER NOT NULL DEFAULT 0,
+      cat_crypto INTEGER NOT NULL DEFAULT 0,
+      cat_geopolitics INTEGER NOT NULL DEFAULT 0,
+      cat_tech INTEGER NOT NULL DEFAULT 0,
+      cat_culture INTEGER NOT NULL DEFAULT 0,
+      label_won INTEGER NOT NULL,
+      UNIQUE (platform, tx_hash, asset_id, wallet_address)
+    )
+    """
+
+
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS corpus_markets (
@@ -90,61 +208,9 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
       PRIMARY KEY (platform, condition_id)
     )
     """,
-    """
-    CREATE TABLE IF NOT EXISTS training_examples (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      platform TEXT NOT NULL DEFAULT 'polymarket'
-        CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
-      tx_hash TEXT NOT NULL,
-      asset_id TEXT NOT NULL,
-      wallet_address TEXT NOT NULL,
-      condition_id TEXT NOT NULL,
-      trade_ts INTEGER NOT NULL,
-      built_at INTEGER NOT NULL,
-      prior_trades_count INTEGER NOT NULL,
-      prior_buys_count INTEGER NOT NULL,
-      prior_resolved_buys INTEGER NOT NULL,
-      prior_wins INTEGER NOT NULL,
-      prior_losses INTEGER NOT NULL,
-      win_rate REAL,
-      avg_implied_prob_paid REAL,
-      realized_edge_pp REAL,
-      prior_realized_pnl_usd REAL NOT NULL DEFAULT 0,
-      avg_bet_size_usd REAL,
-      median_bet_size_usd REAL,
-      wallet_age_days REAL NOT NULL,
-      seconds_since_last_trade INTEGER,
-      prior_trades_30d INTEGER NOT NULL,
-      top_category TEXT,
-      category_diversity INTEGER NOT NULL,
-      bet_size_usd REAL NOT NULL,
-      bet_size_rel_to_avg REAL,
-      edge_confidence_weighted REAL NOT NULL DEFAULT 0,
-      win_rate_confidence_weighted REAL NOT NULL DEFAULT 0,
-      is_high_quality_wallet INTEGER NOT NULL DEFAULT 0,
-      bet_size_relative_to_history REAL NOT NULL DEFAULT 1,
-      side TEXT NOT NULL,
-      implied_prob_at_buy REAL NOT NULL,
-      market_category TEXT NOT NULL,
-      market_volume_so_far_usd REAL NOT NULL,
-      market_unique_traders_so_far INTEGER NOT NULL,
-      market_age_seconds INTEGER NOT NULL,
-      time_to_resolution_seconds INTEGER,
-      last_trade_price REAL,
-      price_volatility_recent REAL,
-      cat_sports INTEGER NOT NULL DEFAULT 0,
-      cat_esports INTEGER NOT NULL DEFAULT 0,
-      cat_thesis INTEGER NOT NULL DEFAULT 0,
-      cat_macro INTEGER NOT NULL DEFAULT 0,
-      cat_elections INTEGER NOT NULL DEFAULT 0,
-      cat_crypto INTEGER NOT NULL DEFAULT 0,
-      cat_geopolitics INTEGER NOT NULL DEFAULT 0,
-      cat_tech INTEGER NOT NULL DEFAULT 0,
-      cat_culture INTEGER NOT NULL DEFAULT 0,
-      label_won INTEGER NOT NULL,
-      UNIQUE (platform, tx_hash, asset_id, wallet_address)
-    )
-    """,
+    training_examples_ddl("training_examples").replace(
+        "CREATE TABLE training_examples", "CREATE TABLE IF NOT EXISTS training_examples"
+    ),
     "CREATE INDEX IF NOT EXISTS idx_training_examples_condition ON training_examples(condition_id)",
     "CREATE INDEX IF NOT EXISTS idx_training_examples_wallet ON training_examples(wallet_address)",
     "CREATE INDEX IF NOT EXISTS idx_training_examples_label ON training_examples(label_won)",
@@ -474,63 +540,7 @@ def _migrate_training_examples_add_platform(conn: sqlite3.Connection) -> None:
     row_count = conn.execute("SELECT COUNT(*) AS n FROM training_examples").fetchone()[0]
     _log.info("corpus.migration_started", table="training_examples", rows=row_count)
     with conn:
-        conn.execute(
-            """
-            CREATE TABLE training_examples__new (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              platform TEXT NOT NULL DEFAULT 'polymarket'
-                CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
-              tx_hash TEXT NOT NULL,
-              asset_id TEXT NOT NULL,
-              wallet_address TEXT NOT NULL,
-              condition_id TEXT NOT NULL,
-              trade_ts INTEGER NOT NULL,
-              built_at INTEGER NOT NULL,
-              prior_trades_count INTEGER NOT NULL,
-              prior_buys_count INTEGER NOT NULL,
-              prior_resolved_buys INTEGER NOT NULL,
-              prior_wins INTEGER NOT NULL,
-              prior_losses INTEGER NOT NULL,
-              win_rate REAL,
-              avg_implied_prob_paid REAL,
-              realized_edge_pp REAL,
-              prior_realized_pnl_usd REAL NOT NULL DEFAULT 0,
-              avg_bet_size_usd REAL,
-              median_bet_size_usd REAL,
-              wallet_age_days REAL NOT NULL,
-              seconds_since_last_trade INTEGER,
-              prior_trades_30d INTEGER NOT NULL,
-              top_category TEXT,
-              category_diversity INTEGER NOT NULL,
-              bet_size_usd REAL NOT NULL,
-              bet_size_rel_to_avg REAL,
-              edge_confidence_weighted REAL NOT NULL DEFAULT 0,
-              win_rate_confidence_weighted REAL NOT NULL DEFAULT 0,
-              is_high_quality_wallet INTEGER NOT NULL DEFAULT 0,
-              bet_size_relative_to_history REAL NOT NULL DEFAULT 1,
-              side TEXT NOT NULL,
-              implied_prob_at_buy REAL NOT NULL,
-              market_category TEXT NOT NULL,
-              market_volume_so_far_usd REAL NOT NULL,
-              market_unique_traders_so_far INTEGER NOT NULL,
-              market_age_seconds INTEGER NOT NULL,
-              time_to_resolution_seconds INTEGER,
-              last_trade_price REAL,
-              price_volatility_recent REAL,
-              cat_sports INTEGER NOT NULL DEFAULT 0,
-              cat_esports INTEGER NOT NULL DEFAULT 0,
-              cat_thesis INTEGER NOT NULL DEFAULT 0,
-              cat_macro INTEGER NOT NULL DEFAULT 0,
-              cat_elections INTEGER NOT NULL DEFAULT 0,
-              cat_crypto INTEGER NOT NULL DEFAULT 0,
-              cat_geopolitics INTEGER NOT NULL DEFAULT 0,
-              cat_tech INTEGER NOT NULL DEFAULT 0,
-              cat_culture INTEGER NOT NULL DEFAULT 0,
-              label_won INTEGER NOT NULL,
-              UNIQUE (platform, tx_hash, asset_id, wallet_address)
-            )
-            """
-        )
+        conn.executescript(training_examples_ddl("training_examples__new") + ";")
         # Preserve the legacy `id` autoincrement column — `pscanner.ml.streaming`
         # uses it as a stable rowid for chunk-iteration ORDER BY. The composite
         # cross-platform key is enforced via UNIQUE rather than as the PK so id
