@@ -227,20 +227,6 @@ def _count_table_safe(duck: duckdb.DuckDBPyConnection, table: str | None) -> int
         return 0
 
 
-def _configure_duckdb(
-    duck: duckdb.DuckDBPyConnection,
-    *,
-    memory_limit: str,
-    temp_dir: Path,
-    threads: int,
-) -> None:
-    duck.execute(f"SET memory_limit = '{memory_limit}'")
-    duck.execute(f"SET temp_directory = '{temp_dir}'")
-    duck.execute(f"SET threads = {threads}")
-    duck.execute("INSTALL sqlite")
-    duck.execute("LOAD sqlite")
-
-
 def _attach_corpus(duck: duckdb.DuckDBPyConnection, *, db_path: Path) -> None:
     duck.execute(f"ATTACH '{db_path}' AS corpus (TYPE sqlite)")
 
