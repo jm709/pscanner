@@ -12,6 +12,8 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Final
 
+from pscanner.corpus.db import TRAINING_EXAMPLES_COLUMNS
+
 
 @dataclass(frozen=True)
 class CorpusMarket:
@@ -729,6 +731,18 @@ _TRAINING_EXAMPLES_SECONDARY_INDEXES: Final[tuple[tuple[str, str], ...]] = (
 )
 
 
+# Built from the canonical column tuple in ``pscanner.corpus.db`` so a new
+# column gets picked up automatically. ``_example_to_row`` MUST produce
+# values in the same order — guarded by a parity test in ``tests/corpus``.
+_INSERT_SQL: Final[str] = (
+    "INSERT OR IGNORE INTO training_examples ("  # noqa: S608 — column names come from a module-internal literal tuple
+    + ", ".join(TRAINING_EXAMPLES_COLUMNS)
+    + ") VALUES ("
+    + ", ".join(["?"] * len(TRAINING_EXAMPLES_COLUMNS))
+    + ")"
+)
+
+
 class TrainingExamplesRepo:
     """Inserts, truncate, and uniqueness lookups against ``training_examples``."""
 
@@ -741,30 +755,7 @@ class TrainingExamplesRepo:
         rows = [_example_to_row(ex) for ex in examples]
         if not rows:
             return 0
-        cur = self._conn.executemany(
-            """
-            INSERT OR IGNORE INTO training_examples (
-              platform, tx_hash, asset_id, wallet_address, condition_id, trade_ts, built_at,
-              prior_trades_count, prior_buys_count, prior_resolved_buys,
-              prior_wins, prior_losses, win_rate, avg_implied_prob_paid,
-              realized_edge_pp, prior_realized_pnl_usd,
-              avg_bet_size_usd, median_bet_size_usd, wallet_age_days,
-              seconds_since_last_trade, prior_trades_30d, top_category,
-              category_diversity, bet_size_usd, bet_size_rel_to_avg,
-              edge_confidence_weighted, win_rate_confidence_weighted,
-              is_high_quality_wallet, bet_size_relative_to_history,
-              side, implied_prob_at_buy, market_category, market_volume_so_far_usd,
-              market_unique_traders_so_far, market_age_seconds,
-              time_to_resolution_seconds, last_trade_price, price_volatility_recent,
-              cat_sports, cat_esports, cat_thesis, cat_macro, cat_elections,
-              cat_crypto, cat_geopolitics, cat_tech, cat_culture,
-              label_won
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
+        cur = self._conn.executemany(_INSERT_SQL, rows)
         self._conn.commit()
         return cur.rowcount or 0
 

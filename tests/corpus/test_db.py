@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import tempfile
 from pathlib import Path
 
+from pscanner.corpus import repos
 from pscanner.corpus.db import (
     _SCHEMA_STATEMENTS,
     TRAINING_EXAMPLES_COLUMNS,
@@ -673,6 +675,23 @@ def test_training_examples_columns_tuple_matches_ddl(tmp_path: Path) -> None:
     # engine INSERTs into.
     expected_inserted = [c for c in cols if c != "id"]
     assert list(TRAINING_EXAMPLES_COLUMNS) == expected_inserted
+
+
+def test_training_examples_repo_insert_uses_canonical_column_order() -> None:
+    """Guard against drift between TRAINING_EXAMPLES_COLUMNS and the
+    INSERT statement in TrainingExamplesRepo. If a column is added to
+    the DDL/tuple but not to the INSERT, this test fails."""
+    sql = repos._INSERT_SQL
+    # Extract the column list between "(" and ") VALUES"
+    match = re.search(r"\(([^)]+)\)\s+VALUES", sql)
+    assert match is not None, f"could not parse INSERT column list from: {sql}"
+    cols = [c.strip() for c in match.group(1).split(",")]
+    assert cols == list(TRAINING_EXAMPLES_COLUMNS), (
+        f"INSERT column list drift: SQL has {cols}, canonical has {list(TRAINING_EXAMPLES_COLUMNS)}"
+    )
+    # Also verify placeholder count matches.
+    placeholders = sql.count("?")
+    assert placeholders == len(TRAINING_EXAMPLES_COLUMNS)
 
 
 def test_cross_platform_rows_coexist() -> None:
