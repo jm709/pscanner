@@ -112,5 +112,8 @@ possibly-unresolved-reference = "error"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = ["-ra", "--strict-markers", "--strict-config"]
+addopts = ["-ra", "--strict-markers", "--strict-config", "-m", "not slow"]
 filterwarnings = ["error"]
+markers = [
+    "slow: opt-in memory/perf regression tests; run with `uv run pytest -m slow`",
+]
