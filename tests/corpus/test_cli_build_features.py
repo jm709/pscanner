@@ -9,7 +9,12 @@ from pathlib import Path
 import pytest
 
 from pscanner.corpus._build_features_sentinel import SENTINEL_KEY, SentinelAlreadySetError
-from pscanner.corpus.cli import _cmd_build_features, build_corpus_parser, run_corpus_command
+from pscanner.corpus.cli import (
+    _cmd_build_features,
+    _default_duckdb_memory,
+    build_corpus_parser,
+    run_corpus_command,
+)
 from pscanner.corpus.db import init_corpus_db
 from pscanner.corpus.repos import CorpusStateRepo
 from tests.corpus._duckdb_fixture import build_fixture_db
@@ -114,3 +119,29 @@ async def test_build_features_reset_scratch_overrides_sentinel(
     )
     assert rc == 0
     assert not stale.exists()
+
+
+def test_default_duckdb_memory_brackets(monkeypatch):
+    """Auto-detected budget falls within the documented bracket per host RAM."""
+
+    class _FakeVM:
+        def __init__(self, total_gb: float):
+            self.total = int(total_gb * 1024**3)
+
+    cases = [
+        (32.0, "8GB"),
+        (16.0, "8GB"),
+        (12.0, "6GB"),
+        (8.0, "3GB"),
+        (5.5, None),  # refuse: below floor
+    ]
+    for total_gb, expected in cases:
+        monkeypatch.setattr(
+            "pscanner.corpus.cli.psutil.virtual_memory",
+            lambda total=total_gb: _FakeVM(total),
+        )
+        if expected is None:
+            with pytest.raises(RuntimeError, match="insufficient"):
+                _default_duckdb_memory()
+        else:
+            assert _default_duckdb_memory() == expected

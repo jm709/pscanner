@@ -684,12 +684,42 @@ def _run_duckdb_engine(*, args: argparse.Namespace, db_path: Path, now_ts: int) 
     )
 
 
+_DUCKDB_MEMORY_LARGE_HOST_GB = 16.0
+_DUCKDB_MEMORY_MID_HOST_GB = 10.0
+_DUCKDB_MEMORY_MIN_HOST_GB = 6.0
+
+
 def _default_duckdb_memory() -> str:
-    """Default to min(available_memory // 2, 12GB) as bytes-string."""
-    half = psutil.virtual_memory().available // 2
-    cap = 12 * 1024 * 1024 * 1024
-    chosen = min(half, cap)
-    return str(chosen)
+    """Bracketed default for DuckDB memory_limit based on host RAM.
+
+    Brackets leave empirical headroom for DuckDB's sort/window spill
+    state, the attached-SQLite buffer cache, scratch DB writer, the
+    python interpreter, and the structlog heartbeat threads. The exact
+    overshoot factor depends on row width, parallelism, and whether
+    external sort kicks in; these brackets were chosen so the
+    12GB-host configuration that OOM'd in #131 (8GB limit -> ~12GB
+    peak) now defaults to 6GB with confirmed headroom on the rewrite.
+
+    These numbers are best-effort defaults; revisit after the at-scale
+    test (Task 14) measures real spill behavior on this host class.
+
+    Returns:
+        Memory-limit string suitable for ``SET memory_limit = '...'``.
+
+    Raises:
+        RuntimeError: host has less than 6GB total RAM -- refuse to run.
+    """
+    total_gb = psutil.virtual_memory().total / 1024**3
+    if total_gb >= _DUCKDB_MEMORY_LARGE_HOST_GB:
+        return "8GB"
+    if total_gb >= _DUCKDB_MEMORY_MID_HOST_GB:
+        return "6GB"
+    if total_gb >= _DUCKDB_MEMORY_MIN_HOST_GB:
+        return "3GB"
+    raise RuntimeError(
+        f"insufficient host memory for DuckDB engine: {total_gb:.1f}GB total, "
+        "need >=6GB. Use --engine python or run on a larger host."
+    )
 
 
 async def _cmd_onchain_backfill(args: argparse.Namespace) -> int:
