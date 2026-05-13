@@ -12,6 +12,7 @@ from pscanner.corpus._build_features_sentinel import SENTINEL_KEY, SentinelAlrea
 from pscanner.corpus.cli import (
     _cmd_build_features,
     _default_duckdb_memory,
+    _validate_duckdb_memory,
     build_corpus_parser,
     run_corpus_command,
 )
@@ -145,3 +146,28 @@ def test_default_duckdb_memory_brackets(monkeypatch):
                 _default_duckdb_memory()
         else:
             assert _default_duckdb_memory() == expected
+
+
+def test_duckdb_memory_regex_accepts_valid():
+    """Bracket-style values used by _default_duckdb_memory must pass."""
+    for value in ("3GB", "6GB", "8GB", "512MB", "1024KB", "1B", "16.5GB"):
+        _validate_duckdb_memory(value)  # must not raise
+
+
+def test_duckdb_memory_regex_rejects_invalid():
+    """Anything else — including injection attempts — must raise ValueError."""
+    bad = (
+        "",
+        " ",
+        "6",  # missing unit
+        "6 GB",  # space inside
+        "6GiB",  # binary prefix not supported
+        "6gb",  # lowercase rejected; DuckDB accepts but allowlist is stricter
+        "GB",
+        "6GB; ATTACH 'evil'",  # injection
+        "6GB' UNION SELECT 1 --",
+        "-6GB",
+    )
+    for value in bad:
+        with pytest.raises(ValueError, match="invalid --duckdb-memory"):
+            _validate_duckdb_memory(value)

@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sqlite3
 import time
 from contextlib import AsyncExitStack
 from pathlib import Path
+from typing import Final
 
 import psutil
 import structlog
@@ -667,7 +669,10 @@ def _run_python_engine(*, args: argparse.Namespace, db_path: Path, now_ts: int) 
 
 def _run_duckdb_engine(*, args: argparse.Namespace, db_path: Path, now_ts: int) -> int:
     """Run the DuckDB SQL-pipeline build engine."""
-    memory_limit = getattr(args, "duckdb_memory", None) or _default_duckdb_memory()
+    user_memory = getattr(args, "duckdb_memory", None)
+    if user_memory is not None:
+        _validate_duckdb_memory(user_memory)
+    memory_limit = user_memory or _default_duckdb_memory()
     threads = getattr(args, "duckdb_threads", None) or min(os.cpu_count() or 4, 8)
     temp_dir = db_path.parent / "duckdb_spill"
 
@@ -687,6 +692,30 @@ def _run_duckdb_engine(*, args: argparse.Namespace, db_path: Path, now_ts: int) 
 _DUCKDB_MEMORY_LARGE_HOST_GB = 16.0
 _DUCKDB_MEMORY_MID_HOST_GB = 10.0
 _DUCKDB_MEMORY_MIN_HOST_GB = 6.0
+
+
+_DUCKDB_MEMORY_RE: Final[re.Pattern[str]] = re.compile(r"^\d+(?:\.\d+)?(?:KB|MB|GB|TB|B)$")
+
+
+def _validate_duckdb_memory(value: str) -> None:
+    """Validate --duckdb-memory matches DuckDB's documented memory-limit syntax.
+
+    DuckDB doesn't support binding ``SET memory_limit = ?`` (PRAGMA values
+    are not parameterizable), so the value is f-string interpolated in
+    ``_open_scratch``. Validate at the CLI boundary to close the
+    injection surface. Mirrors Task 3's allowlist precedent for
+    ``--platform``.
+
+    Accepts: ``"3GB"``, ``"512MB"``, ``"16.5GB"``, ``"1024KB"``, ``"1B"``.
+    Rejects: lowercase units, binary prefixes (KiB), spaces, missing
+    units, injection payloads.
+    """
+    if not _DUCKDB_MEMORY_RE.match(value):
+        raise ValueError(
+            f"invalid --duckdb-memory: {value!r}; "
+            "expected pattern like '6GB', '512MB', '1024KB' "
+            "(no spaces, no lowercase units)"
+        )
 
 
 def _default_duckdb_memory() -> str:
