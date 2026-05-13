@@ -23,6 +23,18 @@ _log = structlog.get_logger(__name__)
 
 _V2_TABLE: Final[str] = "training_examples_v2"
 _V2_INDEX_PREFIX: Final[str] = "idx_te_v2_"
+_PLATFORMS: Final[frozenset[str]] = frozenset({"polymarket", "kalshi", "manifold"})
+
+
+def _validate_platform(platform: str) -> None:
+    """Raise ValueError if ``platform`` is not in the allowlist.
+
+    Prevents SQL-injection footgun in f-string-interpolated table queries.
+    Caller-validated input upstream (argparse ``choices=``) is still
+    enforced here for library callers and to drop the noqa markers.
+    """
+    if platform not in _PLATFORMS:
+        raise ValueError(f"unknown platform: {platform!r}; must be one of {sorted(_PLATFORMS)}")
 
 
 def _heartbeat_loop(
@@ -84,6 +96,7 @@ def build_features_duckdb(
     Returns:
         Number of rows in the new ``training_examples`` table.
     """
+    _validate_platform(platform)
     temp_dir.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
 
@@ -171,7 +184,7 @@ def _create_v2_via_sqlite3(*, db_path: Path) -> None:
 def _materialize_trades(duck: duckdb.DuckDBPyConnection, *, platform: str) -> None:
     """Pull corpus_trades + corpus_markets + market_resolutions into DuckDB TEMP."""
     duck.execute(
-        f"""
+        """
         CREATE TEMP TABLE trades AS
         SELECT
             t.tx_hash, t.asset_id, t.wallet_address, t.condition_id,
@@ -180,16 +193,18 @@ def _materialize_trades(duck: duckdb.DuckDBPyConnection, *, platform: str) -> No
         FROM corpus.corpus_trades t
         JOIN corpus.corpus_markets m
           ON m.platform = t.platform AND m.condition_id = t.condition_id
-        WHERE t.platform = '{platform}' AND m.platform = '{platform}'
-        """  # noqa: S608 — platform is caller-controlled, not user input
+        WHERE t.platform = ? AND m.platform = ?
+        """,
+        [platform, platform],
     )
     duck.execute(
-        f"""
+        """
         CREATE TEMP TABLE resolutions AS
         SELECT condition_id, resolved_at, outcome_yes_won
         FROM corpus.market_resolutions
-        WHERE platform = '{platform}'
-        """  # noqa: S608 — platform is caller-controlled, not user input
+        WHERE platform = ?
+        """,
+        [platform],
     )
 
 
@@ -486,10 +501,10 @@ def _build_training_examples_v2(
             FROM market_first_trade m
         )
         SELECT
-            '{platform}' AS platform,
+            ? AS platform,
             wa.tx_hash, wa.asset_id, wa.wallet_address, wa.condition_id,
             wa.event_ts AS trade_ts,
-            {now_ts} AS built_at,
+            ? AS built_at,
             CAST(wa.prior_trades_count_w AS INTEGER) AS prior_trades_count,
             CAST(wa.prior_buys_count_w AS INTEGER) AS prior_buys_count,
             CAST(wa.prior_resolved_buys_w AS INTEGER) AS prior_resolved_buys,
@@ -679,7 +694,8 @@ def _build_training_examples_v2(
         LEFT JOIN market_unique_acc mua
             USING (condition_id, event_ts, kind_priority, tx_hash, asset_id)
         WHERE wa.is_buy_only = 1
-        """  # noqa: S608
+        """,  # noqa: S608 — _V2_TABLE is a module-level literal
+        [platform, now_ts],
     )
 
 

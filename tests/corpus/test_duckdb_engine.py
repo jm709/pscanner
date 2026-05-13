@@ -137,6 +137,24 @@ def test_duckdb_engine_matches_python_engine(parity_dbs: tuple[Path, Path]) -> N
     assert not failures, "parity mismatch:\n" + "\n".join(failures)
 
 
+def test_build_features_duckdb_rejects_unknown_platform(tmp_path: Path) -> None:
+    """Engine entry validates platform against allowlist, no SQL injection
+    surface via f-string interpolation."""
+    from pscanner.corpus._duckdb_engine import build_features_duckdb  # noqa: PLC0415
+
+    db_path = tmp_path / "corpus.sqlite3"
+    db_path.touch()
+    with pytest.raises(ValueError, match="unknown platform"):
+        build_features_duckdb(
+            db_path=db_path,
+            platform="polymarket'; DROP TABLE corpus_trades; --",
+            now_ts=0,
+            memory_limit="1GB",
+            temp_dir=tmp_path,
+            threads=1,
+        )
+
+
 def test_heartbeat_emits_during_long_operation() -> None:
     """Heartbeat thread fires at least once and stops cleanly on signal."""
     import threading  # noqa: PLC0415
