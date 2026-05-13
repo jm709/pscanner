@@ -24,6 +24,7 @@ _log = structlog.get_logger(__name__)
 _V2_TABLE: Final[str] = "training_examples_v2"
 _V2_INDEX_PREFIX: Final[str] = "idx_te_v2_"
 _PLATFORMS: Final[frozenset[str]] = frozenset({"polymarket", "kalshi", "manifold"})
+_SCRATCH_FILENAME: Final[str] = "build_scratch.duckdb"
 
 
 def _validate_platform(platform: str) -> None:
@@ -159,6 +160,31 @@ def _configure_duckdb(
 
 def _attach_corpus(duck: duckdb.DuckDBPyConnection, *, db_path: Path) -> None:
     duck.execute(f"ATTACH '{db_path}' AS corpus (TYPE sqlite)")
+
+
+def _scratch_path(temp_dir: Path) -> Path:
+    """Path to the scratch DuckDB file under the spill dir."""
+    return temp_dir / _SCRATCH_FILENAME
+
+
+def _open_scratch(
+    path: Path, *, memory_limit: str, threads: int
+) -> duckdb.DuckDBPyConnection:
+    """Open (or create) a persistent scratch DuckDB file with the given budget."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = duckdb.connect(str(path))
+    conn.execute(f"SET memory_limit = '{memory_limit}'")
+    conn.execute(f"SET threads = {threads}")
+    return conn
+
+
+def _wipe_scratch(path: Path) -> None:
+    """Remove the scratch file. No-op if it doesn't exist."""
+    if path.exists():
+        path.unlink()
+    wal = path.with_suffix(path.suffix + ".wal")
+    if wal.exists():
+        wal.unlink()
 
 
 def _create_v2_via_sqlite3(*, db_path: Path) -> None:

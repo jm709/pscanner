@@ -155,6 +155,21 @@ def test_build_features_duckdb_rejects_unknown_platform(tmp_path: Path) -> None:
         )
 
 
+def test_scratch_db_lifecycle(tmp_path: Path) -> None:
+    """Scratch file is created on open, removed on success-close, persists
+    on failure-close."""
+    from pscanner.corpus._duckdb_engine import _open_scratch, _wipe_scratch  # noqa: PLC0415
+
+    scratch_path = tmp_path / "scratch.duckdb"
+    assert not scratch_path.exists()
+    conn = _open_scratch(scratch_path, memory_limit="256MB", threads=1)
+    conn.execute("CREATE TABLE smoke AS SELECT 1 AS x")
+    conn.close()
+    assert scratch_path.exists()
+    _wipe_scratch(scratch_path)
+    assert not scratch_path.exists()
+
+
 def test_heartbeat_emits_during_long_operation() -> None:
     """Heartbeat thread fires at least once and stops cleanly on signal."""
     import threading  # noqa: PLC0415
