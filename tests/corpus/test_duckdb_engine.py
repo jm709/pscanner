@@ -343,6 +343,214 @@ def test_stage4_wallet_cat_summary_uses_filter_not_or_chain(tmp_path: Path) -> N
         scratch.close()
 
 
+def test_final_join_skips_resolution_for_last_trade_ts(tmp_path: Path) -> None:
+    """A wallet with BUY@100 -> RESOLUTION@200 -> BUY@300 must report
+    seconds_since_last_trade=200 (=300-100), not 100 (=300-200)."""
+    import sqlite3  # noqa: PLC0415
+
+    from pscanner.corpus._duckdb_engine import build_features_duckdb  # noqa: PLC0415
+    from pscanner.corpus.db import init_corpus_db  # noqa: PLC0415
+
+    db_path = tmp_path / "corpus.sqlite3"
+    init_corpus_db(db_path).close()
+    conn = sqlite3.connect(db_path)
+    try:
+        cid = "0x" + "a" * 64
+        wallet = "0x" + "b" * 40
+        conn.execute(
+            """
+            INSERT INTO corpus_markets
+                (platform, condition_id, event_slug, category, categories_json,
+                 enumerated_at, closed_at, total_volume_usd, backfill_state)
+            VALUES ('polymarket', ?, 'slug', 'sports', '["sports"]',
+                    50, 300, 1000.0, 'complete')
+            """,
+            (cid,),
+        )
+        conn.execute(
+            """
+            INSERT INTO market_resolutions
+                (platform, condition_id, resolved_at, winning_outcome_index,
+                 outcome_yes_won, source, recorded_at)
+            VALUES ('polymarket', ?, 200, 0, 1, 'gamma', 200)
+            """,
+            (cid,),
+        )
+        rows = [
+            (
+                "polymarket",
+                "0x" + "1" * 64,
+                "asset_yes",
+                wallet,
+                cid,
+                "YES",
+                "BUY",
+                0.5,
+                100.0,
+                50.0,
+                100,
+            ),
+            (
+                "polymarket",
+                "0x" + "2" * 64,
+                "asset_yes",
+                wallet,
+                cid,
+                "YES",
+                "BUY",
+                0.6,
+                100.0,
+                60.0,
+                300,
+            ),
+        ]
+        conn.executemany(
+            """
+            INSERT INTO corpus_trades
+                (platform, tx_hash, asset_id, wallet_address, condition_id,
+                 outcome_side, bs, price, size, notional_usd, ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    build_features_duckdb(
+        db_path=db_path,
+        platform="polymarket",
+        now_ts=1000,
+        memory_limit="256MB",
+        temp_dir=tmp_path,
+        threads=1,
+    )
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT trade_ts, seconds_since_last_trade, prior_resolved_buys "
+            "FROM training_examples ORDER BY trade_ts"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 2
+    assert rows[0]["seconds_since_last_trade"] is None
+    assert rows[0]["prior_resolved_buys"] == 0
+    assert rows[1]["seconds_since_last_trade"] == 200
+    assert rows[1]["prior_resolved_buys"] == 1
+
+
+def test_final_join_top_category_breaks_tied_ts_by_tx_hash(tmp_path: Path) -> None:
+    """When two categories share cat_first_ts, tiebreak by cat_first_tx (ASC)."""
+    import sqlite3  # noqa: PLC0415
+
+    from pscanner.corpus._duckdb_engine import build_features_duckdb  # noqa: PLC0415
+    from pscanner.corpus.db import init_corpus_db  # noqa: PLC0415
+
+    db_path = tmp_path / "corpus.sqlite3"
+    init_corpus_db(db_path).close()
+    conn = sqlite3.connect(db_path)
+    try:
+        wallet = "0x" + "b" * 40
+        cid_esports = "0x" + "e" * 64
+        cid_sports = "0x" + "f" * 64
+        for cid, cat in ((cid_esports, "esports"), (cid_sports, "sports")):
+            conn.execute(
+                """
+                INSERT INTO corpus_markets
+                    (platform, condition_id, event_slug, category, categories_json,
+                     enumerated_at, closed_at, total_volume_usd, backfill_state)
+                VALUES ('polymarket', ?, 'slug', ?, '[]',
+                        50, 1000, 1000.0, 'complete')
+                """,
+                (cid, cat),
+            )
+            conn.execute(
+                """
+                INSERT INTO market_resolutions
+                    (platform, condition_id, resolved_at, winning_outcome_index,
+                     outcome_yes_won, source, recorded_at)
+                VALUES ('polymarket', ?, 1000, 0, 1, 'gamma', 1000)
+                """,
+                (cid,),
+            )
+        rows = [
+            (
+                "polymarket",
+                "0x" + "1" * 64,
+                "asset",
+                wallet,
+                cid_esports,
+                "YES",
+                "BUY",
+                0.5,
+                100.0,
+                50.0,
+                100,
+            ),
+            (
+                "polymarket",
+                "0x" + "2" * 64,
+                "asset",
+                wallet,
+                cid_sports,
+                "YES",
+                "BUY",
+                0.5,
+                100.0,
+                50.0,
+                100,
+            ),
+            (
+                "polymarket",
+                "0x" + "3" * 64,
+                "asset",
+                wallet,
+                cid_esports,
+                "YES",
+                "BUY",
+                0.5,
+                100.0,
+                50.0,
+                500,
+            ),
+        ]
+        conn.executemany(
+            """
+            INSERT INTO corpus_trades
+                (platform, tx_hash, asset_id, wallet_address, condition_id,
+                 outcome_side, bs, price, size, notional_usd, ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    build_features_duckdb(
+        db_path=db_path,
+        platform="polymarket",
+        now_ts=1000,
+        memory_limit="256MB",
+        temp_dir=tmp_path,
+        threads=1,
+    )
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        third = conn.execute(
+            "SELECT top_category, category_diversity FROM training_examples WHERE trade_ts = 500"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert third["top_category"] == "esports"
+    assert third["category_diversity"] == 2
+
+
 def test_heartbeat_emits_during_long_operation() -> None:
     """Heartbeat thread fires at least once and stops cleanly on signal."""
     import threading  # noqa: PLC0415

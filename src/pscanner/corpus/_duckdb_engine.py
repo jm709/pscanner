@@ -17,7 +17,7 @@ from typing import Final
 import duckdb
 import structlog
 
-from pscanner.corpus.db import training_examples_ddl
+from pscanner.corpus.db import TRAINING_EXAMPLES_COLUMNS, training_examples_ddl
 
 _log = structlog.get_logger(__name__)
 
@@ -535,8 +535,7 @@ def _stage4_wallet_cat(scratch: duckdb.DuckDBPyConnection) -> None:
         for cat in _KNOWN_CATEGORIES
     )
     diversity_terms = " + ".join(
-        f"CASE WHEN cat_count_{cat} > 0 THEN 1 ELSE 0 END"
-        for cat in _KNOWN_CATEGORIES
+        f"CASE WHEN cat_count_{cat} > 0 THEN 1 ELSE 0 END" for cat in _KNOWN_CATEGORIES
     )
 
     _ts_sentinel = "9223372036854775807"  # INT64 max — NULL ranks last
@@ -596,6 +595,175 @@ def _stage4_wallet_cat(scratch: duckdb.DuckDBPyConnection) -> None:
             ({diversity_terms}) AS category_diversity
         FROM per_event_counts
         """  # noqa: S608 — column names from _KNOWN_CATEGORIES module-level literal
+    )
+
+
+def _final_join_to_v2(scratch: duckdb.DuckDBPyConnection, *, platform: str, now_ts: int) -> None:
+    """Join the four stage outputs and INSERT into corpus.training_examples_v2.
+
+    All staged inputs live in the scratch DuckDB. ``resolutions`` is the
+    TEMP table from _materialize_trades; ``corpus`` is the attached
+    SQLite database the v2 table lives in.
+
+    ``platform`` and ``now_ts`` are passed via DuckDB ? bindings, NOT
+    f-string interpolation, preserving Task 3's parameterization defense.
+    The only f-string interpolation in this SQL is _V2_TABLE (table name)
+    and col_list (derived from canonical TRAINING_EXAMPLES_COLUMNS).
+    """
+    col_list = ", ".join(TRAINING_EXAMPLES_COLUMNS)
+    scratch.execute(
+        f"""
+        INSERT INTO corpus.{_V2_TABLE} ({col_list})
+        SELECT
+            ? AS platform,
+            wa.tx_hash,
+            wa.asset_id,
+            wa.wallet_address,
+            wa.condition_id,
+            wa.event_ts AS trade_ts,
+            ? AS built_at,
+            wa.prior_trades_count_w AS prior_trades_count,
+            wa.prior_buys_count_w AS prior_buys_count,
+            wa.prior_resolved_buys_w AS prior_resolved_buys,
+            wa.prior_wins_w AS prior_wins,
+            wa.prior_losses_w AS prior_losses,
+            CASE WHEN wa.prior_resolved_buys_w > 0
+                 THEN CAST(wa.prior_wins_w AS DOUBLE) / wa.prior_resolved_buys_w
+                 ELSE NULL END AS win_rate,
+            CASE WHEN wa.bet_size_count_w > 0
+                 THEN wa.cum_buy_price_sum_w / wa.bet_size_count_w
+                 ELSE NULL END AS avg_implied_prob_paid,
+            CASE WHEN wa.prior_resolved_buys_w > 0 AND wa.bet_size_count_w > 0
+                 THEN (CAST(wa.prior_wins_w AS DOUBLE) / wa.prior_resolved_buys_w)
+                      - (wa.cum_buy_price_sum_w / wa.bet_size_count_w)
+                 ELSE NULL END AS realized_edge_pp,
+            wa.prior_realized_pnl_usd_w AS prior_realized_pnl_usd,
+            CASE WHEN wa.bet_size_count_w > 0
+                 THEN wa.bet_size_sum_w / wa.bet_size_count_w
+                 ELSE NULL END AS avg_bet_size_usd,
+            CAST(NULL AS DOUBLE) AS median_bet_size_usd,
+            GREATEST(0.0, (wa.event_ts - wa.first_seen_ts) / 86400.0) AS wallet_age_days,
+            CASE WHEN wa.last_trade_ts_w IS NOT NULL
+                 THEN wa.event_ts - wa.last_trade_ts_w
+                 ELSE NULL END AS seconds_since_last_trade,
+            wa.prior_trades_30d_w AS prior_trades_30d,
+            wcs.top_category AS top_category,
+            COALESCE(wcs.category_diversity, 0) AS category_diversity,
+            wa.notional_usd AS bet_size_usd,
+            CASE WHEN wa.bet_size_count_w > 0 AND wa.bet_size_sum_w > 0
+                 THEN wa.notional_usd / (wa.bet_size_sum_w / wa.bet_size_count_w)
+                 ELSE NULL END AS bet_size_rel_to_avg,
+            CASE WHEN wa.prior_resolved_buys_w > 0 AND wa.bet_size_count_w > 0
+                 THEN ((CAST(wa.prior_wins_w AS DOUBLE) / wa.prior_resolved_buys_w)
+                       - (wa.cum_buy_price_sum_w / wa.bet_size_count_w))
+                      * LEAST(1.0, CAST(wa.prior_resolved_buys_w AS DOUBLE) / 20.0)
+                 ELSE 0.0 END AS edge_confidence_weighted,
+            CASE WHEN wa.prior_resolved_buys_w > 0
+                 THEN ((CAST(wa.prior_wins_w AS DOUBLE) / wa.prior_resolved_buys_w) - 0.5)
+                      * LEAST(1.0, CAST(wa.prior_resolved_buys_w AS DOUBLE) / 20.0)
+                 ELSE 0.0 END AS win_rate_confidence_weighted,
+            CASE WHEN wa.prior_resolved_buys_w >= 20
+                      AND (CAST(wa.prior_wins_w AS DOUBLE)
+                           / NULLIF(wa.prior_resolved_buys_w, 0)) > 0.55
+                 THEN 1 ELSE 0 END AS is_high_quality_wallet,
+            CAST(1.0 AS DOUBLE) AS bet_size_relative_to_history,
+            wa.outcome_side AS side,
+            wa.price AS implied_prob_at_buy,
+            wa.category AS market_category,
+            COALESCE(ma.market_volume_so_far_w, 0.0) AS market_volume_so_far_usd,
+            CAST(COALESCE(ma.market_unique_traders_so_far_w, 0) AS INTEGER)
+                AS market_unique_traders_so_far,
+            -- market_first_prior_ts_w lives on stage 3 (market_aggs). When NULL
+            -- (first observed trade on the market), python engine returns 0
+            -- because empty_market_state seeds market_age_start_ts=trade.ts ->
+            -- trade.ts - trade.ts = 0. This is a silent semantic fix vs the
+            -- baseline which returned wa.event_ts - 0 = wa.event_ts on first
+            -- sighting. The commit message calls this out.
+            CAST(
+                wa.event_ts - COALESCE(ma.market_first_prior_ts_w, wa.event_ts)
+                AS INTEGER
+            ) AS market_age_seconds,
+            CAST(wa.closed_at - wa.event_ts AS INTEGER) AS time_to_resolution_seconds,
+            ma.last_trade_price_w AS last_trade_price,
+            CASE WHEN ma.price_count_20 >= 2 THEN ma.price_volatility_w ELSE NULL END
+                AS price_volatility_recent,
+            CAST(CASE
+                WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
+                THEN list_contains(
+                    CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]), 'sports'
+                )
+                ELSE wa.category = 'sports'
+            END AS INTEGER) AS cat_sports,
+            CAST(CASE
+                WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
+                THEN list_contains(
+                    CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]), 'esports'
+                )
+                ELSE wa.category = 'esports'
+            END AS INTEGER) AS cat_esports,
+            CAST(CASE
+                WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
+                THEN list_contains(
+                    CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]), 'thesis'
+                )
+                ELSE wa.category = 'thesis'
+            END AS INTEGER) AS cat_thesis,
+            CAST(CASE
+                WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
+                THEN list_contains(
+                    CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]), 'macro'
+                )
+                ELSE wa.category = 'macro'
+            END AS INTEGER) AS cat_macro,
+            CAST(CASE
+                WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
+                THEN list_contains(
+                    CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]), 'elections'
+                )
+                ELSE wa.category = 'elections'
+            END AS INTEGER) AS cat_elections,
+            CAST(CASE
+                WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
+                THEN list_contains(
+                    CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]), 'crypto'
+                )
+                ELSE wa.category = 'crypto'
+            END AS INTEGER) AS cat_crypto,
+            CAST(CASE
+                WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
+                THEN list_contains(
+                    CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]), 'geopolitics'
+                )
+                ELSE wa.category = 'geopolitics'
+            END AS INTEGER) AS cat_geopolitics,
+            CAST(CASE
+                WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
+                THEN list_contains(
+                    CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]), 'tech'
+                )
+                ELSE wa.category = 'tech'
+            END AS INTEGER) AS cat_tech,
+            CAST(CASE
+                WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
+                THEN list_contains(
+                    CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]), 'culture'
+                )
+                ELSE wa.category = 'culture'
+            END AS INTEGER) AS cat_culture,
+            CASE
+                WHEN (r.outcome_yes_won = 1 AND wa.outcome_side = 'YES')
+                  OR (r.outcome_yes_won = 0 AND wa.outcome_side = 'NO')
+                THEN 1 ELSE 0
+            END AS label_won
+        FROM wallet_aggs wa
+        JOIN resolutions r USING (condition_id)
+        LEFT JOIN wallet_cat_summary wcs
+            USING (wallet_address, event_ts, kind_priority, tx_hash, asset_id)
+        LEFT JOIN market_aggs ma
+            USING (condition_id, event_ts, kind_priority, tx_hash, asset_id)
+        WHERE wa.is_buy_only = 1
+        """,  # noqa: S608 — _V2_TABLE is a module-level literal; platform/now_ts bound below
+        [platform, now_ts],
     )
 
 
