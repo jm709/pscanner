@@ -8,6 +8,8 @@ replacement in the rewrite:
   - ~1,000 markets across all 9 categories
   - resolved-binary-only (so every BUY gets a label)
   - chronological timestamps spanning ~6 months
+  - trade notionals are bounded below at $10 (matching production's
+    CorpusTradesRepo.insert_batch floor)
 """
 
 from __future__ import annotations
@@ -149,7 +151,7 @@ def _insert_trades(
     price_span = 0.95
     price_floor = 0.025
     size_span = 100.0
-    size_floor = 10.0
+    size_floor = 400.0
     for wallet, n_trades in zip(wallets, activities, strict=True):
         for _ in range(n_trades):
             m = rng.choice(markets)
