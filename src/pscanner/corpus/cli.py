@@ -19,7 +19,7 @@ import psutil
 import structlog
 
 from pscanner.corpus._build_features_sentinel import check_and_set_sentinel, clear_sentinel
-from pscanner.corpus._duckdb_engine import build_features_duckdb
+from pscanner.corpus._duckdb_engine import _scratch_path, _wipe_scratch, build_features_duckdb
 from pscanner.corpus.db import apply_read_pragmas, init_corpus_db
 from pscanner.corpus.enumerator import enumerate_closed_markets
 from pscanner.corpus.examples import build_features
@@ -144,6 +144,14 @@ def build_corpus_parser() -> argparse.ArgumentParser:
         help=(
             "Override the build_features_in_progress sentinel if a prior "
             "run crashed without clearing it."
+        ),
+    )
+    bf.add_argument(
+        "--reset-scratch",
+        action="store_true",
+        help=(
+            "Wipe leftover DuckDB scratch file from a prior crashed run. "
+            "Implies --force on the sentinel. Only relevant with --engine duckdb."
         ),
     )
     bf.add_argument(
@@ -598,12 +606,15 @@ async def _cmd_build_features(args: argparse.Namespace) -> int:
 
     # Sentinel guard runs for BOTH engines: a crashed Python build also
     # needs --force on retry, since training_examples may be half-truncated.
+    # --reset-scratch implies --force on the sentinel so operators only
+    # need one flag for crashed-build recovery.
+    force = bool(getattr(args, "force", False) or getattr(args, "reset_scratch", False))
     sentinel_conn = init_corpus_db(db_path)
     try:
         check_and_set_sentinel(
             CorpusStateRepo(sentinel_conn),
             now_ts=now_ts,
-            force=bool(getattr(args, "force", False)),
+            force=force,
         )
     finally:
         sentinel_conn.close()
@@ -659,6 +670,9 @@ def _run_duckdb_engine(*, args: argparse.Namespace, db_path: Path, now_ts: int) 
     memory_limit = getattr(args, "duckdb_memory", None) or _default_duckdb_memory()
     threads = getattr(args, "duckdb_threads", None) or min(os.cpu_count() or 4, 8)
     temp_dir = db_path.parent / "duckdb_spill"
+
+    if getattr(args, "reset_scratch", False):
+        _wipe_scratch(_scratch_path(temp_dir))
 
     return build_features_duckdb(
         db_path=db_path,

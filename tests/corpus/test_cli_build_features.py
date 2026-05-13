@@ -9,9 +9,19 @@ from pathlib import Path
 import pytest
 
 from pscanner.corpus._build_features_sentinel import SENTINEL_KEY, SentinelAlreadySetError
-from pscanner.corpus.cli import _cmd_build_features, build_corpus_parser
+from pscanner.corpus.cli import _cmd_build_features, build_corpus_parser, run_corpus_command
+from pscanner.corpus.db import init_corpus_db
 from pscanner.corpus.repos import CorpusStateRepo
 from tests.corpus._duckdb_fixture import build_fixture_db
+
+
+def _set_sentinel(db_path: Path, ts: int = 1_700_000_000) -> None:
+    """Mirror what check_and_set_sentinel does on first run."""
+    conn = init_corpus_db(db_path)
+    try:
+        CorpusStateRepo(conn).set(SENTINEL_KEY, str(ts), updated_at=ts)
+    finally:
+        conn.close()
 
 
 def test_build_features_parser_accepts_engine_flag() -> None:
@@ -53,3 +63,54 @@ async def test_build_features_refuses_with_existing_sentinel(tmp_path: Path) -> 
     )
     with pytest.raises(SentinelAlreadySetError):
         await _cmd_build_features(args)
+
+
+@pytest.mark.asyncio
+async def test_build_features_refuses_with_stale_sentinel_and_no_force(tmp_path: Path) -> None:
+    """When build_features_in_progress is set, the CLI refuses with
+    SentinelAlreadySetError unless --force or --reset-scratch is passed."""
+    db_path = tmp_path / "corpus.sqlite3"
+    init_corpus_db(db_path).close()
+    _set_sentinel(db_path)
+
+    with pytest.raises(SentinelAlreadySetError):
+        await run_corpus_command(["build-features", "--db", str(db_path), "--engine", "duckdb"])
+
+
+@pytest.mark.asyncio
+async def test_build_features_reset_scratch_overrides_sentinel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--reset-scratch implies --force on the sentinel AND wipes the
+    scratch DuckDB file from a prior crashed run."""
+    db_path = tmp_path / "corpus.sqlite3"
+    init_corpus_db(db_path).close()
+    _set_sentinel(db_path)
+
+    # Drop a stale scratch file to verify it gets wiped.
+    spill_dir = db_path.parent / "duckdb_spill"
+    spill_dir.mkdir()
+    stale = spill_dir / "build_scratch.duckdb"
+    stale.write_bytes(b"stale")
+    assert stale.exists()
+
+    # Short-circuit the actual build so the test stays fast — we only
+    # care that the sentinel + scratch wipe ran. Replace the engine
+    # function with a stub that returns 0.
+    monkeypatch.setattr(
+        "pscanner.corpus.cli.build_features_duckdb",
+        lambda **_: 0,
+    )
+
+    rc = await run_corpus_command(
+        [
+            "build-features",
+            "--db",
+            str(db_path),
+            "--engine",
+            "duckdb",
+            "--reset-scratch",
+        ]
+    )
+    assert rc == 0
+    assert not stale.exists()
