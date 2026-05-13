@@ -219,6 +219,54 @@ def test_stage1_events_row_count_and_columns(tmp_path: Path) -> None:
         scratch.close()
 
 
+def test_stage2_wallet_aggs_strictly_prior(tmp_path: Path) -> None:
+    """Per-wallet running aggregates exclude the current event (UNBOUNDED
+    PRECEDING ... 1 PRECEDING) — verify by hand on a 2-trade wallet."""
+    from pscanner.corpus._duckdb_engine import (  # noqa: PLC0415
+        _attach_corpus,
+        _materialize_trades,
+        _open_scratch,
+        _scratch_path,
+        _stage1_events,
+        _stage2_wallet_aggs,
+    )
+    from tests.corpus._duckdb_fixture import build_fixture_db  # noqa: PLC0415
+
+    db_path = tmp_path / "corpus.sqlite3"
+    build_fixture_db(db_path)
+
+    scratch = _open_scratch(_scratch_path(tmp_path), memory_limit="256MB", threads=1)
+    try:
+        scratch.execute("INSTALL sqlite")
+        scratch.execute("LOAD sqlite")
+        _attach_corpus(scratch, db_path=db_path)
+        _materialize_trades(scratch, platform="polymarket")
+        _stage1_events(scratch)
+        _stage2_wallet_aggs(scratch)
+
+        # First event for any wallet must have prior_trades_count_w = 0
+        first_event = scratch.execute(
+            """
+            SELECT prior_trades_count_w
+            FROM (
+                SELECT
+                    prior_trades_count_w,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY wallet_address
+                        ORDER BY event_ts, kind_priority, tx_hash, asset_id
+                    ) AS rn
+                FROM wallet_aggs
+            )
+            WHERE rn = 1
+            LIMIT 1
+            """
+        ).fetchone()
+        assert first_event is not None
+        assert first_event[0] == 0
+    finally:
+        scratch.close()
+
+
 def test_heartbeat_emits_during_long_operation() -> None:
     """Heartbeat thread fires at least once and stops cleanly on signal."""
     import threading  # noqa: PLC0415

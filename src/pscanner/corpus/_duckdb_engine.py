@@ -167,9 +167,7 @@ def _scratch_path(temp_dir: Path) -> Path:
     return temp_dir / _SCRATCH_FILENAME
 
 
-def _open_scratch(
-    path: Path, *, memory_limit: str, threads: int
-) -> duckdb.DuckDBPyConnection:
+def _open_scratch(path: Path, *, memory_limit: str, threads: int) -> duckdb.DuckDBPyConnection:
     """Open (or create) a persistent scratch DuckDB file with the given budget."""
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = duckdb.connect(str(path))
@@ -311,6 +309,89 @@ def _stage1_events(scratch: duckdb.DuckDBPyConnection) -> None:
         SELECT * FROM buy_events
         UNION ALL
         SELECT * FROM resolution_events
+        """
+    )
+
+
+def _stage2_wallet_aggs(scratch: duckdb.DuckDBPyConnection) -> None:
+    """Per-wallet running aggregates over the events table.
+
+    Output table ``wallet_aggs`` has one row per event with windowed
+    cumulative columns strictly preceding the event (the python engine's
+    ``wallet_state(W, as_of_ts=T)`` semantics).
+
+    Two non-obvious invariants:
+      * ``last_trade_ts_w`` uses MAX-CASE not LAG — resolution events do
+        not update python's ``wallet.last_trade_ts``.
+      * ``prior_trades_30d_w`` is computed as ``total_prior - over_30d_prior``
+        because DuckDB RANGE windows cannot multi-sort (so a direct
+        RANGE-based 30d window loses same-ts tiebreak).
+    """
+    scratch.execute(
+        """
+        CREATE OR REPLACE TABLE wallet_aggs AS
+        WITH wallet_first_seen AS (
+            SELECT wallet_address, MIN(event_ts) AS first_seen_ts
+            FROM events
+            WHERE is_trade = 1
+            GROUP BY wallet_address
+        )
+        SELECT
+            e.wallet_address,
+            e.event_ts,
+            e.kind_priority,
+            e.tx_hash,
+            e.asset_id,
+            e.condition_id,
+            e.bs,
+            e.outcome_side,
+            e.price,
+            e.size,
+            e.notional_usd,
+            e.category,
+            e.categories_json,
+            e.closed_at,
+            e.is_buy_only,
+            e.is_trade,
+            wfs.first_seen_ts,
+            COALESCE(SUM(e.is_trade) OVER w_strict, 0) AS prior_trades_count_w,
+            COALESCE(SUM(e.is_buy_only) OVER w_strict, 0) AS prior_buys_count_w,
+            COALESCE(SUM(e.is_resolution) OVER w_strict, 0) AS prior_resolved_buys_w,
+            COALESCE(SUM(e.res_won_for_this_buy) OVER w_strict, 0) AS prior_wins_w,
+            COALESCE(
+                SUM(e.is_resolution) OVER w_strict
+                - SUM(e.res_won_for_this_buy) OVER w_strict,
+                0
+            ) AS prior_losses_w,
+            COALESCE(SUM(e.payout_pnl_increment) OVER w_strict, 0.0)
+                AS prior_realized_pnl_usd_w,
+            SUM(e.buy_price) OVER w_strict AS cum_buy_price_sum_w,
+            SUM(e.buy_notional) OVER w_strict AS bet_size_sum_w,
+            SUM(e.is_buy_only) OVER w_strict AS bet_size_count_w,
+            MAX(CASE WHEN e.is_trade = 1 THEN e.event_ts END) OVER w_strict
+                AS last_trade_ts_w,
+            -- prior_trades_30d via total_prior - over_30d_prior. RANGE
+            -- windows can't multi-sort, so we count is_trade=1 rows in
+            -- (-inf, ts - 2592001] and subtract from the total preceding
+            -- ROWS-based count. Cutoff: 2592001 PRECEDING covers anything
+            -- with event_ts <= current_ts - 2592001 (i.e. > 30 days old).
+            COALESCE(SUM(e.is_trade) OVER w_strict, 0)
+                - COALESCE(
+                    COUNT(*) FILTER (WHERE e.is_trade = 1) OVER w_pre_30d, 0
+                ) AS prior_trades_30d_w
+        FROM events e
+        JOIN wallet_first_seen wfs USING (wallet_address)
+        WINDOW
+            w_strict AS (
+                PARTITION BY e.wallet_address
+                ORDER BY e.event_ts, e.kind_priority, e.tx_hash, e.asset_id
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+            ),
+            w_pre_30d AS (
+                PARTITION BY e.wallet_address
+                ORDER BY e.event_ts
+                RANGE BETWEEN UNBOUNDED PRECEDING AND 2592001 PRECEDING
+            )
         """
     )
 
