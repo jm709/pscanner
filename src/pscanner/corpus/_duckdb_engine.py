@@ -217,12 +217,21 @@ def _run_stage(
 
 
 def _count_table_safe(duck: duckdb.DuckDBPyConnection, table: str | None) -> int:
-    """Row count for ``table``; 0 if the table doesn't exist yet."""
+    """Row count for ``table`` via a fresh cursor; 0 if missing or on error.
+
+    Uses ``duck.cursor()`` so the heartbeat thread doesn't share the
+    main thread's cursor on the same connection (DuckDB Python is
+    threadsafety=1; cursors are independent).
+    """
     if table is None:
         return 0
     try:
-        row = duck.execute(f"SELECT COUNT(*) FROM {table}").fetchone()  # noqa: S608
-        return int(row[0]) if row else 0
+        cur = duck.cursor()
+        try:
+            row = cur.execute(f"SELECT COUNT(*) FROM {table}").fetchone()  # noqa: S608
+            return int(row[0]) if row else 0
+        finally:
+            cur.close()
     except duckdb.Error:
         return 0
 
