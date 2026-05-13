@@ -26,6 +26,24 @@ _V2_INDEX_PREFIX: Final[str] = "idx_te_v2_"
 _PLATFORMS: Final[frozenset[str]] = frozenset({"polymarket", "kalshi", "manifold"})
 _SCRATCH_FILENAME: Final[str] = "build_scratch.duckdb"
 
+# Categories that may appear in events.category. Drawn from
+# pscanner.categories.Category enum plus the "unknown" sentinel used
+# for markets without a recognized tag. The forward-compat guard
+# (_assert_no_unknown_categories) refuses to run if events.category
+# contains anything outside this set.
+_KNOWN_CATEGORIES: Final[tuple[str, ...]] = (
+    "sports",
+    "esports",
+    "thesis",
+    "macro",
+    "elections",
+    "crypto",
+    "geopolitics",
+    "tech",
+    "culture",
+    "unknown",
+)
+
 
 def _validate_platform(platform: str) -> None:
     """Raise ValueError if ``platform`` is not in the allowlist.
@@ -451,6 +469,133 @@ def _stage3_market_aggs(scratch: duckdb.DuckDBPyConnection) -> None:
                 ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING
             )
         """
+    )
+
+
+def _assert_no_unknown_categories(scratch: duckdb.DuckDBPyConnection) -> None:
+    """Refuse to proceed if events.category contains a value outside _KNOWN_CATEGORIES.
+
+    Forward-compat guard: the rewrite hardcodes the category universe in
+    the CASE chain. If a new category appears in the corpus (e.g.
+    pscanner.categories adds Category.WEATHER) and is missing here, the
+    rewrite would silently drop affected wallets' top_category. The
+    baseline ``DENSE_RANK OVER (cat_first_ts ASC, cat_first_tx ASC)``
+    handled new categories implicitly; we trade that for explicit fail-fast.
+    """
+    placeholders = ", ".join(f"'{c}'" for c in _KNOWN_CATEGORIES)
+    rows = scratch.execute(
+        f"""
+        SELECT DISTINCT category
+        FROM events
+        WHERE is_buy_only = 1 AND is_trade = 1
+          AND category IS NOT NULL
+          AND category NOT IN ({placeholders})
+        LIMIT 5
+        """  # noqa: S608 — _KNOWN_CATEGORIES is a module-level literal tuple
+    ).fetchall()
+    if rows:
+        unknown = sorted(r[0] for r in rows)
+        raise RuntimeError(
+            f"events table contains unknown categories not in _KNOWN_CATEGORIES: "
+            f"{unknown}. Update _KNOWN_CATEGORIES in _duckdb_engine.py to match "
+            f"the current pscanner.categories.Category enum, then re-run."
+        )
+
+
+def _stage4_wallet_cat(scratch: duckdb.DuckDBPyConnection) -> None:
+    """Per-wallet per-category running counts via FILTER windows.
+
+    Replaces the O(k²) wallet_cat_prior_counts OR-chain self-join with
+    a window-only pattern over the known 10-category universe.
+    DuckDB plans this as one sort + (3 windows x N categories) cheap counters.
+
+    Tiebreak for top_category (matching baseline):
+      1. cat_count_X DESC (highest count wins)
+      2. cat_first_ts_X ASC (earliest first-trade ts wins)
+      3. cat_first_tx_X ASC (lex-min tx_hash within same ts)
+    The CASE chain below encodes ``cat_X wins iff for every other cat_Y:
+    (count_X > count_Y) OR (tie by count AND (first_ts_X < first_ts_Y
+    OR (tie by ts AND first_tx_X <= first_tx_Y)))``.
+    """
+    _assert_no_unknown_categories(scratch)
+
+    count_cols = ",\n            ".join(
+        f"COALESCE(SUM(CASE WHEN e.is_buy_only = 1 AND e.category = '{cat}' "
+        f"THEN 1 ELSE 0 END) OVER w_strict, 0) AS cat_count_{cat}"
+        for cat in _KNOWN_CATEGORIES
+    )
+    first_ts_cols = ",\n            ".join(
+        f"MIN(CASE WHEN e.is_buy_only = 1 AND e.category = '{cat}' "
+        f"THEN e.event_ts END) OVER w_strict AS cat_first_ts_{cat}"
+        for cat in _KNOWN_CATEGORIES
+    )
+    first_tx_cols = ",\n            ".join(
+        f"MIN(CASE WHEN e.is_buy_only = 1 AND e.category = '{cat}' "
+        f"THEN e.tx_hash END) OVER w_strict AS cat_first_tx_{cat}"
+        for cat in _KNOWN_CATEGORIES
+    )
+    diversity_terms = " + ".join(
+        f"CASE WHEN cat_count_{cat} > 0 THEN 1 ELSE 0 END"
+        for cat in _KNOWN_CATEGORIES
+    )
+
+    _ts_sentinel = "9223372036854775807"  # INT64 max — NULL ranks last
+    _tx_sentinel = "'~'"  # ASCII > any hex-digit, so NULL ranks last
+    top_cat_branches: list[str] = []
+    for cat in _KNOWN_CATEGORIES:
+        conds: list[str] = [f"cat_count_{cat} > 0"]
+        for other in _KNOWN_CATEGORIES:
+            if other == cat:
+                continue
+            # cat wins over other when:
+            #   count_cat > count_other
+            #   OR (count_cat = count_other AND first_ts_cat < first_ts_other)
+            #   OR (count_cat = count_other AND first_ts_cat = first_ts_other
+            #       AND first_tx_cat <= first_tx_other)
+            conds.append(
+                f"(cat_count_{cat} > cat_count_{other} "
+                f"OR (cat_count_{cat} = cat_count_{other} AND "
+                f"COALESCE(cat_first_ts_{cat}, {_ts_sentinel}) < "
+                f"COALESCE(cat_first_ts_{other}, {_ts_sentinel})) "
+                f"OR (cat_count_{cat} = cat_count_{other} AND "
+                f"COALESCE(cat_first_ts_{cat}, {_ts_sentinel}) = "
+                f"COALESCE(cat_first_ts_{other}, {_ts_sentinel}) AND "
+                f"COALESCE(cat_first_tx_{cat}, {_tx_sentinel}) <= "
+                f"COALESCE(cat_first_tx_{other}, {_tx_sentinel})))"
+            )
+        top_cat_branches.append(f"WHEN {' AND '.join(conds)} THEN '{cat}'")
+    top_cat_expr = "CASE " + " ".join(top_cat_branches) + " ELSE NULL END"
+
+    scratch.execute(
+        f"""
+        CREATE OR REPLACE TABLE wallet_cat_summary AS
+        WITH per_event_counts AS (
+            SELECT
+                e.wallet_address,
+                e.event_ts,
+                e.kind_priority,
+                e.tx_hash,
+                e.asset_id,
+                {count_cols},
+                {first_ts_cols},
+                {first_tx_cols}
+            FROM events e
+            WINDOW w_strict AS (
+                PARTITION BY e.wallet_address
+                ORDER BY e.event_ts, e.kind_priority, e.tx_hash, e.asset_id
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+            )
+        )
+        SELECT
+            wallet_address,
+            event_ts,
+            kind_priority,
+            tx_hash,
+            asset_id,
+            {top_cat_expr} AS top_category,
+            ({diversity_terms}) AS category_diversity
+        FROM per_event_counts
+        """  # noqa: S608 — column names from _KNOWN_CATEGORIES module-level literal
     )
 
 

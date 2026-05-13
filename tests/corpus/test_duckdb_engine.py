@@ -306,6 +306,43 @@ def test_stage3_market_aggs_unique_traders_monotone(tmp_path: Path) -> None:
         scratch.close()
 
 
+def test_stage4_wallet_cat_summary_uses_filter_not_or_chain(tmp_path: Path) -> None:
+    """Stage 4 produces wallet_cat_summary with top_category + category_diversity."""
+    from pscanner.corpus._duckdb_engine import (  # noqa: PLC0415
+        _attach_corpus,
+        _materialize_trades,
+        _open_scratch,
+        _scratch_path,
+        _stage1_events,
+        _stage4_wallet_cat,
+    )
+    from tests.corpus._duckdb_fixture import build_fixture_db  # noqa: PLC0415
+
+    db_path = tmp_path / "corpus.sqlite3"
+    build_fixture_db(db_path)
+
+    scratch = _open_scratch(_scratch_path(tmp_path), memory_limit="256MB", threads=1)
+    try:
+        scratch.execute("INSTALL sqlite")
+        scratch.execute("LOAD sqlite")
+        _attach_corpus(scratch, db_path=db_path)
+        _materialize_trades(scratch, platform="polymarket")
+        _stage1_events(scratch)
+        _stage4_wallet_cat(scratch)
+
+        cols = [
+            r[0]
+            for r in scratch.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'wallet_cat_summary'"
+            ).fetchall()
+        ]
+        assert "top_category" in cols
+        assert "category_diversity" in cols
+    finally:
+        scratch.close()
+
+
 def test_heartbeat_emits_during_long_operation() -> None:
     """Heartbeat thread fires at least once and stops cleanly on signal."""
     import threading  # noqa: PLC0415

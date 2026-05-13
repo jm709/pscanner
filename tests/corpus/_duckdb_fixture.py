@@ -42,7 +42,7 @@ def build_fixture_db(path: Path) -> None:
 
 
 def _insert_markets(conn: sqlite3.Connection) -> None:
-    """Four markets: 3 resolved (sports/esports/politics), 1 unresolved.
+    """Four markets: 3 resolved (sports/esports/geopolitics), 1 unresolved.
 
     ``categories_json`` is populated for MKT_A (multi-label: sports + thesis)
     and MKT_B (single-label: esports) to exercise both paths through the
@@ -94,7 +94,7 @@ def _insert_markets(conn: sqlite3.Connection) -> None:
             "polymarket",
             "MKT_C",
             "ev-c",
-            "politics",
+            "geopolitics",
             "[]",
             2_001_000,
             3000.0,
