@@ -84,15 +84,6 @@ def _heartbeat_loop(
         )
 
 
-def _count_v2_safe(duck: duckdb.DuckDBPyConnection) -> int:
-    """Heartbeat-safe row count. Returns 0 if v2 doesn't exist yet."""
-    try:
-        row = duck.execute(f"SELECT COUNT(*) FROM corpus.{_V2_TABLE}").fetchone()  # noqa: S608
-        return int(row[0]) if row else 0
-    except duckdb.Error:
-        return 0
-
-
 def build_features_duckdb(
     *,
     db_path: Path,
@@ -102,64 +93,138 @@ def build_features_duckdb(
     temp_dir: Path,
     threads: int,
 ) -> int:
-    """Rebuild ``training_examples`` for ``platform`` via DuckDB.
+    """Rebuild ``training_examples`` for ``platform`` via the 4-stage DuckDB pipeline.
 
     Args:
         db_path: Path to ``corpus.sqlite3``.
-        platform: Single platform to rebuild (``polymarket``/``manifold``/etc).
+        platform: Single platform to rebuild. Validated against the
+            allowlist; ValueError on unknown.
         now_ts: Value written to every row's ``built_at`` column.
         memory_limit: DuckDB ``memory_limit`` PRAGMA value (e.g. ``"6GB"``).
-        temp_dir: Spill directory for partitions that don't fit in memory.
+        temp_dir: Directory for the scratch DuckDB file and spill.
         threads: ``threads`` PRAGMA value.
 
     Returns:
-        Number of rows in the new ``training_examples`` table.
+        Row count of training_examples_v2 after the build, before swap.
     """
     _validate_platform(platform)
-    temp_dir.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
-
-    # Pre-create v2 via stdlib sqlite3 BEFORE DuckDB opens the file.
-    # DuckDB's attached-SQLite CREATE TABLE rewrites types and strips
-    # DEFAULT / CHECK clauses, so we must own schema creation here.
     _create_v2_via_sqlite3(db_path=db_path)
+    scratch_path = _scratch_path(temp_dir)
+    _wipe_scratch(scratch_path)
 
-    duck = duckdb.connect(":memory:")
+    scratch = _open_scratch(scratch_path, memory_limit=memory_limit, threads=threads)
     try:
-        _configure_duckdb(duck, memory_limit=memory_limit, temp_dir=temp_dir, threads=threads)
-        _attach_corpus(duck, db_path=db_path)
-        _materialize_trades(duck, platform=platform)
+        scratch.execute("INSTALL sqlite")
+        scratch.execute("LOAD sqlite")
+        _attach_corpus(scratch, db_path=db_path)
 
-        stop = threading.Event()
-        heartbeat = threading.Thread(
-            target=_heartbeat_loop,
-            kwargs={
-                "stop": stop,
-                "poll_fn": lambda: _count_v2_safe(duck),
-                "interval_seconds": 30.0,
-                "stage": "duckdb_build_v2",
-            },
-            daemon=True,
-            name="build_features_heartbeat",
+        _run_stage(
+            scratch,
+            name="materialize_trades",
+            fn=lambda: _materialize_trades(scratch, platform=platform),
         )
-        heartbeat.start()
-        try:
-            _build_training_examples_v2(duck, platform=platform, now_ts=now_ts)
-        finally:
-            stop.set()
-            heartbeat.join(timeout=5.0)
+        _run_stage(
+            scratch,
+            name="stage1_events",
+            fn=lambda: _stage1_events(scratch),
+        )
+        _run_stage(
+            scratch,
+            name="stage2_wallet_aggs",
+            fn=lambda: _stage2_wallet_aggs(scratch),
+        )
+        _run_stage(
+            scratch,
+            name="stage3_market_aggs",
+            fn=lambda: _stage3_market_aggs(scratch),
+        )
+        _run_stage(
+            scratch,
+            name="stage4_wallet_cat",
+            fn=lambda: _stage4_wallet_cat(scratch),
+        )
+        _run_stage(
+            scratch,
+            name="final_join",
+            fn=lambda: _final_join_to_v2(scratch, platform=platform, now_ts=now_ts),
+        )
 
-        n_rows = _count_v2(duck)
-        corpus_path = _detach_corpus(duck)
-        _atomic_swap(corpus_path)
-        _log.info(
-            "corpus.build_features_duckdb_done",
-            rows=n_rows,
-            elapsed_seconds=round(time.monotonic() - started, 1),
-        )
-        return n_rows
+        n_rows = _count_v2(scratch)
+        corpus_path = _detach_corpus(scratch)
     finally:
-        duck.close()
+        scratch.close()
+
+    _atomic_swap(corpus_path)
+    _wipe_scratch(scratch_path)
+
+    _log.info(
+        "corpus.build_features_duckdb_done",
+        rows=n_rows,
+        elapsed_seconds=round(time.monotonic() - started, 1),
+    )
+    return n_rows
+
+
+def _run_stage(
+    scratch: duckdb.DuckDBPyConnection,
+    *,
+    name: str,
+    fn: Callable[[], None],
+) -> None:
+    """Run a single stage with logging + heartbeat thread.
+
+    Heartbeat polls the stage's likely-output table for row counts. If
+    the table doesn't exist yet (early in the stage), poll returns 0.
+    """
+    _log.info("corpus.build_features.stage_start", stage=name)
+    stop = threading.Event()
+    poll_table = {
+        "materialize_trades": "trades",
+        "stage1_events": "events",
+        "stage2_wallet_aggs": "wallet_aggs",
+        "stage3_market_aggs": "market_aggs",
+        "stage4_wallet_cat": "wallet_cat_summary",
+        "final_join": f"corpus.{_V2_TABLE}",
+    }.get(name)
+    heartbeat = threading.Thread(
+        target=_heartbeat_loop,
+        kwargs={
+            "stop": stop,
+            "poll_fn": lambda: _count_table_safe(scratch, poll_table) if poll_table else 0,
+            "interval_seconds": 30.0,
+            "stage": name,
+        },
+        daemon=True,
+        name=f"build_features_heartbeat_{name}",
+    )
+    heartbeat.start()
+    started = time.monotonic()
+    try:
+        fn()
+    except Exception:
+        elapsed = round(time.monotonic() - started, 1)
+        _log.error("corpus.build_features.stage_failed", stage=name, elapsed_seconds=elapsed)
+        raise
+    finally:
+        stop.set()
+        heartbeat.join(timeout=5.0)
+    _log.info(
+        "corpus.build_features.stage_done",
+        stage=name,
+        elapsed_seconds=round(time.monotonic() - started, 1),
+    )
+
+
+def _count_table_safe(duck: duckdb.DuckDBPyConnection, table: str | None) -> int:
+    """Row count for ``table``; 0 if the table doesn't exist yet."""
+    if table is None:
+        return 0
+    try:
+        row = duck.execute(f"SELECT COUNT(*) FROM {table}").fetchone()  # noqa: S608
+        return int(row[0]) if row else 0
+    except duckdb.Error:
+        return 0
 
 
 def _configure_duckdb(
@@ -673,14 +738,15 @@ def _final_join_to_v2(scratch: duckdb.DuckDBPyConnection, *, platform: str, now_
             COALESCE(ma.market_volume_so_far_w, 0.0) AS market_volume_so_far_usd,
             CAST(COALESCE(ma.market_unique_traders_so_far_w, 0) AS INTEGER)
                 AS market_unique_traders_so_far,
-            -- market_first_prior_ts_w lives on stage 3 (market_aggs). When NULL
-            -- (first observed trade on the market), python engine returns 0
-            -- because empty_market_state seeds market_age_start_ts=trade.ts ->
-            -- trade.ts - trade.ts = 0. This is a silent semantic fix vs the
-            -- baseline which returned wa.event_ts - 0 = wa.event_ts on first
-            -- sighting. The commit message calls this out.
+            -- market_first_prior_ts_w now lives on stage 3 (market_aggs).
+            -- When NULL (first observed trade on the market), python's
+            -- compute_features reads market_state(condition_id, as_of_ts)
+            -- BEFORE observe() folds the trade in. The pre-observe state is
+            -- empty_market_state(market_age_start_ts=0) per features.py:643-645,
+            -- so market_age_seconds = trade.ts - 0 = trade.ts on first sighting.
+            -- COALESCE-to-0 (NOT to wa.event_ts) matches python.
             CAST(
-                wa.event_ts - COALESCE(ma.market_first_prior_ts_w, wa.event_ts)
+                wa.event_ts - COALESCE(ma.market_first_prior_ts_w, 0)
                 AS INTEGER
             ) AS market_age_seconds,
             CAST(wa.closed_at - wa.event_ts AS INTEGER) AS time_to_resolution_seconds,
@@ -763,497 +829,6 @@ def _final_join_to_v2(scratch: duckdb.DuckDBPyConnection, *, platform: str, now_
             USING (condition_id, event_ts, kind_priority, tx_hash, asset_id)
         WHERE wa.is_buy_only = 1
         """,  # noqa: S608 — _V2_TABLE is a module-level literal; platform/now_ts bound below
-        [platform, now_ts],
-    )
-
-
-def _build_training_examples_v2(
-    duck: duckdb.DuckDBPyConnection, *, platform: str, now_ts: int
-) -> None:
-    """INSERT into training_examples_v2 via a single CTE chain.
-
-    Stages:
-      1. ``events`` — UNION of BUYs/SELLs + synthetic RESOLUTION events.
-         RESOLUTIONs carry the original BUY's notional/size/side so realized_pnl
-         can sum in the same window as the wins/losses counters. ``kind_priority``
-         is 0 for RESOLUTION and 1 for BUY/SELL so same-ts ties put resolutions
-         first (matching Python heap-drain semantics: ``wallet_state(W, as_of_ts=T)``
-         drains heap entries with ``resolution_ts < T`` BEFORE folding in
-         the current trade).
-      2. ``wallet_acc`` — windowed running aggregates per wallet over events.
-      3. Final SELECT — joins to wallet_first_seen + market_first_seen, computes
-         interaction features (later tasks will fill in category and market
-         aggregates), filters to BUYs whose market has resolved.
-
-    Tasks 8-11 will extend this with: avg_prob/edge formulas (T8), top_category
-    + diversity CTE (T9), market-side aggregates (T10), interaction features (T11).
-    """
-    duck.execute(
-        f"""
-        INSERT INTO corpus.{_V2_TABLE} (
-            platform, tx_hash, asset_id, wallet_address, condition_id,
-            trade_ts, built_at,
-            prior_trades_count, prior_buys_count, prior_resolved_buys,
-            prior_wins, prior_losses, win_rate, avg_implied_prob_paid,
-            realized_edge_pp, prior_realized_pnl_usd,
-            avg_bet_size_usd, median_bet_size_usd, wallet_age_days,
-            seconds_since_last_trade, prior_trades_30d, top_category,
-            category_diversity, bet_size_usd, bet_size_rel_to_avg,
-            edge_confidence_weighted, win_rate_confidence_weighted,
-            is_high_quality_wallet, bet_size_relative_to_history,
-            cat_sports, cat_esports, cat_thesis, cat_macro, cat_elections,
-            cat_crypto, cat_geopolitics, cat_tech, cat_culture,
-            side, implied_prob_at_buy, market_category, market_volume_so_far_usd,
-            market_unique_traders_so_far, market_age_seconds,
-            time_to_resolution_seconds, last_trade_price, price_volatility_recent,
-            label_won
-        )
-        WITH
-        wallet_first_seen AS (
-            SELECT wallet_address, MIN(ts) AS first_seen_ts
-            FROM trades
-            GROUP BY wallet_address
-        ),
-        buy_events AS (
-            SELECT
-                t.wallet_address, t.condition_id, t.ts AS event_ts,
-                t.tx_hash, t.asset_id, t.bs, t.outcome_side,
-                t.price, t.size, t.notional_usd, t.category, t.categories_json,
-                t.closed_at, t.enumerated_at,
-                -- kind_priority=0 for trades (BUY/SELL) so they sort BEFORE
-                -- same-ts resolution events (kind_priority=1).  Python's heap
-                -- drain uses strict-< on resolution_ts, meaning a resolution at
-                -- the same ts as a BUY is NOT in the prior state for that BUY.
-                CAST(0 AS INTEGER) AS kind_priority,
-                CAST(0 AS INTEGER) AS is_resolution,
-                CAST(NULL AS INTEGER) AS res_won_for_this_buy,
-                CAST(0.0 AS DOUBLE) AS payout_pnl_increment,
-                CAST(1 AS INTEGER) AS is_trade,
-                CAST(CASE WHEN t.bs = 'BUY' THEN 1 ELSE 0 END AS INTEGER) AS is_buy_only,
-                CAST(CASE WHEN t.bs = 'BUY' THEN t.price ELSE NULL END AS DOUBLE) AS buy_price,
-                CAST(CASE WHEN t.bs = 'BUY' THEN t.notional_usd ELSE NULL END AS DOUBLE)
-                    AS buy_notional
-            FROM trades t
-        ),
-        resolution_events AS (
-            SELECT
-                t.wallet_address, t.condition_id, r.resolved_at AS event_ts,
-                t.tx_hash, t.asset_id,
-                CAST(NULL AS VARCHAR) AS bs,
-                CAST(NULL AS VARCHAR) AS outcome_side,
-                CAST(NULL AS DOUBLE) AS price,
-                CAST(NULL AS DOUBLE) AS size,
-                CAST(NULL AS DOUBLE) AS notional_usd,
-                CAST(NULL AS VARCHAR) AS category,
-                CAST(NULL AS VARCHAR) AS categories_json,
-                CAST(NULL AS INTEGER) AS closed_at,
-                CAST(NULL AS INTEGER) AS enumerated_at,
-                -- kind_priority=1 for resolutions: sorts AFTER same-ts BUYs.
-                -- Matches Python's heap_drain condition (resolution_ts < as_of_ts),
-                -- where same-ts resolutions are excluded from prior state.
-                CAST(1 AS INTEGER) AS kind_priority,
-                CAST(1 AS INTEGER) AS is_resolution,
-                CAST(
-                    CASE
-                        WHEN (r.outcome_yes_won = 1 AND t.outcome_side = 'YES')
-                          OR (r.outcome_yes_won = 0 AND t.outcome_side = 'NO')
-                        THEN 1 ELSE 0
-                    END AS INTEGER
-                ) AS res_won_for_this_buy,
-                CAST(
-                    CASE
-                        WHEN (r.outcome_yes_won = 1 AND t.outcome_side = 'YES')
-                          OR (r.outcome_yes_won = 0 AND t.outcome_side = 'NO')
-                        THEN t.size - t.notional_usd
-                        ELSE -t.notional_usd
-                    END AS DOUBLE
-                ) AS payout_pnl_increment,
-                CAST(0 AS INTEGER) AS is_trade,
-                CAST(0 AS INTEGER) AS is_buy_only,
-                CAST(NULL AS DOUBLE) AS buy_price,
-                CAST(NULL AS DOUBLE) AS buy_notional
-            FROM trades t
-            JOIN resolutions r USING (condition_id)
-            WHERE t.bs = 'BUY' AND t.ts <= r.resolved_at
-        ),
-        events AS (
-            SELECT * FROM buy_events
-            UNION ALL
-            SELECT * FROM resolution_events
-        ),
-        wallet_acc AS (
-            SELECT
-                e.*,
-                COALESCE(SUM(is_trade) OVER w_strict, 0) AS prior_trades_count_w,
-                COALESCE(SUM(is_buy_only) OVER w_strict, 0) AS prior_buys_count_w,
-                COALESCE(SUM(is_resolution) OVER w_strict, 0) AS prior_resolved_buys_w,
-                COALESCE(SUM(res_won_for_this_buy) OVER w_strict, 0) AS prior_wins_w,
-                COALESCE(
-                    SUM(is_resolution) OVER w_strict
-                    - SUM(res_won_for_this_buy) OVER w_strict, 0
-                ) AS prior_losses_w,
-                COALESCE(SUM(payout_pnl_increment) OVER w_strict, 0.0) AS prior_realized_pnl_w,
-                SUM(buy_price) OVER w_strict AS cumulative_buy_price_sum_w,
-                SUM(buy_notional) OVER w_strict AS bet_size_sum_w,
-                SUM(is_buy_only) OVER w_strict AS bet_size_count_w,
-                MAX(CASE WHEN is_trade = 1 THEN event_ts END) OVER w_strict
-                    AS last_trade_ts_w,
-                -- prior_trades_30d: count trades strictly in the preceding window (w_strict)
-                -- that are within 30 days.  RANGE windows can't tiebreak by tx_hash, so
-                -- we compute total-prior minus older-than-30d-prior instead.
-                -- w_pre_30d counts is_trade=1 rows with event_ts <= current_ts - 2592001,
-                -- i.e. strictly older than 30 days (integer ts: < current_ts - 2592000).
-                COALESCE(SUM(is_trade) OVER w_strict, 0)
-                    - COALESCE(
-                        COUNT(*) FILTER (WHERE is_trade = 1) OVER w_pre_30d, 0
-                    ) AS prior_trades_30d_w,
-                -- Market-age start: minimum trade ts strictly prior to this event on
-                -- the same market.  NULL when this is the first event, in which case
-                -- the Python engine returns empty_market_state(market_age_start_ts=0).
-                MIN(CASE WHEN is_trade = 1 THEN event_ts END) OVER w_market_strict
-                    AS market_first_prior_ts_w
-            FROM events e
-            WINDOW
-                w_strict AS (
-                    PARTITION BY wallet_address
-                    ORDER BY event_ts, kind_priority, tx_hash, asset_id
-                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-                ),
-                -- Counts is_trade=1 rows strictly older than 30 days (event_ts
-                -- <= current_ts - 2592001, i.e. < current_ts - 2592000 for
-                -- integer seconds).  Used to derive prior_trades_30d via
-                -- total_prior - over_30d_prior, preserving the same-ts
-                -- tie-breaking that ROWS-based w_strict provides.
-                w_pre_30d AS (
-                    PARTITION BY wallet_address
-                    ORDER BY event_ts
-                    RANGE BETWEEN UNBOUNDED PRECEDING AND 2592001 PRECEDING
-                ),
-                w_market_strict AS (
-                    PARTITION BY condition_id
-                    ORDER BY event_ts, kind_priority, tx_hash, asset_id
-                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-                )
-        ),
-        -- Per-(wallet, category) first-seen metadata used for tie-breaking.
-        -- Only BUYs contribute to category_counts in Python (see
-        -- apply_buy_to_state vs apply_sell_to_state in features.py).
-        -- insertion_rank assigns 1 to the earliest-inserted category per wallet,
-        -- matching Python's dict-iteration-order tiebreak: when two categories
-        -- have the same count, the one with the lower rank (inserted first) wins.
-        wallet_cat_buys AS (
-            SELECT wallet_address, event_ts, kind_priority, tx_hash, asset_id, category,
-                   MIN(event_ts) OVER (PARTITION BY wallet_address, category) AS cat_first_ts,
-                   MIN(tx_hash) OVER (PARTITION BY wallet_address, category) AS cat_first_tx
-            FROM events
-            WHERE is_buy_only = 1 AND is_trade = 1
-        ),
-        wallet_cat_rank AS (
-            SELECT DISTINCT
-                wallet_address, category,
-                DENSE_RANK() OVER (
-                    PARTITION BY wallet_address
-                    ORDER BY cat_first_ts ASC, cat_first_tx ASC
-                ) AS insertion_rank
-            FROM wallet_cat_buys
-        ),
-        -- For each target event, count prior BUYs per category by joining all
-        -- BUY events that are strictly before this event (strict-< on the
-        -- canonical sort key: event_ts, kind_priority, tx_hash, asset_id).
-        wallet_cat_prior_counts AS (
-            SELECT
-                te.wallet_address, te.event_ts, te.kind_priority,
-                te.tx_hash, te.asset_id,
-                wcr.category, wcr.insertion_rank,
-                COUNT(*) AS cat_count_prior
-            FROM events te
-            JOIN wallet_cat_buys b
-                ON  b.wallet_address = te.wallet_address
-                AND (
-                    b.event_ts < te.event_ts
-                    OR (b.event_ts = te.event_ts AND b.kind_priority < te.kind_priority)
-                    OR (b.event_ts = te.event_ts AND b.kind_priority = te.kind_priority
-                        AND b.tx_hash < te.tx_hash)
-                    OR (b.event_ts = te.event_ts AND b.kind_priority = te.kind_priority
-                        AND b.tx_hash = te.tx_hash AND b.asset_id < te.asset_id)
-                )
-            JOIN wallet_cat_rank wcr
-                ON  wcr.wallet_address = b.wallet_address
-                AND wcr.category = b.category
-            WHERE te.is_trade = 1
-            GROUP BY
-                te.wallet_address, te.event_ts, te.kind_priority,
-                te.tx_hash, te.asset_id,
-                wcr.category, wcr.insertion_rank
-        ),
-        -- Collapse per-(event, category) rows to per-event (top_category, diversity).
-        -- ARG_MAX key: primary = cat_count_prior DESC (higher count wins),
-        -- secondary = insertion_rank DESC (lower rank = earlier insertion, so
-        -- negating means higher neg_rank → larger key → ARG_MAX picks the winner).
-        wallet_cat_summary AS (
-            SELECT
-                wallet_address, event_ts, kind_priority, tx_hash, asset_id,
-                ARG_MAX(category, STRUCT_PACK(
-                    cnt := cat_count_prior,
-                    neg_rank := -insertion_rank
-                )) AS top_category,
-                COUNT(DISTINCT category) AS category_diversity
-            FROM wallet_cat_prior_counts
-            GROUP BY wallet_address, event_ts, kind_priority, tx_hash, asset_id
-        ),
-        -- Per-market running aggregates over BUY + SELL events (is_trade=1).
-        -- RESOLUTION events don't update market state in Python, so they are
-        -- excluded here.
-        market_acc AS (
-            SELECT
-                e.condition_id, e.event_ts, e.kind_priority,
-                e.tx_hash, e.asset_id,
-                COALESCE(SUM(e.notional_usd) OVER w_strict, 0.0)
-                    AS market_volume_so_far_w,
-                -- LAST_VALUE with IGNORE NULLS picks the latest non-NULL price
-                -- strictly prior to this row (matching Python's market.last_trade_price).
-                LAST_VALUE(e.price IGNORE NULLS) OVER w_strict AS last_trade_price_w,
-                -- 20-row volatility window matches Python's tuple[-20:] buffer.
-                STDDEV_POP(e.price) OVER w_strict_20 AS price_volatility_w,
-                COUNT(e.price) OVER w_strict_20 AS price_count_20
-            FROM events e
-            WHERE e.is_trade = 1
-            WINDOW
-                w_strict AS (
-                    PARTITION BY condition_id
-                    ORDER BY event_ts, kind_priority, tx_hash, asset_id
-                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-                ),
-                w_strict_20 AS (
-                    PARTITION BY condition_id
-                    ORDER BY event_ts, kind_priority, tx_hash, asset_id
-                    ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING
-                )
-        ),
-        -- Unique traders so far per market: count distinct wallets that traded
-        -- the market BEFORE the current row. Per (market, wallet) find the
-        -- wallet's first trade in the market via ROW_NUMBER=1, then
-        -- cumulative-sum those first-trade flags over the strict-prior window.
-        market_first_trade AS (
-            SELECT
-                e.condition_id, e.wallet_address, e.event_ts,
-                e.kind_priority, e.tx_hash, e.asset_id,
-                CAST(
-                    ROW_NUMBER() OVER (
-                        PARTITION BY condition_id, wallet_address
-                        ORDER BY event_ts, kind_priority, tx_hash, asset_id
-                    ) = 1
-                    AS INTEGER
-                ) AS is_first_trade_in_market
-            FROM events e
-            WHERE e.is_trade = 1
-        ),
-        market_unique_acc AS (
-            SELECT
-                m.condition_id, m.event_ts, m.kind_priority,
-                m.tx_hash, m.asset_id,
-                COALESCE(SUM(m.is_first_trade_in_market) OVER (
-                    PARTITION BY m.condition_id
-                    ORDER BY m.event_ts, m.kind_priority, m.tx_hash, m.asset_id
-                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-                ), 0) AS market_unique_traders_so_far_w
-            FROM market_first_trade m
-        )
-        SELECT
-            ? AS platform,
-            wa.tx_hash, wa.asset_id, wa.wallet_address, wa.condition_id,
-            wa.event_ts AS trade_ts,
-            ? AS built_at,
-            CAST(wa.prior_trades_count_w AS INTEGER) AS prior_trades_count,
-            CAST(wa.prior_buys_count_w AS INTEGER) AS prior_buys_count,
-            CAST(wa.prior_resolved_buys_w AS INTEGER) AS prior_resolved_buys,
-            CAST(wa.prior_wins_w AS INTEGER) AS prior_wins,
-            CAST(wa.prior_losses_w AS INTEGER) AS prior_losses,
-            CASE WHEN wa.prior_resolved_buys_w > 0
-                 THEN CAST(wa.prior_wins_w AS DOUBLE) / wa.prior_resolved_buys_w
-                 ELSE NULL END AS win_rate,
-            CASE WHEN COALESCE(wa.bet_size_count_w, 0) > 0
-                 THEN wa.cumulative_buy_price_sum_w / wa.bet_size_count_w
-                 ELSE NULL END AS avg_implied_prob_paid,
-            CASE
-                WHEN wa.prior_resolved_buys_w > 0
-                 AND COALESCE(wa.bet_size_count_w, 0) > 0
-                THEN (CAST(wa.prior_wins_w AS DOUBLE) / wa.prior_resolved_buys_w)
-                     - (wa.cumulative_buy_price_sum_w / wa.bet_size_count_w)
-                ELSE NULL
-            END AS realized_edge_pp,
-            wa.prior_realized_pnl_w AS prior_realized_pnl_usd,
-            CASE WHEN COALESCE(wa.bet_size_count_w, 0) > 0
-                 THEN wa.bet_size_sum_w / wa.bet_size_count_w
-                 ELSE NULL END AS avg_bet_size_usd,
-            CAST(NULL AS DOUBLE) AS median_bet_size_usd,
-            GREATEST(0.0, (wa.event_ts - wfs.first_seen_ts) / 86400.0)
-                AS wallet_age_days,
-            CASE WHEN wa.last_trade_ts_w IS NOT NULL
-                 THEN CAST(wa.event_ts - wa.last_trade_ts_w AS INTEGER)
-                 ELSE NULL END AS seconds_since_last_trade,
-            CAST(COALESCE(wa.prior_trades_30d_w, 0) AS INTEGER) AS prior_trades_30d,
-            wcs.top_category,
-            CAST(COALESCE(wcs.category_diversity, 0) AS INTEGER) AS category_diversity,
-            wa.notional_usd AS bet_size_usd,
-            CASE
-                WHEN COALESCE(wa.bet_size_count_w, 0) > 0
-                 AND wa.bet_size_sum_w > 0
-                THEN wa.notional_usd / (wa.bet_size_sum_w / wa.bet_size_count_w)
-                ELSE NULL
-            END AS bet_size_rel_to_avg,
-            CASE
-                WHEN wa.prior_resolved_buys_w > 0
-                 AND COALESCE(wa.bet_size_count_w, 0) > 0
-                THEN (
-                    (CAST(wa.prior_wins_w AS DOUBLE) / wa.prior_resolved_buys_w
-                     - wa.cumulative_buy_price_sum_w / wa.bet_size_count_w)
-                    * LEAST(1.0, CAST(wa.prior_resolved_buys_w AS DOUBLE) / 20.0)
-                )
-                ELSE 0.0
-            END AS edge_confidence_weighted,
-            CASE
-                WHEN wa.prior_resolved_buys_w > 0
-                THEN (
-                    (CAST(wa.prior_wins_w AS DOUBLE) / wa.prior_resolved_buys_w - 0.5)
-                    * LEAST(1.0, CAST(wa.prior_resolved_buys_w AS DOUBLE) / 20.0)
-                )
-                ELSE 0.0
-            END AS win_rate_confidence_weighted,
-            CAST(
-                CASE
-                    WHEN wa.prior_resolved_buys_w >= 20
-                     AND (
-                        CAST(wa.prior_wins_w AS DOUBLE)
-                        / NULLIF(wa.prior_resolved_buys_w, 0)
-                     ) > 0.55
-                    THEN 1 ELSE 0
-                END AS INTEGER
-            ) AS is_high_quality_wallet,
-            CAST(1.0 AS DOUBLE) AS bet_size_relative_to_history,
-            -- cat_* indicator columns: 1 if the category label appears in
-            -- categories_json (multi-label set), else 0. When categories_json
-            -- is empty or NULL, fall back to checking the primary category
-            -- column — matches Python's ``category_set = set(meta.categories
-            -- or (meta.category,))`` logic in features.py.
-            CAST(
-                CASE
-                    WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
-                    THEN list_contains(
-                        CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]),
-                        'sports'
-                    )
-                    ELSE wa.category = 'sports'
-                END
-            AS INTEGER) AS cat_sports,
-            CAST(
-                CASE
-                    WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
-                    THEN list_contains(
-                        CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]),
-                        'esports'
-                    )
-                    ELSE wa.category = 'esports'
-                END
-            AS INTEGER) AS cat_esports,
-            CAST(
-                CASE
-                    WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
-                    THEN list_contains(
-                        CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]),
-                        'thesis'
-                    )
-                    ELSE wa.category = 'thesis'
-                END
-            AS INTEGER) AS cat_thesis,
-            CAST(
-                CASE
-                    WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
-                    THEN list_contains(
-                        CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]),
-                        'macro'
-                    )
-                    ELSE wa.category = 'macro'
-                END
-            AS INTEGER) AS cat_macro,
-            CAST(
-                CASE
-                    WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
-                    THEN list_contains(
-                        CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]),
-                        'elections'
-                    )
-                    ELSE wa.category = 'elections'
-                END
-            AS INTEGER) AS cat_elections,
-            CAST(
-                CASE
-                    WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
-                    THEN list_contains(
-                        CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]),
-                        'crypto'
-                    )
-                    ELSE wa.category = 'crypto'
-                END
-            AS INTEGER) AS cat_crypto,
-            CAST(
-                CASE
-                    WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
-                    THEN list_contains(
-                        CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]),
-                        'geopolitics'
-                    )
-                    ELSE wa.category = 'geopolitics'
-                END
-            AS INTEGER) AS cat_geopolitics,
-            CAST(
-                CASE
-                    WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
-                    THEN list_contains(
-                        CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]),
-                        'tech'
-                    )
-                    ELSE wa.category = 'tech'
-                END
-            AS INTEGER) AS cat_tech,
-            CAST(
-                CASE
-                    WHEN json_array_length(COALESCE(wa.categories_json, '[]')) > 0
-                    THEN list_contains(
-                        CAST(json_extract(wa.categories_json, '$') AS VARCHAR[]),
-                        'culture'
-                    )
-                    ELSE wa.category = 'culture'
-                END
-            AS INTEGER) AS cat_culture,
-            wa.outcome_side AS side,
-            wa.price AS implied_prob_at_buy,
-            wa.category AS market_category,
-            COALESCE(ma.market_volume_so_far_w, 0.0) AS market_volume_so_far_usd,
-            CAST(COALESCE(mua.market_unique_traders_so_far_w, 0) AS INTEGER)
-                AS market_unique_traders_so_far,
-            CAST(wa.event_ts - COALESCE(wa.market_first_prior_ts_w, 0) AS INTEGER)
-                AS market_age_seconds,
-            CAST(wa.closed_at - wa.event_ts AS INTEGER) AS time_to_resolution_seconds,
-            ma.last_trade_price_w AS last_trade_price,
-            CASE WHEN ma.price_count_20 >= 2 THEN ma.price_volatility_w ELSE NULL END
-                AS price_volatility_recent,
-            CASE
-                WHEN (r.outcome_yes_won = 1 AND wa.outcome_side = 'YES')
-                  OR (r.outcome_yes_won = 0 AND wa.outcome_side = 'NO')
-                THEN 1 ELSE 0
-            END AS label_won
-        FROM wallet_acc wa
-        JOIN wallet_first_seen wfs USING (wallet_address)
-        JOIN resolutions r USING (condition_id)
-        LEFT JOIN wallet_cat_summary wcs
-            USING (wallet_address, event_ts, kind_priority, tx_hash, asset_id)
-        LEFT JOIN market_acc ma
-            USING (condition_id, event_ts, kind_priority, tx_hash, asset_id)
-        LEFT JOIN market_unique_acc mua
-            USING (condition_id, event_ts, kind_priority, tx_hash, asset_id)
-        WHERE wa.is_buy_only = 1
-        """,  # noqa: S608 — _V2_TABLE is a module-level literal
         [platform, now_ts],
     )
 
