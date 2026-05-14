@@ -27,6 +27,7 @@ _PLATFORMS: Final[frozenset[str]] = frozenset({"polymarket", "kalshi", "manifold
 _SCRATCH_FILENAME: Final[str] = "build_scratch.duckdb"
 _TE_LOCAL_TABLE: Final[str] = "training_examples_v2_local"
 _COPY_BATCH_SIZE: Final[int] = 10000
+_COPY_COMMIT_EVERY_ROWS: Final[int] = 100_000
 
 # Categories that may appear in events.category. Drawn from
 # pscanner.categories.Category enum plus the "unknown" sentinel used
@@ -151,14 +152,19 @@ def build_features_duckdb(
             name="final_join",
             fn=lambda: _final_join_to_v2(scratch, platform=platform, now_ts=now_ts),
         )
+        # Detach corpus from DuckDB BEFORE stdlib sqlite3 opens the same file.
+        # DuckDB's sqlite_scanner uses mmap reads on the attached SQLite;
+        # concurrent stdlib-write through WAL triggers SIGBUS around 480 MB
+        # of accumulated WAL when the kernel tries to extend the mmap region.
+        # See issue #131.
+        corpus_path = _detach_corpus(scratch)
         _run_stage(
             scratch,
             name="copy_to_sqlite",
             fn=lambda: _copy_to_sqlite(scratch, db_path=db_path),
         )
 
-        n_rows = _count_v2(scratch)
-        corpus_path = _detach_corpus(scratch)
+        n_rows = _count_v2_sqlite(db_path)
     finally:
         scratch.close()
 
@@ -193,7 +199,11 @@ def _run_stage(
         "stage3_market_aggs": "market_aggs",
         "stage4_wallet_cat": "wallet_cat_summary",
         "final_join": _TE_LOCAL_TABLE,
-        "copy_to_sqlite": f"corpus.{_V2_TABLE}",
+        # copy_to_sqlite runs after corpus is detached from DuckDB, so the
+        # heartbeat can't poll corpus.training_examples_v2 anymore. The
+        # stage's dups_dropped + stage_done elapsed_seconds logs cover what
+        # we need for observability.
+        "copy_to_sqlite": None,
     }.get(name)
     heartbeat = threading.Thread(
         target=_heartbeat_loop,
@@ -890,13 +900,22 @@ def _copy_to_sqlite(scratch: duckdb.DuckDBPyConnection, *, db_path: Path) -> int
         landed_before = conn.execute(
             f"SELECT COUNT(*) FROM {_V2_TABLE}"  # noqa: S608 — _V2_TABLE is a module-level literal
         ).fetchone()[0]
+        rows_since_commit = 0
         while True:
             batch = cursor.fetchmany(_COPY_BATCH_SIZE)
             if not batch:
                 break
             source_rows += len(batch)
             conn.executemany(insert_sql, batch)
-        conn.commit()
+            rows_since_commit += len(batch)
+            # Cap WAL growth — a single end-of-stream commit lets the WAL
+            # balloon to multi-hundred MB on the production corpus, which
+            # collides with DuckDB's mmap on the same file (see issue #131).
+            if rows_since_commit >= _COPY_COMMIT_EVERY_ROWS:
+                conn.commit()
+                rows_since_commit = 0
+        if rows_since_commit > 0:
+            conn.commit()
         landed_after = conn.execute(
             f"SELECT COUNT(*) FROM {_V2_TABLE}"  # noqa: S608 — _V2_TABLE is a module-level literal
         ).fetchone()[0]
@@ -915,9 +934,20 @@ def _copy_to_sqlite(scratch: duckdb.DuckDBPyConnection, *, db_path: Path) -> int
     return landed
 
 
-def _count_v2(duck: duckdb.DuckDBPyConnection) -> int:
-    row = duck.execute(f"SELECT COUNT(*) FROM corpus.{_V2_TABLE}").fetchone()  # noqa: S608 — _V2_TABLE is a module-level literal
-    return int(row[0]) if row else 0
+def _count_v2_sqlite(db_path: Path) -> int:
+    """Row count of training_examples_v2 via stdlib sqlite3.
+
+    Reads via a fresh sqlite3 connection rather than via DuckDB's attach
+    because the orchestrator detaches corpus before copy_to_sqlite runs
+    (concurrent mmap-read + stdlib-write triggers SIGBUS around 480 MB
+    of WAL — see issue #131).
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(f"SELECT COUNT(*) FROM {_V2_TABLE}").fetchone()  # noqa: S608 — _V2_TABLE is a module-level literal
+        return int(row[0]) if row else 0
+    finally:
+        conn.close()
 
 
 def _detach_corpus(duck: duckdb.DuckDBPyConnection) -> str:
