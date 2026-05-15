@@ -170,6 +170,7 @@ def build_features_duckdb(
 
     _atomic_swap(corpus_path)
     _wipe_scratch(scratch_path)
+    _run_analyze(Path(corpus_path))
 
     _log.info(
         "corpus.build_features_duckdb_done",
@@ -1007,3 +1008,31 @@ def _atomic_swap(corpus_path: str) -> None:
         raise
     finally:
         swap_conn.close()
+
+
+def _run_analyze(db_path: Path) -> None:
+    """Run ``ANALYZE training_examples`` on the freshly swapped table.
+
+    SQLite's query planner relies on ``sqlite_stat1`` / ``sqlite_stat4`` to
+    pick indexes for the streaming ML loader's chunked SELECTs. Without
+    these stats, an ANALYZE-less production rebuild made ``pscanner ml
+    train``'s pre-pass take 16 min (vs 2 min with stats) and DMatrix
+    construction stretched from ~12 min baseline to ~37 min on the same
+    corpus. The ANALYZE costs ~3 min on a 15.6M-row table and is amortized
+    by every subsequent reader.
+
+    Run AFTER ``_atomic_swap`` so it analyzes the canonical table
+    (``training_examples``, post-rename), not the v2 intermediate.
+    """
+    started = time.monotonic()
+    _log.info("corpus.build_features.analyze_start")
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("ANALYZE training_examples")
+        conn.commit()
+    finally:
+        conn.close()
+    _log.info(
+        "corpus.build_features.analyze_done",
+        elapsed_seconds=round(time.monotonic() - started, 1),
+    )
