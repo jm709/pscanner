@@ -849,3 +849,76 @@ def test_heartbeat_emits_during_long_operation() -> None:
     assert len(heartbeats) >= 2
     assert all(r["stage"] == "test_stage" for r in heartbeats)
     assert all("elapsed_seconds" in r and "rows" in r for r in heartbeats)
+
+
+def test_build_features_duckdb_runs_analyze_on_training_examples(tmp_path: Path) -> None:
+    """The engine must ANALYZE training_examples after the atomic swap so
+    SQLite's query planner has stats for the ML training streaming loader.
+    Without this, an ANALYZE-less production rebuild stretched pre-pass
+    from 2 min to 16 min and DMatrix construction from ~12 min to ~37 min.
+
+    Asserts ``sqlite_stat1`` has a row for ``training_examples`` after the
+    engine completes.
+    """
+    import sqlite3  # noqa: PLC0415
+
+    from pscanner.corpus._duckdb_engine import build_features_duckdb  # noqa: PLC0415
+    from pscanner.corpus.db import init_corpus_db  # noqa: PLC0415
+
+    db_path = tmp_path / "corpus.sqlite3"
+    init_corpus_db(db_path).close()
+    conn = sqlite3.connect(db_path)
+    try:
+        cid = "0x" + "a" * 64
+        wallet = "0x" + "b" * 40
+        tx = "0x" + "c" * 64
+        conn.execute(
+            """
+            INSERT INTO corpus_markets
+                (platform, condition_id, event_slug, category, categories_json,
+                 enumerated_at, closed_at, total_volume_usd, backfill_state)
+            VALUES ('polymarket', ?, 'slug', 'sports', '["sports"]',
+                    50, 300, 1000.0, 'complete')
+            """,
+            (cid,),
+        )
+        conn.execute(
+            """
+            INSERT INTO market_resolutions
+                (platform, condition_id, resolved_at, winning_outcome_index,
+                 outcome_yes_won, source, recorded_at)
+            VALUES ('polymarket', ?, 300, 0, 1, 'gamma', 300)
+            """,
+            (cid,),
+        )
+        conn.execute(
+            """
+            INSERT INTO corpus_trades
+                (platform, tx_hash, asset_id, wallet_address, condition_id,
+                 outcome_side, bs, price, size, notional_usd, ts)
+            VALUES ('polymarket', ?, 'asset_yes', ?, ?, 'YES', 'BUY',
+                    0.5, 100.0, 50.0, 100)
+            """,
+            (tx, wallet, cid),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    build_features_duckdb(
+        db_path=db_path,
+        platform="polymarket",
+        now_ts=1000,
+        memory_limit="256MB",
+        temp_dir=tmp_path,
+        threads=1,
+    )
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT tbl, stat FROM sqlite_stat1 WHERE tbl = 'training_examples'"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) >= 1, "ANALYZE should have populated sqlite_stat1 for training_examples"
