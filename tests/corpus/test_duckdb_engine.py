@@ -851,6 +851,99 @@ def test_heartbeat_emits_during_long_operation() -> None:
     assert all("elapsed_seconds" in r and "rows" in r for r in heartbeats)
 
 
+def test_build_features_duckdb_no_fanout_on_shared_tx_hash(tmp_path: Path) -> None:
+    """Polymarket's on-chain ingest records BOTH sides of each OrderFilled
+    (taker + maker) so ``corpus_trades`` can have multiple rows with the
+    same ``(tx_hash, asset_id)`` under different ``wallet_address``. Those
+    rows must NOT fan out at the ``market_aggs`` LEFT JOIN — each BUY in
+    wallet_aggs must match exactly its own market_aggs row.
+
+    Without ``wallet_address`` in the market_aggs USING clause, each BUY
+    fans out to one row per (cond, ts, prio, tx, asset) wallet, producing
+    ~2-3x source rows at production scale (issue #135). The INSERT OR
+    IGNORE in copy_to_sqlite masks the dup count but the work is wasted.
+
+    Seeds a BUY-SELL pair sharing tx_hash + asset_id on a resolved
+    market. Without the wallet_address join key, the BUY would produce
+    2 SELECT rows (one matching its own market_aggs row, one matching
+    the SELL's). With the fix, only 1 row.
+    """
+    import sqlite3  # noqa: PLC0415
+
+    from pscanner.corpus._duckdb_engine import build_features_duckdb  # noqa: PLC0415
+    from pscanner.corpus.db import init_corpus_db  # noqa: PLC0415
+
+    db_path = tmp_path / "corpus.sqlite3"
+    init_corpus_db(db_path).close()
+    conn = sqlite3.connect(db_path)
+    try:
+        cid = "0x" + "a" * 64
+        wallet_buyer = "0x" + "b" * 40
+        wallet_seller = "0x" + "5" * 40
+        tx = "0x" + "c" * 64
+        asset = "asset_yes"
+        conn.execute(
+            """
+            INSERT INTO corpus_markets
+                (platform, condition_id, event_slug, category, categories_json,
+                 enumerated_at, closed_at, total_volume_usd, backfill_state)
+            VALUES ('polymarket', ?, 'slug', 'sports', '["sports"]',
+                    50, 300, 1000.0, 'complete')
+            """,
+            (cid,),
+        )
+        conn.execute(
+            """
+            INSERT INTO market_resolutions
+                (platform, condition_id, resolved_at, winning_outcome_index,
+                 outcome_yes_won, source, recorded_at)
+            VALUES ('polymarket', ?, 300, 0, 1, 'gamma', 300)
+            """,
+            (cid,),
+        )
+        # Both sides of the same on-chain OrderFilled — same tx_hash, same
+        # asset_id, different wallets, opposite bs. Allowed by the PK.
+        conn.executemany(
+            """
+            INSERT INTO corpus_trades
+                (platform, tx_hash, asset_id, wallet_address, condition_id,
+                 outcome_side, bs, price, size, notional_usd, ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("polymarket", tx, asset, wallet_buyer, cid, "YES", "BUY", 0.5, 100.0, 50.0, 100),
+                ("polymarket", tx, asset, wallet_seller, cid, "YES", "SELL", 0.5, 100.0, 50.0, 100),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    build_features_duckdb(
+        db_path=db_path,
+        platform="polymarket",
+        now_ts=1000,
+        memory_limit="256MB",
+        temp_dir=tmp_path,
+        threads=1,
+    )
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute("SELECT wallet_address, tx_hash FROM training_examples").fetchall()
+    finally:
+        conn.close()
+    # Exactly one row, for the BUY-side wallet. Without the fix, two rows
+    # (the BUY would also match the SELL-side market_aggs row -> 2x fan-out
+    # -> dedup by INSERT OR IGNORE would land 1 row, but `dups_dropped`
+    # would log a non-zero count). This test is the assertion the engine
+    # does NOT produce dups in the first place.
+    assert len(rows) == 1
+    assert rows[0]["wallet_address"] == wallet_buyer
+    assert rows[0]["tx_hash"] == tx
+
+
 def test_build_features_duckdb_runs_analyze_on_training_examples(tmp_path: Path) -> None:
     """The engine must ANALYZE training_examples after the atomic swap so
     SQLite's query planner has stats for the ML training streaming loader.

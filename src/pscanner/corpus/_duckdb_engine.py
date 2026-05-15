@@ -865,8 +865,16 @@ def _final_join_to_v2(scratch: duckdb.DuckDBPyConnection, *, platform: str, now_
         JOIN resolutions r USING (condition_id)
         LEFT JOIN wallet_cat_summary wcs
             USING (wallet_address, event_ts, kind_priority, tx_hash, asset_id)
+        -- wallet_address MUST be in the join key. On Polymarket the
+        -- on-chain ingest path records BOTH sides of each OrderFilled
+        -- event (taker AND maker), so corpus_trades can contain multiple
+        -- rows with the same (tx_hash, asset_id) under different wallets.
+        -- Those rows survive into market_aggs with the same 5-key sans
+        -- wallet_address; without wallet_address in the USING, each
+        -- wallet_aggs BUY row matches every market_aggs row at the same
+        -- 5-key — fan-out (~2-3x at production scale, see #135).
         LEFT JOIN market_aggs ma
-            USING (condition_id, event_ts, kind_priority, tx_hash, asset_id)
+            USING (wallet_address, condition_id, event_ts, kind_priority, tx_hash, asset_id)
         WHERE wa.is_buy_only = 1
         """,  # noqa: S608 — _TE_LOCAL_TABLE is a module-level literal; platform/now_ts bound below
         [platform, now_ts],
