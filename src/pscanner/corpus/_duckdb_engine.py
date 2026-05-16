@@ -1,8 +1,19 @@
 """DuckDB-based engine for ``pscanner corpus build-features``.
 
 Pure SQL pipeline that produces ``training_examples`` rows bit-equivalent
-(within ``rtol=1e-9``) to the Python ``StreamingHistoryProvider`` fold,
-in 5-25 min vs 6h. See ``docs/superpowers/plans/2026-05-11-issue-116-duckdb-engine.md``.
+(within ``rtol=1e-9``) to the Python ``StreamingHistoryProvider`` fold.
+
+Measured wall time on the production corpus (46 GB SQLite, 22.78M
+polymarket trades, 11 GB WSL2 host, ``memory_limit=6GB``): 1h 5m pre-#138,
+~5.5x faster than the Python engine's ~6h. The fan-out fix in #138 nearly
+halves the ``copy_to_sqlite`` source-row count and should drop total wall
+time substantially on the next rebuild — see ``CLAUDE.md`` for updated
+per-stage numbers as they land.
+
+Issue history: original rewrite #131; INSERT OR IGNORE + DETACH around
+``copy_to_sqlite`` #134; auto-ANALYZE post-swap #137; market_aggs
+``wallet_address`` JOIN fix #138. Open follow-up: drop+recreate
+secondary indexes around the bulk insert #136.
 """
 
 from __future__ import annotations
