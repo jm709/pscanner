@@ -20,7 +20,14 @@ from pscanner.store.repo import MarketCacheRepo, WalletTrade
 from pscanner.util.clock import FakeClock
 
 
-def _make_market(*, condition_id: str, volume: float, mid: str | None = None) -> Market:
+def _make_market(
+    *,
+    condition_id: str,
+    volume: float,
+    mid: str | None = None,
+    outcome_prices: tuple[float, float] = (0.5, 0.5),
+) -> Market:
+    yes_p, no_p = outcome_prices
     return Market.model_validate(
         {
             "id": mid or condition_id,
@@ -28,7 +35,7 @@ def _make_market(*, condition_id: str, volume: float, mid: str | None = None) ->
             "question": f"q-{condition_id}",
             "slug": f"slug-{condition_id}",
             "outcomes": '["Yes","No"]',
-            "outcomePrices": '["0.5","0.5"]',
+            "outcomePrices": f'["{yes_p}","{no_p}"]',
             "liquidity": "100",
             "volume": str(volume),
             "active": True,
@@ -173,6 +180,7 @@ async def test_poll_once_dispatches_new_trades() -> None:
         config=cfg,
         gamma=gamma,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         data_client=data,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        clock=FakeClock(start=1_700_000_050.0),
     )
     received: list[WalletTrade] = []
     collector.subscribe_new_trade(received.append)
@@ -241,6 +249,7 @@ async def test_poll_once_handles_polymarket_camelcase_keys() -> None:
         config=cfg,
         gamma=gamma,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         data_client=data,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        clock=FakeClock(start=1_700_000_050.0),
     )
     received: list[WalletTrade] = []
     collector.subscribe_new_trade(received.append)
@@ -289,17 +298,132 @@ async def test_poll_once_advances_last_seen_ts() -> None:
             ]
         }
     )
+    cold_start_ts = 1_700_000_050
     collector = MarketScopedTradeCollector(
         config=cfg,
         gamma=gamma,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         data_client=data,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        clock=FakeClock(start=float(cold_start_ts)),
     )
     await collector.refresh_market_set()
     await collector.poll_once()
     await collector.poll_once()  # second poll: nothing new since last_seen_ts advanced
-    # First call had since_ts=0, second should have since_ts >= 1_700_000_100.
-    assert data.calls[0][1] == 0
+    # First call is seeded from the clock (cold-start skips historical), second
+    # advances to the trade timestamp it just observed.
+    assert data.calls[0][1] == cold_start_ts
     assert data.calls[1][1] >= 1_700_000_100
+
+
+@pytest.mark.asyncio
+async def test_cold_start_skips_historical_trades() -> None:
+    """Pin the live-only cold-start behavior: trades older than the clock get dropped.
+
+    The first paper-trading smoke (#79) accidentally replayed multi-day
+    backlogs because ``_last_seen_ts`` defaulted to 0. Setting the
+    sentinel from ``clock.now()`` at refresh time makes the first poll
+    fetch only trades that arrived after the daemon started.
+    """
+    cfg = GateModelMarketFilterConfig(
+        enabled=True, accepted_categories=("esports",), min_volume_24h_usd=0
+    )
+    event = _make_event(
+        slug="ev",
+        tags=["Esports"],
+        markets=[_make_market(condition_id="0xc1", volume=100_000)],
+    )
+    gamma = _FakeGammaClient([event])
+    cold_start_ts = 1_779_000_000
+    data = _FakeDataClient(
+        by_market={
+            "0xc1": [
+                {  # historical: older than the cold-start clock — must be skipped
+                    "transactionHash": "tx_old",
+                    "asset": "0xa1",
+                    "side": "BUY",
+                    "proxyWallet": "0xabc",
+                    "conditionId": "0xc1",
+                    "price": 0.42,
+                    "size": 100.0,
+                    "usdcSize": 42.0,
+                    "timestamp": cold_start_ts - 86_400,  # 1 day before start
+                },
+                {  # live: newer than the cold-start clock — must be dispatched
+                    "transactionHash": "tx_new",
+                    "asset": "0xa1",
+                    "side": "BUY",
+                    "proxyWallet": "0xabc",
+                    "conditionId": "0xc1",
+                    "price": 0.42,
+                    "size": 100.0,
+                    "usdcSize": 42.0,
+                    "timestamp": cold_start_ts + 30,
+                },
+            ]
+        }
+    )
+    collector = MarketScopedTradeCollector(
+        config=cfg,
+        gamma=gamma,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        data_client=data,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        clock=FakeClock(start=float(cold_start_ts)),
+    )
+    received: list[WalletTrade] = []
+    collector.subscribe_new_trade(received.append)
+    await collector.refresh_market_set()
+    n = await collector.poll_once()
+    assert n == 1
+    assert len(received) == 1
+    assert received[0].transaction_hash == "tx_new"
+    assert data.calls[0][1] == cold_start_ts
+
+
+@pytest.mark.asyncio
+async def test_refresh_excludes_extreme_priced_markets() -> None:
+    """Markets whose every outcome trades outside [min, max] outcome price get dropped.
+
+    The 2026-05-19 live smoke surfaced that the top markets by 24h volume
+    are usually post-decision (one outcome at ~0.99). The gate's
+    ``pred - implied >= 0.05`` floor is unreachable when ``implied >= 0.95``,
+    so subscribing to those markets just wastes the polling budget.
+    """
+    cfg = GateModelMarketFilterConfig(
+        enabled=True,
+        accepted_categories=("esports",),
+        min_volume_24h_usd=0,
+        min_outcome_price=0.1,
+        max_outcome_price=0.9,
+    )
+    event = _make_event(
+        slug="ev",
+        tags=["Esports"],
+        markets=[
+            _make_market(
+                condition_id="0x_mid",
+                volume=100_000,
+                outcome_prices=(0.55, 0.45),
+            ),
+            _make_market(
+                condition_id="0x_post_decision",
+                volume=200_000,
+                outcome_prices=(0.99, 0.01),
+            ),
+            _make_market(
+                condition_id="0x_inverse_post_decision",
+                volume=150_000,
+                outcome_prices=(0.05, 0.95),
+            ),
+        ],
+    )
+    gamma = _FakeGammaClient([event])
+    data = _FakeDataClient(by_market={})
+    collector = MarketScopedTradeCollector(
+        config=cfg,
+        gamma=gamma,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        data_client=data,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        clock=FakeClock(start=1_700_000_000.0),
+    )
+    selected = await collector.refresh_market_set()
+    assert selected == ["0x_mid"]
 
 
 @pytest.mark.asyncio

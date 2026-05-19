@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from pscanner.daemon.live_history import LiveHistoryProvider
     from pscanner.poly.data import DataClient
     from pscanner.poly.gamma import GammaClient
+    from pscanner.poly.models import Market
     from pscanner.store.repo import MarketCacheRepo
 
 _LOG = structlog.get_logger(__name__)
@@ -47,6 +48,7 @@ class MarketScopedTradeCollector:
         data_client: DataClient,
         provider: LiveHistoryProvider | None = None,
         market_cache: MarketCacheRepo | None = None,
+        clock: Clock | None = None,
     ) -> None:
         """Initialize the collector with configuration and API clients.
 
@@ -59,12 +61,17 @@ class MarketScopedTradeCollector:
         :class:`Market` so :class:`GateModelDetector._resolve_outcome_side` can
         map ``trade.asset_id`` to YES/NO. In a gate-model-only daemon config,
         no other code path populates the cache (issue #103).
+
+        ``clock`` seeds the cold-start ``_last_seen_ts`` for newly-discovered
+        markets so the first poll fetches only live trades, not the entire
+        historical backlog. Defaults to :class:`RealClock`.
         """
         self._config = config
         self._gamma = gamma
         self._data_client = data_client
         self._provider = provider
         self._market_cache = market_cache
+        self._clock = clock or RealClock()
         self._markets: list[str] = []
         self._callbacks: list[Callable[[WalletTrade], None]] = []
         self._last_seen_ts: dict[str, int] = {}
@@ -72,6 +79,22 @@ class MarketScopedTradeCollector:
     def subscribe_new_trade(self, callback: Callable[[WalletTrade], None]) -> None:
         """Register a callback fired on every newly observed trade."""
         self._callbacks.append(callback)
+
+    def _market_passes_gate(self, market: Market, *, floor: float) -> bool:
+        """True iff the market clears the volume floor AND the price-range gate.
+
+        Post-decision markets (every outcome at a price extreme) get dropped
+        because ``pred - implied`` can't clear ``min_edge_pct`` when
+        ``implied`` is already near 0 or 1.
+        """
+        if float(market.volume or 0.0) < floor:
+            return False
+        prices = market.outcome_prices
+        if not prices:
+            return True
+        return all(
+            self._config.min_outcome_price <= p <= self._config.max_outcome_price for p in prices
+        )
 
     async def refresh_market_set(self) -> list[str]:
         """Enumerate events, filter by category + volume, return top-N condition_ids.
@@ -97,11 +120,15 @@ class MarketScopedTradeCollector:
                 cond_id = market.condition_id
                 if cond_id is None:
                     continue
-                volume = float(market.volume or 0.0)
-                if volume < floor:
+                if not self._market_passes_gate(market, floor=floor):
                     continue
                 cond_id_str = str(cond_id)
-                candidates.append((volume, cond_id_str))
+                candidates.append((float(market.volume or 0.0), cond_id_str))
+                # Cold-start sentinel: skip the historical backlog and only
+                # pick up trades observed after this refresh. Without this,
+                # the first poll fetches every trade ever recorded on the
+                # market because the per-market dict default is 0 (epoch).
+                self._last_seen_ts.setdefault(cond_id_str, int(self._clock.now()))
                 if self._provider is not None:
                     # Live market: no resolution timestamp yet. closed_at/opened_at
                     # default to 0 — only the category fields are load-bearing at
@@ -213,7 +240,7 @@ class MarketScopedTradeCollector:
         clock: Clock | None = None,
     ) -> None:
         """Long-running loop: refresh market set + poll on cadence."""
-        clk = clock or RealClock()
+        clk = clock or self._clock
         while not stop_event.is_set():
             await self.refresh_market_set()
             await self.poll_once()

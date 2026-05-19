@@ -17,7 +17,7 @@ from pscanner.config import GateModelConfig
 from pscanner.corpus.features import FeatureRow, MarketMetadata
 from pscanner.daemon.live_history import LiveHistoryProvider
 from pscanner.detectors.gate_model import GateModelDetector
-from pscanner.ml.preprocessing import LEAKAGE_COLS, OneHotEncoder
+from pscanner.ml.preprocessing import _NEVER_LOAD_COLS, OneHotEncoder
 from pscanner.ml.streaming import _derive_feature_names
 from pscanner.poly.ids import AssetId, ConditionId, EventId, MarketId
 from pscanner.store.db import init_db
@@ -635,18 +635,27 @@ def test_feature_cols_parity_against_training_derive_feature_names(tmp_path: Pat
     # Build a kept_cols list mirroring what training_examples PRAGMA would
     # produce after _NEVER_LOAD_COLS is applied: every FeatureRow field +
     # the carrier columns the build_features pipeline writes alongside
-    # them, MINUS the leakage cols stripped at SELECT time.
+    # them, minus the columns the streaming loader drops at SELECT time.
+    # market_categories is a tuple-valued FeatureRow field used by the live
+    # gate-intersection check; it is not a column in training_examples (the
+    # 9 cat_ indicators carry the signal in SQL form), so PRAGMA never
+    # returns it.
     feature_row_fields = tuple(f.name for f in dataclasses.fields(FeatureRow))
     extra_cols = ("condition_id", "trade_ts", "resolved_at", "label_won")
     full_pragma_cols = feature_row_fields + extra_cols
-    kept_cols = tuple(c for c in full_pragma_cols if c not in LEAKAGE_COLS)
+    not_in_sql = {"market_categories"}
+    kept_cols = tuple(
+        c for c in full_pragma_cols if c not in _NEVER_LOAD_COLS and c not in not_in_sql
+    )
     # Use a richer encoder than the dummy one (to mimic production) so the
     # parity check covers the indicator-expansion path too.
+    # Production v2 encoder one-hots side + top_category only — market_category
+    # is dropped via _NEVER_LOAD_COLS at training time (#122) and the cat_*
+    # indicator columns carry the signal instead.
     encoder = OneHotEncoder(
         levels={
             "side": ("NO", "YES"),
             "top_category": ("__none__", "esports", "sports", "thesis"),
-            "market_category": ("esports", "sports", "thesis"),
         }
     )
     detector._encoder = encoder
