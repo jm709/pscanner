@@ -9,6 +9,7 @@ holds the canonical definitions and is consumed by all three.
 
 from __future__ import annotations
 
+import statistics
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal
@@ -153,44 +154,88 @@ def render_sql_fragment(template: str, bindings: Mapping[str, str] = SQL_BINDING
     return rendered
 
 
+def _cat_indicator_formula(category: str) -> FeatureFormula:
+    """Generate one cat_<category> indicator formula.
+
+    The 9 indicators all share a shape: int(category in meta.categories).
+    Generated programmatically to avoid 9 copies of the same Python lambda
+    + SQL fragment.
+    """
+
+    def _py(i: FeatureInputs) -> int:
+        categories = i.meta.categories if i.meta.categories else (i.meta.category,)
+        return int(category in set(categories))
+
+    sql = (
+        "CAST(CASE "
+        "WHEN json_array_length(COALESCE({meta.categories_json}, '[]')) > 0 "
+        "THEN list_contains("
+        "CAST(json_extract({meta.categories_json}, '$') AS VARCHAR[]), "
+        f"'{category}') "
+        f"ELSE {{meta.category}} = '{category}' "
+        "END AS INTEGER)"
+    )
+    return FeatureFormula(
+        name=f"cat_{category}",
+        dtype="int",
+        nullable=False,
+        py=_py,
+        sql=sql,
+    )
+
+
 # The canonical registry. Order matches FeatureRow field declaration order so
 # project_row can emit a tuple-positional FeatureRow construction below.
 FEATURES: tuple[FeatureFormula, ...] = (
     # ----- Passthrough wallet aggregates -----
     FeatureFormula(
-        name="prior_trades_count", dtype="int", nullable=False,
+        name="prior_trades_count",
+        dtype="int",
+        nullable=False,
         py=lambda i: i.wallet.prior_trades_count,
         sql="{w.prior_trades_count}",
     ),
     FeatureFormula(
-        name="prior_buys_count", dtype="int", nullable=False,
+        name="prior_buys_count",
+        dtype="int",
+        nullable=False,
         py=lambda i: i.wallet.prior_buys_count,
         sql="{w.prior_buys_count}",
     ),
     FeatureFormula(
-        name="prior_resolved_buys", dtype="int", nullable=False,
+        name="prior_resolved_buys",
+        dtype="int",
+        nullable=False,
         py=lambda i: i.wallet.prior_resolved_buys,
         sql="{w.prior_resolved_buys}",
     ),
     FeatureFormula(
-        name="prior_wins", dtype="int", nullable=False,
+        name="prior_wins",
+        dtype="int",
+        nullable=False,
         py=lambda i: i.wallet.prior_wins,
         sql="{w.prior_wins}",
     ),
     FeatureFormula(
-        name="prior_losses", dtype="int", nullable=False,
+        name="prior_losses",
+        dtype="int",
+        nullable=False,
         py=lambda i: i.wallet.prior_losses,
         sql="{w.prior_losses}",
     ),
     FeatureFormula(
-        name="prior_realized_pnl_usd", dtype="float", nullable=False,
+        name="prior_realized_pnl_usd",
+        dtype="float",
+        nullable=False,
         py=lambda i: i.wallet.realized_pnl_usd,
         sql="{w.realized_pnl_usd}",
     ),
     # prior_trades_30d: Python computes from recent_30d_trades deque;
     # DuckDB stage 2 pre-computes the count as wa.prior_trades_30d_w.
     FeatureFormula(
-        name="prior_trades_30d", dtype="int", nullable=False,
+        name="prior_trades_30d",
+        dtype="int",
+        nullable=False,
         py=lambda i: sum(
             1
             for ts in i.wallet.recent_30d_trades
@@ -200,45 +245,61 @@ FEATURES: tuple[FeatureFormula, ...] = (
     ),
     # ----- Trade-row passthroughs -----
     FeatureFormula(
-        name="bet_size_usd", dtype="float", nullable=False,
+        name="bet_size_usd",
+        dtype="float",
+        nullable=False,
         py=lambda i: i.trade.notional_usd,
         sql="{t.notional_usd}",
     ),
     FeatureFormula(
-        name="side", dtype="str", nullable=False,
+        name="side",
+        dtype="str",
+        nullable=False,
         py=lambda i: i.trade.outcome_side,
         sql="{t.outcome_side}",
     ),
     FeatureFormula(
-        name="implied_prob_at_buy", dtype="float", nullable=False,
+        name="implied_prob_at_buy",
+        dtype="float",
+        nullable=False,
         py=lambda i: i.trade.price,
         sql="{t.price}",
     ),
     # ----- Market-state passthroughs -----
     FeatureFormula(
-        name="market_volume_so_far_usd", dtype="float", nullable=False,
+        name="market_volume_so_far_usd",
+        dtype="float",
+        nullable=False,
         py=lambda i: i.market.volume_so_far_usd,
         sql="COALESCE({m.volume_so_far_usd}, 0.0)",
     ),
     FeatureFormula(
-        name="market_unique_traders_so_far", dtype="int", nullable=False,
+        name="market_unique_traders_so_far",
+        dtype="int",
+        nullable=False,
         py=lambda i: i.market.unique_traders_count,
         sql="CAST(COALESCE({m.unique_traders_count}, 0) AS INTEGER)",
     ),
     FeatureFormula(
-        name="last_trade_price", dtype="float", nullable=True,
+        name="last_trade_price",
+        dtype="float",
+        nullable=True,
         py=lambda i: i.market.last_trade_price,
         sql="{m.last_trade_price}",
     ),
     # ----- Market metadata passthroughs -----
     FeatureFormula(
-        name="market_category", dtype="str", nullable=False,
+        name="market_category",
+        dtype="str",
+        nullable=False,
         py=lambda i: i.meta.category,
         sql="{meta.category}",
     ),
     # ----- Nullable divisions (denominator == 0 → None) -----
     FeatureFormula(
-        name="win_rate", dtype="float", nullable=True,
+        name="win_rate",
+        dtype="float",
+        nullable=True,
         py=lambda i: (
             i.wallet.prior_wins / i.wallet.prior_resolved_buys
             if i.wallet.prior_resolved_buys > 0
@@ -251,7 +312,9 @@ FEATURES: tuple[FeatureFormula, ...] = (
         ),
     ),
     FeatureFormula(
-        name="avg_implied_prob_paid", dtype="float", nullable=True,
+        name="avg_implied_prob_paid",
+        dtype="float",
+        nullable=True,
         py=lambda i: (
             i.wallet.cumulative_buy_price_sum / i.wallet.cumulative_buy_count
             if i.wallet.cumulative_buy_count > 0
@@ -264,7 +327,9 @@ FEATURES: tuple[FeatureFormula, ...] = (
         ),
     ),
     FeatureFormula(
-        name="realized_edge_pp", dtype="float", nullable=True,
+        name="realized_edge_pp",
+        dtype="float",
+        nullable=True,
         py=lambda i: (
             (i.wallet.prior_wins / i.wallet.prior_resolved_buys)
             - (i.wallet.cumulative_buy_price_sum / i.wallet.cumulative_buy_count)
@@ -279,11 +344,11 @@ FEATURES: tuple[FeatureFormula, ...] = (
         ),
     ),
     FeatureFormula(
-        name="avg_bet_size_usd", dtype="float", nullable=True,
+        name="avg_bet_size_usd",
+        dtype="float",
+        nullable=True,
         py=lambda i: (
-            i.wallet.bet_size_sum / i.wallet.bet_size_count
-            if i.wallet.bet_size_count > 0
-            else None
+            i.wallet.bet_size_sum / i.wallet.bet_size_count if i.wallet.bet_size_count > 0 else None
         ),
         sql=(
             "CASE WHEN {w.bet_size_count} > 0 "
@@ -292,13 +357,17 @@ FEATURES: tuple[FeatureFormula, ...] = (
         ),
     ),
     FeatureFormula(
-        name="median_bet_size_usd", dtype="float", nullable=True,
+        name="median_bet_size_usd",
+        dtype="float",
+        nullable=True,
         # v1: not maintained — compute_features always emits None (features.py:389).
         py=lambda _i: None,
         sql="CAST(NULL AS DOUBLE)",
     ),
     FeatureFormula(
-        name="bet_size_rel_to_avg", dtype="float", nullable=True,
+        name="bet_size_rel_to_avg",
+        dtype="float",
+        nullable=True,
         py=lambda i: (
             i.trade.notional_usd / (i.wallet.bet_size_sum / i.wallet.bet_size_count)
             if i.wallet.bet_size_count > 0 and i.wallet.bet_size_sum > 0
@@ -312,7 +381,9 @@ FEATURES: tuple[FeatureFormula, ...] = (
     ),
     # ----- Wallet-quality interaction features (#44) -----
     FeatureFormula(
-        name="edge_confidence_weighted", dtype="float", nullable=False,
+        name="edge_confidence_weighted",
+        dtype="float",
+        nullable=False,
         py=lambda i: (
             (
                 (i.wallet.prior_wins / i.wallet.prior_resolved_buys)
@@ -331,7 +402,9 @@ FEATURES: tuple[FeatureFormula, ...] = (
         ),
     ),
     FeatureFormula(
-        name="win_rate_confidence_weighted", dtype="float", nullable=False,
+        name="win_rate_confidence_weighted",
+        dtype="float",
+        nullable=False,
         py=lambda i: (
             ((i.wallet.prior_wins / i.wallet.prior_resolved_buys) - 0.5)
             * min(1.0, i.wallet.prior_resolved_buys / CONFIDENCE_N_MIN)
@@ -346,7 +419,9 @@ FEATURES: tuple[FeatureFormula, ...] = (
         ),
     ),
     FeatureFormula(
-        name="is_high_quality_wallet", dtype="int", nullable=False,
+        name="is_high_quality_wallet",
+        dtype="int",
+        nullable=False,
         py=lambda i: int(
             i.wallet.prior_resolved_buys >= CONFIDENCE_N_MIN
             and i.wallet.prior_resolved_buys > 0
@@ -361,13 +436,106 @@ FEATURES: tuple[FeatureFormula, ...] = (
         ),
     ),
     FeatureFormula(
-        name="bet_size_relative_to_history", dtype="float", nullable=False,
+        name="bet_size_relative_to_history",
+        dtype="float",
+        nullable=False,
         # v1: median_bet_size_usd is never maintained, so the ratio is
         # always 1.0. See features.py:389 + 399-401.
         py=lambda _i: 1.0,
         sql="CAST(1.0 AS DOUBLE)",
     ),
+    # ----- Temporal features -----
+    FeatureFormula(
+        name="wallet_age_days",
+        dtype="float",
+        nullable=False,
+        py=lambda i: max(0.0, (i.trade.ts - i.wallet.first_seen_ts) / SECONDS_PER_DAY),
+        sql=f"GREATEST(0.0, ({{t.ts}} - {{w.first_seen_ts}}) / {SECONDS_PER_DAY}.0)",
+    ),
+    FeatureFormula(
+        name="seconds_since_last_trade",
+        dtype="int",
+        nullable=True,
+        py=lambda i: (
+            i.trade.ts - i.wallet.last_trade_ts if i.wallet.last_trade_ts is not None else None
+        ),
+        sql=(
+            "CASE WHEN {w.last_trade_ts} IS NOT NULL THEN {t.ts} - {w.last_trade_ts} ELSE NULL END"
+        ),
+    ),
+    FeatureFormula(
+        name="market_age_seconds",
+        dtype="int",
+        nullable=False,
+        # When the market has not yet been observed, compute_features reads
+        # market_state's default empty state (market_age_start_ts=0), so
+        # market_age_seconds = trade.ts on first sighting. The SQL mirrors
+        # this with COALESCE-to-0 (see _duckdb_engine.py:798-801 comment).
+        py=lambda i: i.trade.ts - i.market.market_age_start_ts,
+        sql="CAST({t.ts} - COALESCE({m.market_age_start_ts}, 0) AS INTEGER)",
+    ),
+    FeatureFormula(
+        name="time_to_resolution_seconds",
+        dtype="int",
+        nullable=True,
+        py=lambda i: i.meta.closed_at - i.trade.ts,
+        sql="CAST({meta.closed_at} - {t.ts} AS INTEGER)",
+    ),
+    # ----- Category counts (from wallet_cat_summary subquery on the SQL side) -----
+    FeatureFormula(
+        name="top_category",
+        dtype="str",
+        nullable=True,
+        py=lambda i: (
+            max(i.wallet.category_counts.items(), key=lambda kv: kv[1])[0]
+            if i.wallet.category_counts
+            else None
+        ),
+        sql="{wcs.top_category}",
+    ),
+    FeatureFormula(
+        name="category_diversity",
+        dtype="int",
+        nullable=False,
+        py=lambda i: len(i.wallet.category_counts),
+        sql="{wcs.category_diversity}",
+    ),
+    # ----- Price volatility -----
+    FeatureFormula(
+        name="price_volatility_recent",
+        dtype="float",
+        nullable=True,
+        py=lambda i: (
+            statistics.pstdev(i.market.recent_prices)
+            if len(i.market.recent_prices) >= MIN_PRICES_FOR_VOLATILITY
+            else None
+        ),
+        sql=(
+            f"CASE WHEN {{m.price_count_20}} >= {MIN_PRICES_FOR_VOLATILITY} "
+            "THEN {m.price_volatility} ELSE NULL END"
+        ),
+    ),
+    # ----- Market categories (tuple-valued; sql returns a list expression) -----
+    FeatureFormula(
+        name="market_categories",
+        dtype="tuple_str",
+        nullable=False,
+        py=lambda i: i.meta.categories if i.meta.categories else (i.meta.category,),
+        sql=(
+            "CASE "
+            "WHEN json_array_length(COALESCE({meta.categories_json}, '[]')) > 0 "
+            "THEN CAST(json_extract({meta.categories_json}, '$') AS VARCHAR[]) "
+            "ELSE [{meta.category}] "
+            "END"
+        ),
+    ),
 )
+
+# Extend FEATURES with the generated cat_* indicators. Defined as a
+# separate statement (rather than expanding inside the FEATURES literal)
+# because the closure capture inside _cat_indicator_formula requires a
+# helper function — see issue #145 for the parity rationale.
+FEATURES = FEATURES + tuple(_cat_indicator_formula(cat) for cat in KNOWN_CATEGORIES)
 
 
 def project_row(
