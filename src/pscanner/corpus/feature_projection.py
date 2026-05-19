@@ -538,6 +538,21 @@ FEATURES: tuple[FeatureFormula, ...] = (
 FEATURES = FEATURES + tuple(_cat_indicator_formula(cat) for cat in KNOWN_CATEGORIES)
 
 
+def project_sql(*, bindings: Mapping[str, str] = SQL_BINDINGS) -> str:
+    """Emit the SELECT-list column expressions for ``training_examples_v2``.
+
+    Returns a comma-separated string of ``<expression> AS <column_name>``
+    lines, ready to splice into the ``_final_join_to_v2`` SELECT. The
+    caller is responsible for the surrounding SELECT scaffolding
+    (platform, tx_hash, label_won, JOIN clauses, WHERE).
+    """
+    parts = []
+    for formula in FEATURES:
+        rendered = render_sql_fragment(formula.sql, bindings)
+        parts.append(f"{rendered} AS {formula.name}")
+    return ",\n    ".join(parts)
+
+
 def project_row(
     *,
     trade: Trade,

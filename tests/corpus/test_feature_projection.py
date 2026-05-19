@@ -136,3 +136,13 @@ def test_project_row_matches_compute_features(
         if e != a:
             diffs.append(f"  {field.name}: expected={e!r} actual={a!r}")
     assert not diffs, "feature divergence:\n" + "\n".join(diffs)
+
+
+def test_project_sql_renders_all_features() -> None:
+    """project_sql produces a non-empty SELECT list with no leftover placeholders."""
+    sql = fp.project_sql()
+    assert sql.strip(), "project_sql returned empty"
+    assert "{" not in sql, f"unresolved placeholder in: {sql[:200]}"
+    # Every registered feature appears as a column alias
+    for formula in fp.FEATURES:
+        assert f" AS {formula.name}" in sql, f"missing column alias for {formula.name}"
