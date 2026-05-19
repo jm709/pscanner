@@ -128,7 +128,17 @@ class GateModelDetector(TradeDrivenDetector):
         mis-aligns every prediction.
         """
         levels = self._encoder.levels
-        excluded = {*CARRIER_COLS, *LEAKAGE_COLS, "label_won"}
+        # market_category and market_categories are FeatureRow fields used by
+        # the gate-intersection check upstream but are not columns in
+        # training_examples (#122 — the 9 cat_* indicators carry the signal).
+        # market_categories is also a tuple, which numpy can't cast to float32.
+        excluded = {
+            *CARRIER_COLS,
+            *LEAKAGE_COLS,
+            "label_won",
+            "market_category",
+            "market_categories",
+        }
         non_cat = [f.name for f in dataclasses.fields(FeatureRow) if f.name not in levels]
         indicators = [f"{col}__{lvl}" for col, lvls in levels.items() for lvl in lvls]
         return tuple(c for c in [*non_cat, *indicators] if c not in excluded)
