@@ -95,9 +95,7 @@ def _run_build_features(db_path: Path, engine: str, duckdb_memory: str) -> None:
     subprocess.run(cmd, check=True)  # noqa: S603
 
 
-def _get_row_diff(
-    p: dict[str, object], d: dict[str, object]
-) -> list[tuple[str, object, object]]:
+def _get_row_diff(p: dict[str, object], d: dict[str, object]) -> list[tuple[str, object, object]]:
     """Find columns where two rows diverge."""
     diff = []
     for col in sorted(p.keys() | d.keys()):
@@ -123,9 +121,7 @@ def _print_row_example(
         )
 
 
-def _compare_rows(
-    py_db: Path, duck_db: Path, sample_size: int
-) -> int:
+def _compare_rows(py_db: Path, duck_db: Path, sample_size: int) -> int:
     """Compare rows between two DBs, return count of divergences."""
     divergences = 0
     examples_shown = 0
@@ -176,8 +172,7 @@ def main() -> int:
         _run_build_features(py_db, "python", "")
 
         print(  # noqa: T201
-            f"[3/4] Running build-features --engine duckdb "
-            f"(memory={args.duckdb_memory}) ..."
+            f"[3/4] Running build-features --engine duckdb (memory={args.duckdb_memory}) ..."
         )
         _run_build_features(duck_db, "duckdb", args.duckdb_memory)
 
@@ -188,8 +183,7 @@ def main() -> int:
 
         if divergences:
             print(  # noqa: T201
-                f"\nRESULT: {divergences} diverging rows out of "
-                f"~{args.sample_size} sampled."
+                f"\nRESULT: {divergences} diverging rows out of ~{args.sample_size} sampled."
             )
             return 1
         print(  # noqa: T201
