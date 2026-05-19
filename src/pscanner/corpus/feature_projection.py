@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from pscanner.corpus.features import (
+    FeatureRow,
     MarketMetadata,
     MarketState,
     Trade,
@@ -150,3 +151,25 @@ def render_sql_fragment(template: str, bindings: Mapping[str, str] = SQL_BINDING
         end = rendered.index("}", start)
         raise KeyError(f"feature_projection: unbound SQL placeholder {rendered[start : end + 1]!r}")
     return rendered
+
+
+# The canonical registry. Order matches FeatureRow field declaration order so
+# project_row can emit a tuple-positional FeatureRow construction below.
+FEATURES: tuple[FeatureFormula, ...] = ()
+
+
+def project_row(
+    *,
+    trade: Trade,
+    wallet: WalletState,
+    market: MarketState,
+    meta: MarketMetadata,
+) -> FeatureRow:
+    """Compute a FeatureRow from point-in-time state.
+
+    Walks ``FEATURES``, evaluates each formula's ``py`` against
+    ``FeatureInputs``, and packages the result into a FeatureRow.
+    """
+    inputs = FeatureInputs(wallet=wallet, market=market, meta=meta, trade=trade)
+    values = {formula.name: formula.py(inputs) for formula in FEATURES}
+    return FeatureRow(**values)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
