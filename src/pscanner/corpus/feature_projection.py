@@ -155,7 +155,88 @@ def render_sql_fragment(template: str, bindings: Mapping[str, str] = SQL_BINDING
 
 # The canonical registry. Order matches FeatureRow field declaration order so
 # project_row can emit a tuple-positional FeatureRow construction below.
-FEATURES: tuple[FeatureFormula, ...] = ()
+FEATURES: tuple[FeatureFormula, ...] = (
+    # ----- Passthrough wallet aggregates -----
+    FeatureFormula(
+        name="prior_trades_count", dtype="int", nullable=False,
+        py=lambda i: i.wallet.prior_trades_count,
+        sql="{w.prior_trades_count}",
+    ),
+    FeatureFormula(
+        name="prior_buys_count", dtype="int", nullable=False,
+        py=lambda i: i.wallet.prior_buys_count,
+        sql="{w.prior_buys_count}",
+    ),
+    FeatureFormula(
+        name="prior_resolved_buys", dtype="int", nullable=False,
+        py=lambda i: i.wallet.prior_resolved_buys,
+        sql="{w.prior_resolved_buys}",
+    ),
+    FeatureFormula(
+        name="prior_wins", dtype="int", nullable=False,
+        py=lambda i: i.wallet.prior_wins,
+        sql="{w.prior_wins}",
+    ),
+    FeatureFormula(
+        name="prior_losses", dtype="int", nullable=False,
+        py=lambda i: i.wallet.prior_losses,
+        sql="{w.prior_losses}",
+    ),
+    FeatureFormula(
+        name="prior_realized_pnl_usd", dtype="float", nullable=False,
+        py=lambda i: i.wallet.realized_pnl_usd,
+        sql="{w.realized_pnl_usd}",
+    ),
+    # prior_trades_30d: Python computes from recent_30d_trades deque;
+    # DuckDB stage 2 pre-computes the count as wa.prior_trades_30d_w.
+    FeatureFormula(
+        name="prior_trades_30d", dtype="int", nullable=False,
+        py=lambda i: sum(
+            1
+            for ts in i.wallet.recent_30d_trades
+            if ts >= i.trade.ts - RECENT_TRADES_WINDOW_DAYS * SECONDS_PER_DAY
+        ),
+        sql="{w.prior_trades_30d}",
+    ),
+    # ----- Trade-row passthroughs -----
+    FeatureFormula(
+        name="bet_size_usd", dtype="float", nullable=False,
+        py=lambda i: i.trade.notional_usd,
+        sql="{t.notional_usd}",
+    ),
+    FeatureFormula(
+        name="side", dtype="str", nullable=False,
+        py=lambda i: i.trade.outcome_side,
+        sql="{t.outcome_side}",
+    ),
+    FeatureFormula(
+        name="implied_prob_at_buy", dtype="float", nullable=False,
+        py=lambda i: i.trade.price,
+        sql="{t.price}",
+    ),
+    # ----- Market-state passthroughs -----
+    FeatureFormula(
+        name="market_volume_so_far_usd", dtype="float", nullable=False,
+        py=lambda i: i.market.volume_so_far_usd,
+        sql="COALESCE({m.volume_so_far_usd}, 0.0)",
+    ),
+    FeatureFormula(
+        name="market_unique_traders_so_far", dtype="int", nullable=False,
+        py=lambda i: i.market.unique_traders_count,
+        sql="CAST(COALESCE({m.unique_traders_count}, 0) AS INTEGER)",
+    ),
+    FeatureFormula(
+        name="last_trade_price", dtype="float", nullable=True,
+        py=lambda i: i.market.last_trade_price,
+        sql="{m.last_trade_price}",
+    ),
+    # ----- Market metadata passthroughs -----
+    FeatureFormula(
+        name="market_category", dtype="str", nullable=False,
+        py=lambda i: i.meta.category,
+        sql="{meta.category}",
+    ),
+)
 
 
 def project_row(
