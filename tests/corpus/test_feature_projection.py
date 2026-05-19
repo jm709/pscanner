@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from pathlib import Path
 
 import pytest
 
@@ -146,3 +147,37 @@ def test_project_sql_renders_all_features() -> None:
     # Every registered feature appears as a column alias
     for formula in fp.FEATURES:
         assert f" AS {formula.name}" in sql, f"missing column alias for {formula.name}"
+
+
+def test_project_sql_matches_snapshot() -> None:
+    """The emitted SQL matches the checked-in snapshot.
+
+    To intentionally update the snapshot, run:
+
+        uv run python -c "from pscanner.corpus.feature_projection \\
+            import project_sql; print(project_sql())" \\
+            > tests/corpus/feature_projection_sql.snapshot
+
+    Then re-review the file before committing.
+    """
+    snapshot_path = Path(__file__).parent / "feature_projection_sql.snapshot"
+    expected = snapshot_path.read_text().rstrip()
+    actual = fp.project_sql().rstrip()
+    assert actual == expected, (
+        "project_sql() drifted from snapshot. "
+        "If intentional, regenerate the snapshot as documented in the test."
+    )
+
+
+def test_features_match_feature_row() -> None:
+    """FEATURES and FeatureRow expose the same column names."""
+    registry_names = {f.name for f in fp.FEATURES}
+    fr_names = {f.name for f in dataclasses.fields(FeatureRow)}
+    extra_in_registry = registry_names - fr_names
+    extra_in_fr = fr_names - registry_names
+    assert not extra_in_registry, (
+        f"FEATURES has names not in FeatureRow: {sorted(extra_in_registry)}"
+    )
+    assert not extra_in_fr, (
+        f"FeatureRow has fields not in FEATURES: {sorted(extra_in_fr)}"
+    )
