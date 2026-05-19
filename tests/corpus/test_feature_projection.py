@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 
+import pytest
+
 from pscanner.corpus import feature_projection as fp
 from pscanner.corpus.features import (
     MarketMetadata,
@@ -70,10 +72,34 @@ def test_feature_inputs_holds_state() -> None:
     inputs = fp.FeatureInputs(
         wallet=empty_wallet_state(first_seen_ts=trade.ts),
         market=empty_market_state(market_age_start_ts=trade.ts),
-        meta=MarketMetadata(
-            condition_id="c", category="sports", closed_at=0, opened_at=0
-        ),
+        meta=MarketMetadata(condition_id="c", category="sports", closed_at=0, opened_at=0),
         trade=trade,
     )
     assert inputs.trade.tx_hash == "t"
     assert inputs.wallet.first_seen_ts == trade.ts
+
+
+def test_render_sql_fragment_substitutes_known_placeholder() -> None:
+    """render_sql_fragment swaps {scope.field} with the bound column ref."""
+    template = "{w.prior_wins} > 0"
+    rendered = fp.render_sql_fragment(template)
+    assert rendered == "wa.prior_wins_w > 0"
+
+
+def test_render_sql_fragment_raises_on_unbound_placeholder() -> None:
+    """An unbound placeholder raises KeyError, not silently leaks braces."""
+    with pytest.raises(KeyError, match="bogus"):
+        fp.render_sql_fragment("{w.bogus_field} > 0")
+
+
+def test_render_sql_fragment_passes_through_literal_braces_when_resolved() -> None:
+    """All placeholders in a real template resolve."""
+    template = (
+        "CASE WHEN {w.prior_resolved_buys} > 0 "
+        "THEN CAST({w.prior_wins} AS DOUBLE) / {w.prior_resolved_buys} "
+        "ELSE NULL END"
+    )
+    rendered = fp.render_sql_fragment(template)
+    assert "{" not in rendered
+    assert "wa.prior_wins_w" in rendered
+    assert "wa.prior_resolved_buys_w" in rendered

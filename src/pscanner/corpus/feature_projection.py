@@ -9,7 +9,7 @@ holds the canonical definitions and is consumed by all three.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -81,3 +81,72 @@ class FeatureFormula:
     py: Callable[[FeatureInputs], object]
     sql: str
     docs: str = ""
+
+
+# Maps {scope.field} placeholder keys to the SQL column references used by
+# pscanner.corpus._duckdb_engine._final_join_to_v2. The names on the SQL
+# side are the column aliases that wallet_aggs (wa), market_aggs (ma), and
+# wallet_cat_summary (wcs) expose at the final-join stage.
+#
+# Key naming: "<scope>.<feature-py-attr>". The same logical field can have
+# a different name on each engine (e.g. WalletState.cumulative_buy_count
+# == wallet_aggs.bet_size_count_w by construction); the binding hides
+# that asymmetry.
+SQL_BINDINGS: Mapping[str, str] = {
+    # WalletState fields
+    "w.prior_trades_count": "wa.prior_trades_count_w",
+    "w.prior_buys_count": "wa.prior_buys_count_w",
+    "w.prior_resolved_buys": "wa.prior_resolved_buys_w",
+    "w.prior_wins": "wa.prior_wins_w",
+    "w.prior_losses": "wa.prior_losses_w",
+    "w.cumulative_buy_price_sum": "wa.cum_buy_price_sum_w",
+    # WalletState.cumulative_buy_count tracks the same count as bet_size_count
+    # by construction; the SQL side uses the bet_size_count_w column for both.
+    "w.cumulative_buy_count": "wa.bet_size_count_w",
+    "w.bet_size_sum": "wa.bet_size_sum_w",
+    "w.bet_size_count": "wa.bet_size_count_w",
+    "w.realized_pnl_usd": "wa.prior_realized_pnl_usd_w",
+    "w.last_trade_ts": "wa.last_trade_ts_w",
+    "w.first_seen_ts": "wa.first_seen_ts",
+    "w.prior_trades_30d": "wa.prior_trades_30d_w",
+    # MarketState fields
+    "m.volume_so_far_usd": "ma.market_volume_so_far_w",
+    "m.unique_traders_count": "ma.market_unique_traders_so_far_w",
+    "m.market_age_start_ts": "ma.market_first_prior_ts_w",
+    "m.last_trade_price": "ma.last_trade_price_w",
+    "m.price_volatility": "ma.price_volatility_w",
+    "m.price_count_20": "ma.price_count_20",
+    # MarketMetadata fields
+    "meta.category": "wa.category",
+    "meta.categories_json": "wa.categories_json",
+    "meta.closed_at": "wa.closed_at",
+    # Trade fields (the current row being projected)
+    "t.notional_usd": "wa.notional_usd",
+    "t.price": "wa.price",
+    "t.outcome_side": "wa.outcome_side",
+    "t.ts": "wa.event_ts",
+    # Already-computed columns (from wallet_cat_summary subquery)
+    "wcs.top_category": "wcs.top_category",
+    "wcs.category_diversity": "COALESCE(wcs.category_diversity, 0)",
+}
+
+
+def render_sql_fragment(template: str, bindings: Mapping[str, str] = SQL_BINDINGS) -> str:
+    """Resolve ``{scope.field}`` placeholders against ``bindings``.
+
+    Raises ``KeyError`` if the template references an unbound placeholder
+    (e.g. ``{w.bogus_field}``) — this catches typos at module-load time
+    instead of producing malformed SQL at query time.
+    """
+    rendered = template
+    for key, value in bindings.items():
+        rendered = rendered.replace("{" + key + "}", value)
+    # Belt-and-braces: if any "{...}" placeholder survives the loop, it
+    # didn't match a binding key. Surface that as a clear error rather
+    # than letting DuckDB choke on the literal braces.
+    if "{" in rendered:
+        # Find the first unresolved placeholder for the error message.
+        start = rendered.index("{")
+        end = rendered.index("}", start)
+        raise KeyError(f"feature_projection: unbound SQL placeholder {rendered[start : end + 1]!r}")
+    return rendered
