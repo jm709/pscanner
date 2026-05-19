@@ -14,7 +14,6 @@ No DB handles, no network, no clocks. All non-determinism enters via
 from __future__ import annotations
 
 import heapq
-import statistics
 from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import Protocol
@@ -367,103 +366,21 @@ _HIGH_QUALITY_WIN_RATE_THRESHOLD = 0.55
 def compute_features(trade: Trade, history: HistoryProvider) -> FeatureRow:
     """Compute the full feature row for a trade, point-in-time correct.
 
+    Thin wrapper around ``pscanner.corpus.feature_projection.project_row``;
+    the canonical formulas live in that module's ``FEATURES`` registry.
+
     Pure function: takes only ``trade`` and ``history``. All
     non-determinism enters via the provider.
     """
-    wallet = history.wallet_state(trade.wallet_address, as_of_ts=trade.ts)
-    market = history.market_state(trade.condition_id, as_of_ts=trade.ts)
-    meta = history.market_metadata(trade.condition_id)
+    # Local import to avoid a circular dependency:
+    # feature_projection imports FeatureRow + state types from features.py.
+    from pscanner.corpus.feature_projection import project_row  # noqa: PLC0415
 
-    win_rate = (
-        wallet.prior_wins / wallet.prior_resolved_buys if wallet.prior_resolved_buys > 0 else None
-    )
-    avg_prob = (
-        wallet.cumulative_buy_price_sum / wallet.cumulative_buy_count
-        if wallet.cumulative_buy_count > 0
-        else None
-    )
-    edge = win_rate - avg_prob if win_rate is not None and avg_prob is not None else None
-    avg_bet = wallet.bet_size_sum / wallet.bet_size_count if wallet.bet_size_count > 0 else None
-    # median_bet is no longer maintained — would require a bounded
-    # rolling window or a streaming estimator. v1 always emits None.
-    median_bet: float | None = None
-    rel_to_avg = trade.notional_usd / avg_bet if avg_bet is not None and avg_bet > 0 else None
-    confidence = min(1.0, wallet.prior_resolved_buys / _CONFIDENCE_N_MIN)
-    edge_conf = (edge * confidence) if edge is not None else 0.0
-    wr_conf = ((win_rate - 0.5) * confidence) if win_rate is not None else 0.0
-    is_high_quality = int(
-        wallet.prior_resolved_buys >= _CONFIDENCE_N_MIN
-        and win_rate is not None
-        and win_rate > _HIGH_QUALITY_WIN_RATE_THRESHOLD
-    )
-    rel_to_median = (
-        trade.notional_usd / median_bet if median_bet is not None and median_bet > 0 else 1.0
-    )
-    seconds_since_last = (
-        trade.ts - wallet.last_trade_ts if wallet.last_trade_ts is not None else None
-    )
-    wallet_age_days = max(0.0, (trade.ts - wallet.first_seen_ts) / _SECONDS_PER_DAY)
-    cutoff = trade.ts - 30 * _SECONDS_PER_DAY
-    recent_30d = sum(1 for ts in wallet.recent_30d_trades if ts >= cutoff)
-    top_cat = (
-        max(wallet.category_counts.items(), key=lambda kv: kv[1])[0]
-        if wallet.category_counts
-        else None
-    )
-    diversity = len(wallet.category_counts)
-
-    implied_prob = trade.price
-
-    volatility = (
-        statistics.pstdev(market.recent_prices)
-        if len(market.recent_prices) >= _MIN_PRICES_FOR_VOLATILITY
-        else None
-    )
-    time_to_resolution = meta.closed_at - trade.ts
-    category_set = set(meta.categories or (meta.category,))
-
-    return FeatureRow(
-        prior_trades_count=wallet.prior_trades_count,
-        prior_buys_count=wallet.prior_buys_count,
-        prior_resolved_buys=wallet.prior_resolved_buys,
-        prior_wins=wallet.prior_wins,
-        prior_losses=wallet.prior_losses,
-        win_rate=win_rate,
-        avg_implied_prob_paid=avg_prob,
-        realized_edge_pp=edge,
-        prior_realized_pnl_usd=wallet.realized_pnl_usd,
-        avg_bet_size_usd=avg_bet,
-        median_bet_size_usd=median_bet,
-        wallet_age_days=wallet_age_days,
-        seconds_since_last_trade=seconds_since_last,
-        prior_trades_30d=recent_30d,
-        top_category=top_cat,
-        category_diversity=diversity,
-        bet_size_usd=trade.notional_usd,
-        bet_size_rel_to_avg=rel_to_avg,
-        edge_confidence_weighted=edge_conf,
-        win_rate_confidence_weighted=wr_conf,
-        is_high_quality_wallet=is_high_quality,
-        bet_size_relative_to_history=rel_to_median,
-        side=trade.outcome_side,
-        implied_prob_at_buy=implied_prob,
-        market_category=meta.category,
-        market_categories=meta.categories or (meta.category,),
-        cat_sports=int("sports" in category_set),
-        cat_esports=int("esports" in category_set),
-        cat_thesis=int("thesis" in category_set),
-        cat_macro=int("macro" in category_set),
-        cat_elections=int("elections" in category_set),
-        cat_crypto=int("crypto" in category_set),
-        cat_geopolitics=int("geopolitics" in category_set),
-        cat_tech=int("tech" in category_set),
-        cat_culture=int("culture" in category_set),
-        market_volume_so_far_usd=market.volume_so_far_usd,
-        market_unique_traders_so_far=market.unique_traders_count,
-        market_age_seconds=trade.ts - market.market_age_start_ts,
-        time_to_resolution_seconds=time_to_resolution,
-        last_trade_price=market.last_trade_price,
-        price_volatility_recent=volatility,
+    return project_row(
+        trade=trade,
+        wallet=history.wallet_state(trade.wallet_address, as_of_ts=trade.ts),
+        market=history.market_state(trade.condition_id, as_of_ts=trade.ts),
+        meta=history.market_metadata(trade.condition_id),
     )
 
 
