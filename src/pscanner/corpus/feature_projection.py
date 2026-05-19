@@ -310,6 +310,63 @@ FEATURES: tuple[FeatureFormula, ...] = (
             "ELSE NULL END"
         ),
     ),
+    # ----- Wallet-quality interaction features (#44) -----
+    FeatureFormula(
+        name="edge_confidence_weighted", dtype="float", nullable=False,
+        py=lambda i: (
+            (
+                (i.wallet.prior_wins / i.wallet.prior_resolved_buys)
+                - (i.wallet.cumulative_buy_price_sum / i.wallet.cumulative_buy_count)
+            )
+            * min(1.0, i.wallet.prior_resolved_buys / CONFIDENCE_N_MIN)
+            if i.wallet.prior_resolved_buys > 0 and i.wallet.cumulative_buy_count > 0
+            else 0.0
+        ),
+        sql=(
+            "CASE WHEN {w.prior_resolved_buys} > 0 AND {w.bet_size_count} > 0 "
+            "THEN ((CAST({w.prior_wins} AS DOUBLE) / {w.prior_resolved_buys}) "
+            "- ({w.cumulative_buy_price_sum} / {w.bet_size_count})) "
+            f"* LEAST(1.0, CAST({{w.prior_resolved_buys}} AS DOUBLE) / {CONFIDENCE_N_MIN}.0) "
+            "ELSE 0.0 END"
+        ),
+    ),
+    FeatureFormula(
+        name="win_rate_confidence_weighted", dtype="float", nullable=False,
+        py=lambda i: (
+            ((i.wallet.prior_wins / i.wallet.prior_resolved_buys) - 0.5)
+            * min(1.0, i.wallet.prior_resolved_buys / CONFIDENCE_N_MIN)
+            if i.wallet.prior_resolved_buys > 0
+            else 0.0
+        ),
+        sql=(
+            "CASE WHEN {w.prior_resolved_buys} > 0 "
+            "THEN ((CAST({w.prior_wins} AS DOUBLE) / {w.prior_resolved_buys}) - 0.5) "
+            f"* LEAST(1.0, CAST({{w.prior_resolved_buys}} AS DOUBLE) / {CONFIDENCE_N_MIN}.0) "
+            "ELSE 0.0 END"
+        ),
+    ),
+    FeatureFormula(
+        name="is_high_quality_wallet", dtype="int", nullable=False,
+        py=lambda i: int(
+            i.wallet.prior_resolved_buys >= CONFIDENCE_N_MIN
+            and i.wallet.prior_resolved_buys > 0
+            and (i.wallet.prior_wins / i.wallet.prior_resolved_buys)
+            > HIGH_QUALITY_WIN_RATE_THRESHOLD
+        ),
+        sql=(
+            f"CASE WHEN {{w.prior_resolved_buys}} >= {CONFIDENCE_N_MIN} "
+            "AND (CAST({w.prior_wins} AS DOUBLE) "
+            f"/ NULLIF({{w.prior_resolved_buys}}, 0)) > {HIGH_QUALITY_WIN_RATE_THRESHOLD} "
+            "THEN 1 ELSE 0 END"
+        ),
+    ),
+    FeatureFormula(
+        name="bet_size_relative_to_history", dtype="float", nullable=False,
+        # v1: median_bet_size_usd is never maintained, so the ratio is
+        # always 1.0. See features.py:389 + 399-401.
+        py=lambda _i: 1.0,
+        sql="CAST(1.0 AS DOUBLE)",
+    ),
 )
 
 
