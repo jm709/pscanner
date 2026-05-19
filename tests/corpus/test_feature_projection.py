@@ -123,9 +123,7 @@ def test_project_row_matches_compute_features(
     expected: FeatureRow = compute_features(trade, streaming_provider)
     actual: FeatureRow = fp.project_row(
         trade=trade,
-        wallet=streaming_provider.wallet_state(
-            trade.wallet_address, as_of_ts=trade.ts
-        ),
+        wallet=streaming_provider.wallet_state(trade.wallet_address, as_of_ts=trade.ts),
         market=streaming_provider.market_state(trade.condition_id, as_of_ts=trade.ts),
         meta=streaming_provider.market_metadata(trade.condition_id),
     )
@@ -144,8 +142,10 @@ def test_project_sql_renders_all_features() -> None:
     sql = fp.project_sql()
     assert sql.strip(), "project_sql returned empty"
     assert "{" not in sql, f"unresolved placeholder in: {sql[:200]}"
-    # Every registered feature appears as a column alias
+    # Every projected feature appears as a column alias (skip compute-only)
     for formula in fp.FEATURES:
+        if not formula.project_to_sql:
+            continue
         assert f" AS {formula.name}" in sql, f"missing column alias for {formula.name}"
 
 
@@ -178,6 +178,4 @@ def test_features_match_feature_row() -> None:
     assert not extra_in_registry, (
         f"FEATURES has names not in FeatureRow: {sorted(extra_in_registry)}"
     )
-    assert not extra_in_fr, (
-        f"FeatureRow has fields not in FEATURES: {sorted(extra_in_fr)}"
-    )
+    assert not extra_in_fr, f"FeatureRow has fields not in FEATURES: {sorted(extra_in_fr)}"

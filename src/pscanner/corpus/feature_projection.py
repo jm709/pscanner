@@ -82,6 +82,10 @@ class FeatureFormula:
     nullable: bool
     py: Callable[[FeatureInputs], object]
     sql: str
+    # If False, project_sql() skips this formula. Used for compute-only
+    # features (e.g. market_categories) that exist on FeatureRow as a
+    # transient input but are not persisted to training_examples_v2.
+    project_to_sql: bool = True
     docs: str = ""
 
 
@@ -520,6 +524,7 @@ FEATURES: tuple[FeatureFormula, ...] = (
         name="market_categories",
         dtype="tuple_str",
         nullable=False,
+        project_to_sql=False,
         py=lambda i: i.meta.categories if i.meta.categories else (i.meta.category,),
         sql=(
             "CASE "
@@ -541,6 +546,9 @@ FEATURES = FEATURES + tuple(_cat_indicator_formula(cat) for cat in KNOWN_CATEGOR
 def project_sql(*, bindings: Mapping[str, str] = SQL_BINDINGS) -> str:
     """Emit the SELECT-list column expressions for ``training_examples_v2``.
 
+    Skips formulas where ``project_to_sql=False`` (compute-only features
+    that exist on FeatureRow but aren't persisted to the SQLite schema).
+
     Returns a comma-separated string of ``<expression> AS <column_name>``
     lines, ready to splice into the ``_final_join_to_v2`` SELECT. The
     caller is responsible for the surrounding SELECT scaffolding
@@ -548,6 +556,8 @@ def project_sql(*, bindings: Mapping[str, str] = SQL_BINDINGS) -> str:
     """
     parts = []
     for formula in FEATURES:
+        if not formula.project_to_sql:
+            continue
         rendered = render_sql_fragment(formula.sql, bindings)
         parts.append(f"{rendered} AS {formula.name}")
     return ",\n    ".join(parts)
