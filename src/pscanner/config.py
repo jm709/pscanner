@@ -351,6 +351,15 @@ class GateModelMarketFilterConfig(_Section):
     min_volume_24h_usd: float = 100_000
     max_markets: int = 50
     poll_interval_seconds: int = 60
+    min_outcome_price: float = 0.1
+    """Lower bound on every outcome's last-known price. Markets where any
+    outcome trades below this are skipped — they are typically post-decision
+    coin-flip-tail markets where ``implied_prob_at_buy`` is already at the
+    ceiling and ``pred - implied`` can never clear ``min_edge_pct``.
+    """
+    max_outcome_price: float = 0.9
+    """Upper bound on every outcome's last-known price (symmetric to
+    ``min_outcome_price``)."""
 
 
 class SmartMoneyEvaluatorConfig(_Section):
