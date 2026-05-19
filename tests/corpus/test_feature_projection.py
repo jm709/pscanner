@@ -8,8 +8,10 @@ import pytest
 
 from pscanner.corpus import feature_projection as fp
 from pscanner.corpus.features import (
+    FeatureRow,
     MarketMetadata,
     Trade,
+    compute_features,
     empty_market_state,
     empty_wallet_state,
 )
@@ -103,3 +105,34 @@ def test_render_sql_fragment_passes_through_literal_braces_when_resolved() -> No
     assert "{" not in rendered
     assert "wa.prior_wins_w" in rendered
     assert "wa.prior_resolved_buys_w" in rendered
+
+
+def test_project_row_matches_compute_features(
+    trade_stream, metadata_for_stream, streaming_provider
+) -> None:
+    """project_row produces the same FeatureRow as compute_features.
+
+    This is the TDD harness for porting features. Initially expected to
+    fail (project_row not defined). Each formula added to FEATURES makes
+    one more field of this comparison pass.
+    """
+    # Pick a mid-stream trade so wallet + market state are non-empty
+    trade = trade_stream[40]
+
+    expected: FeatureRow = compute_features(trade, streaming_provider)
+    actual: FeatureRow = fp.project_row(
+        trade=trade,
+        wallet=streaming_provider.wallet_state(
+            trade.wallet_address, as_of_ts=trade.ts
+        ),
+        market=streaming_provider.market_state(trade.condition_id, as_of_ts=trade.ts),
+        meta=streaming_provider.market_metadata(trade.condition_id),
+    )
+
+    diffs = []
+    for field in dataclasses.fields(FeatureRow):
+        e = getattr(expected, field.name)
+        a = getattr(actual, field.name)
+        if e != a:
+            diffs.append(f"  {field.name}: expected={e!r} actual={a!r}")
+    assert not diffs, "feature divergence:\n" + "\n".join(diffs)
