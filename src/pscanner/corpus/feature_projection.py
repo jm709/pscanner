@@ -236,6 +236,80 @@ FEATURES: tuple[FeatureFormula, ...] = (
         py=lambda i: i.meta.category,
         sql="{meta.category}",
     ),
+    # ----- Nullable divisions (denominator == 0 → None) -----
+    FeatureFormula(
+        name="win_rate", dtype="float", nullable=True,
+        py=lambda i: (
+            i.wallet.prior_wins / i.wallet.prior_resolved_buys
+            if i.wallet.prior_resolved_buys > 0
+            else None
+        ),
+        sql=(
+            "CASE WHEN {w.prior_resolved_buys} > 0 "
+            "THEN CAST({w.prior_wins} AS DOUBLE) / {w.prior_resolved_buys} "
+            "ELSE NULL END"
+        ),
+    ),
+    FeatureFormula(
+        name="avg_implied_prob_paid", dtype="float", nullable=True,
+        py=lambda i: (
+            i.wallet.cumulative_buy_price_sum / i.wallet.cumulative_buy_count
+            if i.wallet.cumulative_buy_count > 0
+            else None
+        ),
+        sql=(
+            "CASE WHEN {w.bet_size_count} > 0 "
+            "THEN {w.cumulative_buy_price_sum} / {w.bet_size_count} "
+            "ELSE NULL END"
+        ),
+    ),
+    FeatureFormula(
+        name="realized_edge_pp", dtype="float", nullable=True,
+        py=lambda i: (
+            (i.wallet.prior_wins / i.wallet.prior_resolved_buys)
+            - (i.wallet.cumulative_buy_price_sum / i.wallet.cumulative_buy_count)
+            if i.wallet.prior_resolved_buys > 0 and i.wallet.cumulative_buy_count > 0
+            else None
+        ),
+        sql=(
+            "CASE WHEN {w.prior_resolved_buys} > 0 AND {w.bet_size_count} > 0 "
+            "THEN (CAST({w.prior_wins} AS DOUBLE) / {w.prior_resolved_buys}) "
+            "- ({w.cumulative_buy_price_sum} / {w.bet_size_count}) "
+            "ELSE NULL END"
+        ),
+    ),
+    FeatureFormula(
+        name="avg_bet_size_usd", dtype="float", nullable=True,
+        py=lambda i: (
+            i.wallet.bet_size_sum / i.wallet.bet_size_count
+            if i.wallet.bet_size_count > 0
+            else None
+        ),
+        sql=(
+            "CASE WHEN {w.bet_size_count} > 0 "
+            "THEN {w.bet_size_sum} / {w.bet_size_count} "
+            "ELSE NULL END"
+        ),
+    ),
+    FeatureFormula(
+        name="median_bet_size_usd", dtype="float", nullable=True,
+        # v1: not maintained — compute_features always emits None (features.py:389).
+        py=lambda _i: None,
+        sql="CAST(NULL AS DOUBLE)",
+    ),
+    FeatureFormula(
+        name="bet_size_rel_to_avg", dtype="float", nullable=True,
+        py=lambda i: (
+            i.trade.notional_usd / (i.wallet.bet_size_sum / i.wallet.bet_size_count)
+            if i.wallet.bet_size_count > 0 and i.wallet.bet_size_sum > 0
+            else None
+        ),
+        sql=(
+            "CASE WHEN {w.bet_size_count} > 0 AND {w.bet_size_sum} > 0 "
+            "THEN {t.notional_usd} / ({w.bet_size_sum} / {w.bet_size_count}) "
+            "ELSE NULL END"
+        ),
+    ),
 )
 
 
