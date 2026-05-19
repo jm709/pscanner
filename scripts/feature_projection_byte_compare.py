@@ -125,11 +125,21 @@ def _compare_rows(py_db: Path, duck_db: Path, sample_size: int) -> int:
     """Compare rows between two DBs, return count of divergences."""
     divergences = 0
     examples_shown = 0
+    # Defensive row-count check before per-row comparison. A divergence
+    # in row count is itself a parity failure, not just a column-level diff.
+    py_count = sum(1 for _ in _read_rows(py_db, sample_size))
+    duck_count = sum(1 for _ in _read_rows(duck_db, sample_size))
+    if py_count != duck_count:
+        print(  # noqa: T201
+            f"\nROW COUNT MISMATCH: python={py_count} duckdb={duck_count}",
+            file=sys.stderr,
+        )
+        return 1
     for i, (p, d) in enumerate(
         zip(
             _read_rows(py_db, sample_size),
             _read_rows(duck_db, sample_size),
-            strict=False,
+            strict=True,
         )
     ):
         row_diff = _get_row_diff(p, d)

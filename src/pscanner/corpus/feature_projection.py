@@ -188,8 +188,12 @@ def _cat_indicator_formula(category: str) -> FeatureFormula:
     )
 
 
-# The canonical registry. Order matches FeatureRow field declaration order so
-# project_row can emit a tuple-positional FeatureRow construction below.
+# The canonical registry. Order is intentional but not load-bearing —
+# project_row uses keyword construction (FeatureRow(**values)) so any
+# permutation produces the same FeatureRow. project_sql emits columns
+# in this order, which becomes the SELECT-list order in
+# _final_join_to_v2; the _copy_to_sqlite step then SELECTs by name, so
+# the column ordering doesn't have to match the SQLite schema either.
 FEATURES: tuple[FeatureFormula, ...] = (
     # ----- Passthrough wallet aggregates -----
     FeatureFormula(
