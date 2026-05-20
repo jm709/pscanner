@@ -84,6 +84,25 @@ def _compute_copy_direction(
     return "SKIP"
 
 
+def _build_where_clause(addrs: list[str], last_seen_ts: int) -> dict[str, Any]:
+    """Build the ``where:`` argument for ``orderFilledEvents``.
+
+    TheGraph rejects ``or`` mixed with same-level column filters, so the
+    timestamp predicate must be repeated inside each ``or`` branch.
+    ``timestamp_gte`` (not ``_gt``) plus a within-cycle tx_hash dedupe
+    in the pagination loop gives strict no-loss boundary behaviour.
+
+    Returns a dict ready to pass to :class:`SubgraphClient.query`.
+    """
+    ts_str = str(last_seen_ts)
+    return {
+        "or": [
+            {"timestamp_gte": ts_str, "maker_in": addrs},
+            {"timestamp_gte": ts_str, "taker_in": addrs},
+        ],
+    }
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=str, default="data/pscanner.sqlite3",

@@ -43,3 +43,24 @@ def test_compute_copy_direction(maker: str, taker: str, side: int, expected: str
     watchlist = {_WATCH}
     result = watch_subgraph_copy._compute_copy_direction(maker, taker, side, watchlist)
     assert result == expected
+
+
+def test_build_where_clause_emits_or_with_per_branch_timestamp() -> None:
+    addrs = ["0xaaa", "0xbbb"]
+    last_seen_ts = 1779225600
+    where = watch_subgraph_copy._build_where_clause(addrs, last_seen_ts)
+
+    # Top-level must NOT have timestamp_gte alongside `or` — TheGraph rejects that.
+    assert "timestamp_gte" not in where
+    assert "or" in where
+    branches = where["or"]
+    assert len(branches) == 2
+    # Each branch carries the timestamp filter and one of maker/taker filters.
+    maker_branches = [b for b in branches if "maker_in" in b]
+    taker_branches = [b for b in branches if "taker_in" in b]
+    assert len(maker_branches) == 1
+    assert len(taker_branches) == 1
+    assert maker_branches[0]["maker_in"] == addrs
+    assert maker_branches[0]["timestamp_gte"] == str(last_seen_ts)
+    assert taker_branches[0]["taker_in"] == addrs
+    assert taker_branches[0]["timestamp_gte"] == str(last_seen_ts)
