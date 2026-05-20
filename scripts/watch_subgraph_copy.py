@@ -32,7 +32,7 @@ import json
 import os  # noqa: F401 — used in Tasks 4-8
 import sqlite3  # noqa: F401 — used in Tasks 4-8
 import sys  # noqa: F401 — used in Tasks 4-8
-import time  # noqa: F401 — used in Tasks 4-8
+import time
 from pathlib import Path
 from typing import Any, Final
 
@@ -188,6 +188,37 @@ def _serialize_where_inline(where: dict[str, Any]) -> str:
             return "{" + inner + "}"
         raise TypeError(f"unsupported where value: {v!r}")
     return render(where)
+
+
+def _load_checkpoint(path: Path, since_hours_override: float | None) -> int:
+    """Return the timestamp to resume from.
+
+    ``--since-hours`` always wins. Otherwise read the checkpoint file;
+    if it's missing or corrupt, default to ``now()``.
+    """
+    if since_hours_override is not None:
+        return int(time.time() - 3600.0 * since_hours_override)
+    if not path.exists():
+        _LOG.info("subgraph_watch.checkpoint_missing", path=str(path))
+        return int(time.time())
+    try:
+        payload = json.loads(path.read_text())
+        return int(payload["last_seen_ts"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        _LOG.warning(
+            "subgraph_watch.checkpoint_corrupt",
+            path=str(path),
+            exc=str(exc),
+        )
+        return int(time.time())
+
+
+def _save_checkpoint(path: Path, last_seen_ts: int) -> None:
+    """Atomically write the checkpoint via tmp file + rename."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"last_seen_ts": int(last_seen_ts)}))
+    tmp.replace(path)
 
 
 def _parse_args() -> argparse.Namespace:
