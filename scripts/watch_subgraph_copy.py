@@ -33,15 +33,19 @@ import os  # noqa: F401 — used in Tasks 4-8
 import sqlite3  # noqa: F401 — used in Tasks 4-8
 import sys  # noqa: F401 — used in Tasks 4-8
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
 import structlog
 
 from pscanner.config import Config  # noqa: F401 — used in Tasks 4-8
+from pscanner.corpus.repos import AssetIndexRepo
 from pscanner.poly.data import DataClient  # noqa: F401 — used in Tasks 4-8
 from pscanner.poly.gamma import GammaClient  # noqa: F401 — used in Tasks 4-8
+from pscanner.poly.ids import AssetId, ConditionId
 from pscanner.poly.subgraph import SubgraphClient  # noqa: F401 — used in Tasks 4-8
+from pscanner.store.repo import MarketCacheRepo
 
 _LOG = structlog.get_logger(__name__)
 
@@ -219,6 +223,58 @@ def _save_checkpoint(path: Path, last_seen_ts: int) -> None:
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps({"last_seen_ts": int(last_seen_ts)}))
     tmp.replace(path)
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedToken:
+    condition_id: ConditionId
+    asset_id: AssetId
+    outcome_name: str
+    outcome_index: int
+
+
+def _resolve_token(
+    token_id: str,
+    asset_index: AssetIndexRepo,
+    market_cache: MarketCacheRepo,
+) -> _ResolvedToken | None:
+    """Resolve a subgraph ``tokenId`` to ``(condition_id, outcome_name, ...)``.
+
+    Returns ``None`` when neither the corpus ``asset_index`` table nor
+    the daemon's ``market_cache`` has the asset registered. Caller logs
+    ``subgraph_watch.tokenid_unresolved`` and skips the event.
+    """
+    entry = asset_index.get(token_id)
+    if entry is None:
+        _LOG.warning("subgraph_watch.tokenid_unresolved_asset_index", token_id=token_id)
+        return None
+    condition_id = ConditionId(entry.condition_id)
+    cached = market_cache.get_by_condition_id(condition_id)
+    if cached is None:
+        _LOG.warning(
+            "subgraph_watch.tokenid_unresolved_market_cache",
+            token_id=token_id,
+            condition_id=condition_id,
+        )
+        return None
+    # Find the asset_id's position in the cached market's parallel
+    # outcomes / asset_ids lists.
+    asset_id = AssetId(token_id)
+    try:
+        idx = cached.asset_ids.index(asset_id)
+    except ValueError:
+        _LOG.warning(
+            "subgraph_watch.tokenid_not_in_cache",
+            token_id=token_id,
+            condition_id=condition_id,
+        )
+        return None
+    return _ResolvedToken(
+        condition_id=condition_id,
+        asset_id=asset_id,
+        outcome_name=cached.outcomes[idx],
+        outcome_index=idx,
+    )
 
 
 def _parse_args() -> argparse.Namespace:
