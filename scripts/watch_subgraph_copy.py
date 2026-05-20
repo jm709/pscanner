@@ -22,16 +22,15 @@ Usage::
     uv run python scripts/watch_subgraph_copy.py --once --since-hours 1
 """
 
-# ruff: noqa: T201, RUF100  # T201: prints added in Tasks 4-8; RUF100: suppresses premature-unused warning
+# ruff: noqa: T201, RUF100  # T201: print used for operator feedback; RUF100: suppresses premature-unused warning
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
-import os  # noqa: F401 — used in Tasks 4-8
-import sqlite3  # noqa: F401 — used in Tasks 4-8
-import sys  # noqa: F401 — used in Tasks 4-8
+import os
+import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,12 +38,12 @@ from typing import Any, Final
 
 import structlog
 
-from pscanner.config import Config  # noqa: F401 — used in Tasks 4-8
+from pscanner.config import Config
 from pscanner.corpus.repos import AssetIndexRepo
-from pscanner.poly.data import DataClient  # noqa: F401 — used in Tasks 4-8
-from pscanner.poly.gamma import GammaClient  # noqa: F401 — used in Tasks 4-8
+from pscanner.poly.data import DataClient
+from pscanner.poly.gamma import GammaClient
 from pscanner.poly.ids import AssetId, ConditionId
-from pscanner.poly.subgraph import SubgraphClient  # noqa: F401 — used in Tasks 4-8
+from pscanner.poly.subgraph import SubgraphClient
 from pscanner.store.repo import MarketCacheRepo
 
 _LOG = structlog.get_logger(__name__)
@@ -307,9 +306,220 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+async def _run_one_cycle(
+    *,
+    subgraph_client: Any,
+    watchlist_repo: Any,
+    asset_index: AssetIndexRepo,
+    market_cache: MarketCacheRepo,
+    market_ticks: Any,
+    paper_trades: Any,
+    last_seen_ts: int,
+    bankroll: float,
+    position_fraction: float,
+    min_position_cost: float,
+) -> dict[str, Any]:
+    """Run a single poll cycle. Returns counts + new last_seen_ts."""
+    # WatchlistRepo exposes list_active() returning list[WatchlistEntry]; pull addresses.
+    entries = watchlist_repo.list_active()
+    addrs_raw = sorted({e.address for e in entries})
+    if not addrs_raw:
+        _LOG.warning("subgraph_watch.empty_watchlist")
+        return {
+            "events_seen": 0, "events_copied": 0, "events_skipped": 0,
+            "new_last_seen_ts": last_seen_ts,
+        }
+    addrs = [a.lower() for a in addrs_raw]
+    watchlist_set = set(addrs)
+
+    _LOG.info("subgraph_watch.poll_start", addrs=len(addrs), last_seen_ts=last_seen_ts)
+    events, indexer_ts = await _fetch_events_since(
+        subgraph_client, addrs=addrs, last_seen_ts=last_seen_ts,
+    )
+
+    if indexer_ts is not None:
+        lag = int(time.time()) - indexer_ts
+        if lag >= INDEXER_LAG_ERROR_SECONDS:
+            _LOG.error("subgraph_watch.indexer_lag", lag_seconds=lag)
+        elif lag >= INDEXER_LAG_WARN_SECONDS:
+            _LOG.warning("subgraph_watch.indexer_lag", lag_seconds=lag)
+
+    copied = 0
+    skipped = 0
+    new_last_seen_ts = last_seen_ts
+    for ev in events:
+        ev_ts = int(ev["timestamp"])
+        new_last_seen_ts = max(new_last_seen_ts, ev_ts)
+        try:
+            booked = _try_copy_event(
+                ev=ev,
+                watchlist_set=watchlist_set,
+                asset_index=asset_index,
+                market_cache=market_cache,
+                market_ticks=market_ticks,
+                paper_trades=paper_trades,
+                bankroll=bankroll,
+                position_fraction=position_fraction,
+                min_position_cost=min_position_cost,
+            )
+        except Exception:
+            _LOG.exception("subgraph_watch.copy_event_failed", tx=ev.get("transactionHash"))
+            skipped += 1
+            continue
+        if booked:
+            copied += 1
+        else:
+            skipped += 1
+
+    return {
+        "events_seen": len(events),
+        "events_copied": copied,
+        "events_skipped": skipped,
+        "new_last_seen_ts": new_last_seen_ts,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class _BookingParams:
+    source_wallet: str
+    resolved: _ResolvedToken
+    fill_price: float
+    cost: float
+    shares: float
+
+
+def _resolve_event_booking(
+    *,
+    ev: dict[str, Any],
+    watchlist_set: set[str],
+    asset_index: AssetIndexRepo,
+    market_cache: MarketCacheRepo,
+    market_ticks: Any,
+    bankroll: float,
+    position_fraction: float,
+    min_position_cost: float,
+) -> _BookingParams | None:
+    """Pre-flight: validate direction, resolve token, check price/size. Returns None to skip."""
+    from pscanner.strategies.paper_trader import lookup_fill_price  # local import  # noqa: PLC0415
+
+    maker = ev["maker"]["id"]
+    taker = ev["taker"]["id"]
+    side = int(ev["side"])
+    if _compute_copy_direction(maker, taker, side, watchlist_set) != "BUY":
+        return None
+
+    # Whose side is on the watchlist? Use that address as source_wallet.
+    if maker.lower() in watchlist_set:
+        source_wallet = maker
+    elif taker.lower() in watchlist_set:
+        source_wallet = taker
+    else:  # unreachable in practice; defensive for misclassified events
+        return None
+
+    resolved = _resolve_token(ev["tokenId"], asset_index, market_cache)
+    if resolved is None:
+        return None
+
+    fill_price = lookup_fill_price(
+        market_cache, market_ticks, resolved.condition_id, resolved.asset_id,
+    )
+    if fill_price is None:
+        _LOG.warning("subgraph_watch.no_fill_price",
+                     condition_id=resolved.condition_id, asset_id=resolved.asset_id)
+        return None
+
+    cost = bankroll * position_fraction
+    if cost < min_position_cost or not (0.0 < fill_price < 1.0):
+        _LOG.debug("subgraph_watch.size_or_price_invalid",
+                   cost=cost, min=min_position_cost, fill_price=fill_price)
+        return None
+
+    return _BookingParams(
+        source_wallet=source_wallet,
+        resolved=resolved,
+        fill_price=fill_price,
+        cost=cost,
+        shares=cost / fill_price,
+    )
+
+
+def _try_copy_event(
+    *,
+    ev: dict[str, Any],
+    watchlist_set: set[str],
+    asset_index: AssetIndexRepo,
+    market_cache: MarketCacheRepo,
+    market_ticks: Any,
+    paper_trades: Any,
+    bankroll: float,
+    position_fraction: float,
+    min_position_cost: float,
+) -> bool:
+    """Attempt to book a paper copy for one event. Returns True iff inserted."""
+    params = _resolve_event_booking(
+        ev=ev,
+        watchlist_set=watchlist_set,
+        asset_index=asset_index,
+        market_cache=market_cache,
+        market_ticks=market_ticks,
+        bankroll=bankroll,
+        position_fraction=position_fraction,
+        min_position_cost=min_position_cost,
+    )
+    if params is None:
+        return False
+
+    nav = paper_trades.compute_cost_basis_nav(starting_bankroll=bankroll)
+    alert_key = f"{ALERT_KEY_PREFIX}:{ev['transactionHash']}:{params.resolved.outcome_name}"
+    try:
+        paper_trades.insert_entry(
+            triggering_alert_key=alert_key,
+            triggering_alert_detector=DETECTOR_TAG,
+            rule_variant=None,
+            source_wallet=params.source_wallet,
+            condition_id=params.resolved.condition_id,
+            asset_id=params.resolved.asset_id,
+            outcome=params.resolved.outcome_name,
+            shares=params.shares,
+            fill_price=params.fill_price,
+            cost_usd=params.cost,
+            nav_after_usd=nav,
+            ts=int(ev["timestamp"]),
+        )
+    except sqlite3.IntegrityError:
+        _LOG.debug("subgraph_watch.duplicate_alert", alert_key=alert_key)
+        return False
+
+    _LOG.info(
+        "subgraph_watch.copy_inserted",
+        wallet=params.source_wallet,
+        condition_id=params.resolved.condition_id,
+        outcome=params.resolved.outcome_name,
+        fill_price=params.fill_price,
+        shares=round(params.shares, 4),
+        cost_usd=round(params.cost, 2),
+    )
+    cid_short = params.resolved.condition_id[:10]
+    print(
+        f"COPY {params.source_wallet[:14]}.. {params.resolved.outcome_name}"
+        f" @ {params.fill_price:.3f} shares={params.shares:.2f}"
+        f" cost=${params.cost:.2f} cid={cid_short}.."
+    )
+    return True
+
+
 async def main() -> int:
-    """Run the subgraph watcher poll loop."""
+    """Entry point: wire deps and run the poll loop until SIGINT."""
     args = _parse_args()
+    config = Config.load()
+
+    bankroll = args.bankroll_override or config.paper_trading.starting_bankroll_usd
+    position_fraction = (
+        args.position_fraction_override
+        or config.paper_trading.evaluators.gate_model.position_fraction
+    )
+    min_position_cost = config.paper_trading.min_position_cost_usd
+
     _LOG.info(
         "subgraph_watch.startup",
         db=args.db,
@@ -319,9 +529,86 @@ async def main() -> int:
         rpm=args.rpm,
         since_hours=args.since_hours,
         once=args.once,
+        bankroll=bankroll,
+        position_fraction=position_fraction,
+        min_position_cost=min_position_cost,
     )
-    # Full implementation lands in Tasks 4-8.
-    return 0
+
+    api_key = os.environ.get("GRAPH_API_KEY")
+    if not api_key:
+        _LOG.error("subgraph_watch.missing_graph_api_key")
+        return 2
+    subgraph_url = f"https://gateway.thegraph.com/api/{api_key}/subgraphs/id/{args.subgraph_id}"
+
+    # Daemon DB — read/write for paper_trades, read for watchlist/market_cache/ticks.
+    daemon_conn = sqlite3.connect(args.db)
+    daemon_conn.row_factory = sqlite3.Row
+    daemon_conn.execute("PRAGMA busy_timeout=5000")
+
+    # Corpus DB — read-only for asset_index.
+    corpus_uri = f"file:{args.corpus_db}?mode=ro"
+    corpus_conn = sqlite3.connect(corpus_uri, uri=True)
+    corpus_conn.row_factory = sqlite3.Row
+    corpus_conn.execute("PRAGMA busy_timeout=5000")
+
+    from pscanner.store.repo import (  # noqa: PLC0415
+        MarketTicksRepo,
+        PaperTradesRepo,
+        WatchlistRepo,
+    )
+
+    watchlist_repo = WatchlistRepo(daemon_conn)
+    market_cache = MarketCacheRepo(daemon_conn)
+    market_ticks = MarketTicksRepo(daemon_conn)
+    paper_trades = PaperTradesRepo(daemon_conn)
+    asset_index = AssetIndexRepo(corpus_conn)
+
+    subgraph_client = SubgraphClient(url=subgraph_url, rpm=args.rpm)
+    data_client = DataClient(rpm=50)
+    gamma_client = GammaClient(rpm=50)
+
+    checkpoint_path = Path(args.checkpoint)
+    last_seen_ts = _load_checkpoint(checkpoint_path, args.since_hours)
+    _LOG.info("subgraph_watch.checkpoint_loaded", last_seen_ts=last_seen_ts)
+
+    try:
+        while True:
+            cycle_start = time.time()
+            stats = await _run_one_cycle(
+                subgraph_client=subgraph_client,
+                watchlist_repo=watchlist_repo,
+                asset_index=asset_index,
+                market_cache=market_cache,
+                market_ticks=market_ticks,
+                paper_trades=paper_trades,
+                last_seen_ts=last_seen_ts,
+                bankroll=bankroll,
+                position_fraction=position_fraction,
+                min_position_cost=min_position_cost,
+            )
+            last_seen_ts = stats["new_last_seen_ts"]
+            _save_checkpoint(checkpoint_path, last_seen_ts)
+            _LOG.info(
+                "subgraph_watch.poll_done",
+                events_seen=stats["events_seen"],
+                events_copied=stats["events_copied"],
+                events_skipped=stats["events_skipped"],
+                wall_seconds=round(time.time() - cycle_start, 2),
+                new_last_seen_ts=last_seen_ts,
+            )
+            if args.once:
+                return 0
+            await asyncio.sleep(args.poll_interval_seconds)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        _LOG.info("subgraph_watch.shutdown")
+        _save_checkpoint(checkpoint_path, last_seen_ts)
+        return 0
+    finally:
+        await subgraph_client.aclose()
+        await data_client.aclose()
+        await gamma_client.aclose()
+        daemon_conn.close()
+        corpus_conn.close()
 
 
 if __name__ == "__main__":
