@@ -56,6 +56,34 @@ INDEXER_LAG_WARN_SECONDS: Final[int] = 60
 INDEXER_LAG_ERROR_SECONDS: Final[int] = 600
 
 
+def _compute_copy_direction(
+    maker: str,
+    taker: str,
+    side: int,
+    watchlist: set[str],
+) -> str:
+    """Return ``"BUY"`` iff the watchlist wallet's position in ``tokenId`` increases.
+
+    The subgraph's ``side`` field is the order's direction (0=BUY, 1=SELL).
+    Maker placed the resting order; taker hit it from the opposite side.
+    So:
+
+    - watchlist == maker AND side == 0 -> maker accumulates -> BUY
+    - watchlist == maker AND side == 1 -> maker reduces -> SKIP
+    - watchlist == taker AND side == 0 -> taker sold (hit a buy order) -> SKIP
+    - watchlist == taker AND side == 1 -> taker bought (hit a sell order) -> BUY
+
+    See the copy-direction table in the design spec for the full derivation.
+    """
+    maker_lower = maker.lower()
+    taker_lower = taker.lower()
+    if maker_lower in watchlist and side == 0:
+        return "BUY"
+    if taker_lower in watchlist and side == 1:
+        return "BUY"
+    return "SKIP"
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=str, default="data/pscanner.sqlite3",
