@@ -28,13 +28,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json  # noqa: F401 — used in Tasks 4-8
+import json
 import os  # noqa: F401 — used in Tasks 4-8
 import sqlite3  # noqa: F401 — used in Tasks 4-8
 import sys  # noqa: F401 — used in Tasks 4-8
 import time  # noqa: F401 — used in Tasks 4-8
 from pathlib import Path
-from typing import Any, Final  # noqa: F401 — Any used in Tasks 4-8
+from typing import Any, Final
 
 import structlog
 
@@ -101,6 +101,93 @@ def _build_where_clause(addrs: list[str], last_seen_ts: int) -> dict[str, Any]:
             {"timestamp_gte": ts_str, "taker_in": addrs},
         ],
     }
+
+
+_GRAPHQL_QUERY: Final[str] = f"""
+{{
+  orderFilledEvents(
+    where: $where
+    first: {PAGE_SIZE}
+    orderBy: timestamp
+    orderDirection: asc
+  ) {{
+    transactionHash
+    timestamp
+    maker {{ id }}
+    taker {{ id }}
+    market {{ id }}
+    tokenId
+    side
+    price
+    size
+  }}
+  _meta {{ block {{ number timestamp }} }}
+}}
+"""
+
+
+async def _fetch_events_since(
+    client: Any,
+    *,
+    addrs: list[str],
+    last_seen_ts: int,
+) -> tuple[list[dict[str, Any]], int | None]:
+    """Drain the subgraph for all events newer than ``last_seen_ts``.
+
+    Watermark pagination: each page advances ``ts`` to the most recent
+    event seen. Loop terminates when a page returns fewer than
+    ``PAGE_SIZE`` events. Within-cycle tx_hash dedupe catches boundary
+    events re-fetched by ``timestamp_gte``.
+
+    Returns the list of unique events (asc ts ordering) and the
+    indexer's ``_meta.block.timestamp`` from the last page (used by
+    the caller for indexing-lag detection).
+    """
+    events: list[dict[str, Any]] = []
+    seen_tx: set[str] = set()
+    ts = last_seen_ts
+    indexer_ts: int | None = None
+    while True:
+        where = _build_where_clause(addrs, ts)
+        # SubgraphClient.query takes (graphql, variables); we hand-emit the
+        # `where` clause as a GraphQL object literal inside the query body
+        # because The Graph rejects column filters mixed with `or` at the
+        # variables level and our simplest workaround is inline substitution.
+        graphql = _GRAPHQL_QUERY.replace("$where", _serialize_where_inline(where))
+        data = await client.query(graphql, {})
+        page = data.get("orderFilledEvents") or []
+        for e in page:
+            tx = e["transactionHash"]
+            if tx in seen_tx:
+                continue
+            seen_tx.add(tx)
+            events.append(e)
+        meta_block = (data.get("_meta") or {}).get("block") or {}
+        meta_ts_raw = meta_block.get("timestamp")
+        if meta_ts_raw is not None:
+            indexer_ts = int(meta_ts_raw)
+        if len(page) < PAGE_SIZE:
+            break
+        ts = max(int(e["timestamp"]) for e in page)
+    return events, indexer_ts
+
+
+def _serialize_where_inline(where: dict[str, Any]) -> str:
+    """Render ``where:`` as a GraphQL object literal (not JSON).
+
+    GraphQL object literals don't quote keys. We hand-emit a minimal
+    serializer instead of pulling in a full GraphQL client.
+    """
+    def render(v: Any) -> str:
+        if isinstance(v, str):
+            return json.dumps(v)
+        if isinstance(v, list):
+            return "[" + ",".join(render(x) for x in v) + "]"
+        if isinstance(v, dict):
+            inner = ",".join(f"{k}:{render(val)}" for k, val in v.items())
+            return "{" + inner + "}"
+        raise TypeError(f"unsupported where value: {v!r}")
+    return render(where)
 
 
 def _parse_args() -> argparse.Namespace:
