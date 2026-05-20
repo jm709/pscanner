@@ -388,7 +388,7 @@ class _BookingParams:
     shares: float
 
 
-def _resolve_event_booking(
+def _resolve_event_booking(  # noqa: PLR0911  # spec-required: each guard logs a distinct event key
     *,
     ev: dict[str, Any],
     watchlist_set: set[str],
@@ -429,9 +429,11 @@ def _resolve_event_booking(
         return None
 
     cost = bankroll * position_fraction
-    if cost < min_position_cost or not (0.0 < fill_price < 1.0):
-        _LOG.debug("subgraph_watch.size_or_price_invalid",
-                   cost=cost, min=min_position_cost, fill_price=fill_price)
+    if cost < min_position_cost:
+        _LOG.debug("subgraph_watch.size_too_small", cost=cost, min=min_position_cost)
+        return None
+    if not (0.0 < fill_price < 1.0):
+        _LOG.debug("subgraph_watch.bad_fill_price", fill_price=fill_price)
         return None
 
     return _BookingParams(
