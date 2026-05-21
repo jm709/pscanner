@@ -346,6 +346,38 @@ async def test_iter_events_omits_end_date_min_when_none() -> None:
         assert "end_date_min" not in call.kwargs["params"]
 
 
+async def test_list_markets_passes_clob_token_ids() -> None:
+    """``clob_token_ids`` (string) appears in the URL params when set."""
+    http = _mock_http_returning([])
+    client = GammaClient(http=http)
+
+    await client.list_markets(clob_token_ids="12345")  # noqa: S106 — not a password, it's a token filter id
+
+    http.get.assert_awaited_once_with(
+        "/markets",
+        params={
+            "active": "true",
+            "closed": "false",
+            "limit": 100,
+            "offset": 0,
+            "clob_token_ids": "12345",
+        },
+    )
+
+
+async def test_list_markets_omits_clob_token_ids_when_none() -> None:
+    """``clob_token_ids=None`` (the default) must not appear in the URL params."""
+    http = _mock_http_returning([])
+    client = GammaClient(http=http)
+
+    await client.list_markets(clob_token_ids=None)
+
+    http.get.assert_awaited_once_with(
+        "/markets",
+        params={"active": "true", "closed": "false", "limit": 100, "offset": 0},
+    )
+
+
 async def test_aclose_does_not_close_borrowed_http() -> None:
     http = _mock_http_returning([])
     client = GammaClient(http=http)

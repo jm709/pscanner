@@ -170,6 +170,7 @@ class GammaClient:
         closed: bool = False,
         limit: int = 100,
         offset: int = 0,
+        clob_token_ids: str | None = None,
     ) -> list[Market]:
         """Fetch one page of markets matching the filters.
 
@@ -178,16 +179,22 @@ class GammaClient:
             closed: Include closed markets.
             limit: Page size (server-capped).
             offset: Pagination offset.
+            clob_token_ids: Filter to markets containing this CTF token id
+                (decimal string). When ``None`` (default) no filter is sent.
+                Used by the just-in-time token resolver to look up a market
+                by one of its outcome tokens.
 
         Returns:
             A list of validated ``Market`` models (possibly empty).
         """
-        params = {
+        params: dict[str, Any] = {
             "active": _bool_param(active),
             "closed": _bool_param(closed),
             "limit": limit,
             "offset": offset,
         }
+        if clob_token_ids is not None:
+            params["clob_token_ids"] = clob_token_ids
         payload = await self._http.get("/markets", params=params)
         return _parse_list(payload, Market)
 
