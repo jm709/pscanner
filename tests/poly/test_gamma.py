@@ -20,6 +20,9 @@ from pscanner.poly.http import PolyHttpClient
 from pscanner.poly.models import Event, Market
 
 _FIXTURE_DIR = Path(__file__).parent.parent / "fixtures"
+_FAKE_CLOB_TOKEN_ID = (
+    "52361899659273746688310711154377414983286902715574343626305571157053514347311"  # noqa: S105
+)
 
 
 def _load_event_fixture() -> dict[str, Any]:
@@ -344,6 +347,38 @@ async def test_iter_events_omits_end_date_min_when_none() -> None:
     assert http.get.await_count == 2
     for call in http.get.await_args_list:
         assert "end_date_min" not in call.kwargs["params"]
+
+
+async def test_list_markets_passes_clob_token_ids() -> None:
+    """``clob_token_ids`` (string) appears in the URL params when set."""
+    http = _mock_http_returning([])
+    client = GammaClient(http=http)
+
+    await client.list_markets(clob_token_ids=_FAKE_CLOB_TOKEN_ID)
+
+    http.get.assert_awaited_once_with(
+        "/markets",
+        params={
+            "active": "true",
+            "closed": "false",
+            "limit": 100,
+            "offset": 0,
+            "clob_token_ids": _FAKE_CLOB_TOKEN_ID,
+        },
+    )
+
+
+async def test_list_markets_omits_clob_token_ids_when_none() -> None:
+    """``clob_token_ids=None`` (the default) must not appear in the URL params."""
+    http = _mock_http_returning([])
+    client = GammaClient(http=http)
+
+    await client.list_markets(clob_token_ids=None)
+
+    http.get.assert_awaited_once_with(
+        "/markets",
+        params={"active": "true", "closed": "false", "limit": 100, "offset": 0},
+    )
 
 
 async def test_aclose_does_not_close_borrowed_http() -> None:
