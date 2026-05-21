@@ -106,7 +106,7 @@ def _try_local(
 
 async def _fetch_market_from_gamma(token_id: AssetId, gamma: GammaClient) -> Market | None:
     """One-shot gamma fetch by ``clob_token_ids``. Returns the first match or None."""
-    matches = await gamma.list_markets(clob_token_ids=str(token_id), limit=5)
+    matches = await gamma.list_markets(clob_token_ids=token_id, limit=5)
     if not matches:
         return None
     # Take the first match. Gamma returns at most a handful of markets per

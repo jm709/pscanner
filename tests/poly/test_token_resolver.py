@@ -192,3 +192,77 @@ async def test_resolve_token_gamma_payload_missing_token_returns_none(
     assert asset_index.get(AssetId("2222")) is None
     # And the market itself is not persisted to market_cache.
     assert market_cache.get_by_condition_id(ConditionId(_CID)) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_token_asset_index_hit_market_cache_miss_falls_through_to_gamma(
+    corpus_conn: sqlite3.Connection, daemon_conn: sqlite3.Connection
+) -> None:
+    """asset_index hits but market_cache misses → gamma fallback runs."""
+    asset_index = AssetIndexRepo(corpus_conn)
+    asset_index.upsert(
+        AssetEntry(
+            asset_id=_TOKEN_NO,
+            condition_id=_CID,
+            outcome_side="NO",
+            outcome_index=1,
+        )
+    )
+    market_cache = MarketCacheRepo(daemon_conn)  # empty — cache miss
+    gamma_market = Market.model_validate(_gamma_market_payload())
+    gamma = _make_gamma_returning([gamma_market])
+
+    result = await resolve_token(
+        token_id=AssetId(_TOKEN_NO),
+        asset_index=asset_index,
+        market_cache=market_cache,
+        gamma=gamma,
+    )
+
+    assert result is not None
+    assert result.outcome_name == "Knicks"
+    gamma.list_markets.assert_awaited_once_with(clob_token_ids=_TOKEN_NO, limit=5)
+    # After fallback, market_cache now has the row.
+    cached = market_cache.get_by_condition_id(ConditionId(_CID))
+    assert cached is not None
+
+
+@pytest.mark.asyncio
+async def test_resolve_token_local_hit_but_token_absent_from_cached_asset_ids(
+    corpus_conn: sqlite3.Connection, daemon_conn: sqlite3.Connection
+) -> None:
+    """asset_index + market_cache both hit, but token not in cached.asset_ids → gamma fallback."""
+    asset_index = AssetIndexRepo(corpus_conn)
+    asset_index.upsert(
+        AssetEntry(
+            asset_id=_TOKEN_NO,
+            condition_id=_CID,
+            outcome_side="NO",
+            outcome_index=1,
+        )
+    )
+    market_cache = MarketCacheRepo(daemon_conn)
+    # Cache the market with a DIFFERENT clobTokenIds payload — simulates a
+    # stale cache row whose asset_ids list doesn't include the queried token.
+    stale_payload = _gamma_market_payload()
+    stale_payload["clobTokenIds"] = '["9999", "8888"]'
+    market_cache.upsert(Market.model_validate(stale_payload))
+    # Gamma returns the correct, current market.
+    correct_market = Market.model_validate(_gamma_market_payload())
+    gamma = _make_gamma_returning([correct_market])
+
+    result = await resolve_token(
+        token_id=AssetId(_TOKEN_NO),
+        asset_index=asset_index,
+        market_cache=market_cache,
+        gamma=gamma,
+    )
+
+    assert result is not None
+    assert result.outcome_name == "Knicks"
+    # Gamma was called (local lookup short-circuited on the missing token).
+    gamma.list_markets.assert_awaited_once_with(clob_token_ids=_TOKEN_NO, limit=5)
+    # Market_cache now reflects the correct (fresh) market.
+    cached = market_cache.get_by_condition_id(ConditionId(_CID))
+    assert cached is not None
+    assert AssetId(_TOKEN_NO) in cached.asset_ids
