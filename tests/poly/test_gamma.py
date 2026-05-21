@@ -20,6 +20,9 @@ from pscanner.poly.http import PolyHttpClient
 from pscanner.poly.models import Event, Market
 
 _FIXTURE_DIR = Path(__file__).parent.parent / "fixtures"
+_FAKE_CLOB_TOKEN_ID = (
+    "52361899659273746688310711154377414983286902715574343626305571157053514347311"  # noqa: S105
+)
 
 
 def _load_event_fixture() -> dict[str, Any]:
@@ -351,7 +354,7 @@ async def test_list_markets_passes_clob_token_ids() -> None:
     http = _mock_http_returning([])
     client = GammaClient(http=http)
 
-    await client.list_markets(clob_token_ids="12345")  # noqa: S106 — not a password, it's a token filter id
+    await client.list_markets(clob_token_ids=_FAKE_CLOB_TOKEN_ID)
 
     http.get.assert_awaited_once_with(
         "/markets",
@@ -360,7 +363,7 @@ async def test_list_markets_passes_clob_token_ids() -> None:
             "closed": "false",
             "limit": 100,
             "offset": 0,
-            "clob_token_ids": "12345",
+            "clob_token_ids": _FAKE_CLOB_TOKEN_ID,
         },
     )
 

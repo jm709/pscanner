@@ -181,8 +181,10 @@ class GammaClient:
             offset: Pagination offset.
             clob_token_ids: Filter to markets containing this CTF token id
                 (decimal string). When ``None`` (default) no filter is sent.
-                Used by the just-in-time token resolver to look up a market
-                by one of its outcome tokens.
+                Gamma's URL param is plural, but in practice this helper
+                passes one token id at a time — used by the just-in-time
+                token resolver to look up a market by one of its outcome
+                tokens.
 
         Returns:
             A list of validated ``Market`` models (possibly empty).
