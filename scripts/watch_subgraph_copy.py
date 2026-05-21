@@ -42,8 +42,9 @@ from pscanner.config import Config
 from pscanner.corpus.repos import AssetIndexRepo
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
-from pscanner.poly.ids import AssetId, ConditionId
+from pscanner.poly.ids import AssetId
 from pscanner.poly.subgraph import SubgraphClient
+from pscanner.poly.token_resolver import ResolvedToken, resolve_token
 from pscanner.store.repo import MarketCacheRepo
 
 _LOG = structlog.get_logger(__name__)
@@ -181,6 +182,7 @@ def _serialize_where_inline(where: dict[str, Any]) -> str:
     GraphQL object literals don't quote keys. We hand-emit a minimal
     serializer instead of pulling in a full GraphQL client.
     """
+
     def render(v: Any) -> str:
         if isinstance(v, str):
             return json.dumps(v)
@@ -190,6 +192,7 @@ def _serialize_where_inline(where: dict[str, Any]) -> str:
             inner = ",".join(f"{k}:{render(val)}" for k, val in v.items())
             return "{" + inner + "}"
         raise TypeError(f"unsupported where value: {v!r}")
+
     return render(where)
 
 
@@ -224,85 +227,62 @@ def _save_checkpoint(path: Path, last_seen_ts: int) -> None:
     tmp.replace(path)
 
 
-@dataclass(frozen=True, slots=True)
-class _ResolvedToken:
-    condition_id: ConditionId
-    asset_id: AssetId
-    outcome_name: str
-    outcome_index: int
-
-
-def _resolve_token(
-    token_id: str,
-    asset_index: AssetIndexRepo,
-    market_cache: MarketCacheRepo,
-) -> _ResolvedToken | None:
-    """Resolve a subgraph ``tokenId`` to ``(condition_id, outcome_name, ...)``.
-
-    Returns ``None`` when neither the corpus ``asset_index`` table nor
-    the daemon's ``market_cache`` has the asset registered. Caller logs
-    ``subgraph_watch.tokenid_unresolved`` and skips the event.
-    """
-    entry = asset_index.get(token_id)
-    if entry is None:
-        _LOG.warning("subgraph_watch.tokenid_unresolved_asset_index", token_id=token_id)
-        return None
-    condition_id = ConditionId(entry.condition_id)
-    cached = market_cache.get_by_condition_id(condition_id)
-    if cached is None:
-        _LOG.warning(
-            "subgraph_watch.tokenid_unresolved_market_cache",
-            token_id=token_id,
-            condition_id=condition_id,
-        )
-        return None
-    # Find the asset_id's position in the cached market's parallel
-    # outcomes / asset_ids lists.
-    asset_id = AssetId(token_id)
-    try:
-        idx = cached.asset_ids.index(asset_id)
-    except ValueError:
-        _LOG.warning(
-            "subgraph_watch.tokenid_not_in_cache",
-            token_id=token_id,
-            condition_id=condition_id,
-        )
-        return None
-    return _ResolvedToken(
-        condition_id=condition_id,
-        asset_id=asset_id,
-        outcome_name=cached.outcomes[idx],
-        outcome_index=idx,
-    )
-
-
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--db", type=str, default="data/pscanner.sqlite3",
-                        help="Daemon SQLite path (default: data/pscanner.sqlite3)")
-    parser.add_argument("--corpus-db", type=str, default="data/corpus.sqlite3",
-                        help="Corpus SQLite path for AssetIndexRepo (default: data/corpus.sqlite3)")
-    parser.add_argument("--subgraph-id", type=str, default=SUBGRAPH_ID,
-                        help=f"Subgraph ID (default: {SUBGRAPH_ID})")
+    parser.add_argument(
+        "--db",
+        type=str,
+        default="data/pscanner.sqlite3",
+        help="Daemon SQLite path (default: data/pscanner.sqlite3)",
+    )
+    parser.add_argument(
+        "--corpus-db",
+        type=str,
+        default="data/corpus.sqlite3",
+        help="Corpus SQLite path for AssetIndexRepo (default: data/corpus.sqlite3)",
+    )
+    parser.add_argument(
+        "--subgraph-id", type=str, default=SUBGRAPH_ID, help=f"Subgraph ID (default: {SUBGRAPH_ID})"
+    )
     parser.add_argument(
         "--poll-interval-seconds",
         type=float,
         default=DEFAULT_POLL_INTERVAL_SECONDS,
         help=f"Seconds between poll cycles (default: {DEFAULT_POLL_INTERVAL_SECONDS})",
     )
-    parser.add_argument("--rpm", type=int, default=DEFAULT_RPM,
-                        help=f"Subgraph queries per minute (default: {DEFAULT_RPM})")
-    parser.add_argument("--since-hours", type=float, default=None,
-                        help="Optional cold-start backfill window in hours; "
-                             "overrides the checkpoint if set.")
-    parser.add_argument("--once", action="store_true",
-                        help="Single poll pass then exit (for testing).")
-    parser.add_argument("--position-fraction-override", type=float, default=None,
-                        help="Override paper-trader position_fraction (default: from config).")
-    parser.add_argument("--bankroll-override", type=float, default=None,
-                        help="Override paper-trader starting_bankroll_usd (default: from config).")
-    parser.add_argument("--checkpoint", type=str, default=str(DEFAULT_CHECKPOINT_PATH),
-                        help=f"Checkpoint JSON path (default: {DEFAULT_CHECKPOINT_PATH})")
+    parser.add_argument(
+        "--rpm",
+        type=int,
+        default=DEFAULT_RPM,
+        help=f"Subgraph queries per minute (default: {DEFAULT_RPM})",
+    )
+    parser.add_argument(
+        "--since-hours",
+        type=float,
+        default=None,
+        help="Optional cold-start backfill window in hours; overrides the checkpoint if set.",
+    )
+    parser.add_argument(
+        "--once", action="store_true", help="Single poll pass then exit (for testing)."
+    )
+    parser.add_argument(
+        "--position-fraction-override",
+        type=float,
+        default=None,
+        help="Override paper-trader position_fraction (default: from config).",
+    )
+    parser.add_argument(
+        "--bankroll-override",
+        type=float,
+        default=None,
+        help="Override paper-trader starting_bankroll_usd (default: from config).",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=str(DEFAULT_CHECKPOINT_PATH),
+        help=f"Checkpoint JSON path (default: {DEFAULT_CHECKPOINT_PATH})",
+    )
     return parser.parse_args()
 
 
@@ -314,6 +294,7 @@ async def _run_one_cycle(
     market_cache: MarketCacheRepo,
     market_ticks: Any,
     paper_trades: Any,
+    gamma: GammaClient,
     last_seen_ts: int,
     bankroll: float,
     position_fraction: float,
@@ -326,7 +307,9 @@ async def _run_one_cycle(
     if not addrs_raw:
         _LOG.warning("subgraph_watch.empty_watchlist")
         return {
-            "events_seen": 0, "events_copied": 0, "events_skipped": 0,
+            "events_seen": 0,
+            "events_copied": 0,
+            "events_skipped": 0,
             "new_last_seen_ts": last_seen_ts,
         }
     addrs = [a.lower() for a in addrs_raw]
@@ -334,7 +317,9 @@ async def _run_one_cycle(
 
     _LOG.info("subgraph_watch.poll_start", addrs=len(addrs), last_seen_ts=last_seen_ts)
     events, indexer_ts = await _fetch_events_since(
-        subgraph_client, addrs=addrs, last_seen_ts=last_seen_ts,
+        subgraph_client,
+        addrs=addrs,
+        last_seen_ts=last_seen_ts,
     )
 
     if indexer_ts is not None:
@@ -351,13 +336,14 @@ async def _run_one_cycle(
         ev_ts = int(ev["timestamp"])
         new_last_seen_ts = max(new_last_seen_ts, ev_ts)
         try:
-            booked = _try_copy_event(
+            booked = await _try_copy_event(
                 ev=ev,
                 watchlist_set=watchlist_set,
                 asset_index=asset_index,
                 market_cache=market_cache,
                 market_ticks=market_ticks,
                 paper_trades=paper_trades,
+                gamma=gamma,
                 bankroll=bankroll,
                 position_fraction=position_fraction,
                 min_position_cost=min_position_cost,
@@ -382,19 +368,20 @@ async def _run_one_cycle(
 @dataclass(frozen=True, slots=True)
 class _BookingParams:
     source_wallet: str
-    resolved: _ResolvedToken
+    resolved: ResolvedToken
     fill_price: float
     cost: float
     shares: float
 
 
-def _resolve_event_booking(  # noqa: PLR0911  # spec-required: each guard logs a distinct event key
+async def _resolve_event_booking(  # noqa: PLR0911  # spec-required: each guard logs a distinct event key
     *,
     ev: dict[str, Any],
     watchlist_set: set[str],
     asset_index: AssetIndexRepo,
     market_cache: MarketCacheRepo,
     market_ticks: Any,
+    gamma: GammaClient,
     bankroll: float,
     position_fraction: float,
     min_position_cost: float,
@@ -416,16 +403,27 @@ def _resolve_event_booking(  # noqa: PLR0911  # spec-required: each guard logs a
     else:  # unreachable in practice; defensive for misclassified events
         return None
 
-    resolved = _resolve_token(ev["tokenId"], asset_index, market_cache)
+    resolved = await resolve_token(
+        token_id=AssetId(ev["tokenId"]),
+        asset_index=asset_index,
+        market_cache=market_cache,
+        gamma=gamma,
+    )
     if resolved is None:
         return None
 
     fill_price = lookup_fill_price(
-        market_cache, market_ticks, resolved.condition_id, resolved.asset_id,
+        market_cache,
+        market_ticks,
+        resolved.condition_id,
+        resolved.asset_id,
     )
     if fill_price is None:
-        _LOG.warning("subgraph_watch.no_fill_price",
-                     condition_id=resolved.condition_id, asset_id=resolved.asset_id)
+        _LOG.warning(
+            "subgraph_watch.no_fill_price",
+            condition_id=resolved.condition_id,
+            asset_id=resolved.asset_id,
+        )
         return None
 
     cost = bankroll * position_fraction
@@ -445,7 +443,7 @@ def _resolve_event_booking(  # noqa: PLR0911  # spec-required: each guard logs a
     )
 
 
-def _try_copy_event(
+async def _try_copy_event(
     *,
     ev: dict[str, Any],
     watchlist_set: set[str],
@@ -453,17 +451,19 @@ def _try_copy_event(
     market_cache: MarketCacheRepo,
     market_ticks: Any,
     paper_trades: Any,
+    gamma: GammaClient,
     bankroll: float,
     position_fraction: float,
     min_position_cost: float,
 ) -> bool:
     """Attempt to book a paper copy for one event. Returns True iff inserted."""
-    params = _resolve_event_booking(
+    params = await _resolve_event_booking(
         ev=ev,
         watchlist_set=watchlist_set,
         asset_index=asset_index,
         market_cache=market_cache,
         market_ticks=market_ticks,
+        gamma=gamma,
         bankroll=bankroll,
         position_fraction=position_fraction,
         min_position_cost=min_position_cost,
@@ -583,6 +583,7 @@ async def main() -> int:
                 market_cache=market_cache,
                 market_ticks=market_ticks,
                 paper_trades=paper_trades,
+                gamma=gamma_client,
                 last_seen_ts=last_seen_ts,
                 bankroll=bankroll,
                 position_fraction=position_fraction,
