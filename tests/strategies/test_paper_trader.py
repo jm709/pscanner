@@ -28,7 +28,7 @@ from pscanner.store.repo import (
     TrackedWalletsRepo,
 )
 from pscanner.strategies.evaluators import ParsedSignal, SmartMoneyEvaluator
-from pscanner.strategies.paper_trader import PaperTrader
+from pscanner.strategies.paper_trader import PaperTrader, _cached_outcome_price
 
 _NOW = 1700000000
 
@@ -386,7 +386,7 @@ async def test_paper_trader_skips_when_cached_price_out_of_range(
 def test_cached_outcome_price_unit_happy(tmp_db: sqlite3.Connection) -> None:
     """``_cached_outcome_price`` returns the parallel-indexed price."""
     cfg = PaperTradingConfig(enabled=True)
-    _, trader, cache, _wallets, _paper = _build_trader(tmp_db, cfg)
+    _, _trader, cache, _wallets, _paper = _build_trader(tmp_db, cfg)
     _cache_market(
         cache,
         outcomes=["Yes", "No"],
@@ -394,7 +394,8 @@ def test_cached_outcome_price_unit_happy(tmp_db: sqlite3.Connection) -> None:
         outcome_prices=[0.55, 0.45],
     )
 
-    price = trader._cached_outcome_price(
+    price = _cached_outcome_price(
+        cache,
         ConditionId("0xcond-1"),
         AssetId("asset-yes"),
     )
@@ -404,14 +405,15 @@ def test_cached_outcome_price_unit_happy(tmp_db: sqlite3.Connection) -> None:
 def test_cached_outcome_price_unit_unknown_asset(tmp_db: sqlite3.Connection) -> None:
     """Asset_id not in cached asset_ids returns None."""
     cfg = PaperTradingConfig(enabled=True)
-    _, trader, cache, _wallets, _paper = _build_trader(tmp_db, cfg)
+    _, _trader, cache, _wallets, _paper = _build_trader(tmp_db, cfg)
     _cache_market(
         cache,
         outcomes=["Yes", "No"],
         asset_ids=["asset-yes", "asset-no"],
     )
 
-    price = trader._cached_outcome_price(
+    price = _cached_outcome_price(
+        cache,
         ConditionId("0xcond-1"),
         AssetId("asset-nope"),
     )
@@ -421,9 +423,10 @@ def test_cached_outcome_price_unit_unknown_asset(tmp_db: sqlite3.Connection) -> 
 def test_cached_outcome_price_unit_missing_market(tmp_db: sqlite3.Connection) -> None:
     """No cached market for the condition id returns None."""
     cfg = PaperTradingConfig(enabled=True)
-    _, trader, _cache, _wallets, _paper = _build_trader(tmp_db, cfg)
+    _, _trader, cache, _wallets, _paper = _build_trader(tmp_db, cfg)
 
-    price = trader._cached_outcome_price(
+    price = _cached_outcome_price(
+        cache,
         ConditionId("0xcond-missing"),
         AssetId("asset-yes"),
     )
