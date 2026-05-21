@@ -280,6 +280,72 @@ async def test_get_market_by_slug_rejects_non_array_payload() -> None:
         await client.get_market_by_slug("test-slug")
 
 
+async def test_list_events_passes_end_date_min_as_iso_z() -> None:
+    """``end_date_min`` (unix int) is formatted as ISO 8601 with Z suffix."""
+    http = _mock_http_returning([])
+    client = GammaClient(http=http)
+
+    # 1_778_976_000 == 2026-05-17T00:00:00Z (midnight UTC).
+    await client.list_events(end_date_min=1_778_976_000)
+
+    http.get.assert_awaited_once_with(
+        "/events",
+        params={
+            "active": "true",
+            "closed": "false",
+            "limit": 100,
+            "offset": 0,
+            "end_date_min": "2026-05-17T00:00:00Z",
+        },
+    )
+
+
+async def test_list_events_omits_end_date_min_when_none() -> None:
+    """``end_date_min=None`` (the default) must not appear in the URL params."""
+    http = _mock_http_returning([])
+    client = GammaClient(http=http)
+
+    await client.list_events(end_date_min=None)
+
+    http.get.assert_awaited_once_with(
+        "/events",
+        params={"active": "true", "closed": "false", "limit": 100, "offset": 0},
+    )
+
+
+async def test_iter_events_forwards_end_date_min_to_every_page() -> None:
+    """``iter_events`` must pass ``end_date_min`` through to every ``list_events`` call."""
+    fixture = _load_event_fixture()
+    # Two pages so we verify the param is on BOTH list_events calls.
+    page1 = [fixture, fixture]
+    page2 = [fixture]  # short page → terminates after yielding
+    http = _mock_http_pages(page1, page2)
+    client = GammaClient(http=http)
+
+    collected = [
+        event async for event in client.iter_events(page_size=2, end_date_min=1_778_976_000)
+    ]
+
+    assert len(collected) == 3
+    assert http.get.await_count == 2
+    for call in http.get.await_args_list:
+        assert call.kwargs["params"]["end_date_min"] == "2026-05-17T00:00:00Z"
+
+
+async def test_iter_events_omits_end_date_min_when_none() -> None:
+    """``iter_events`` with default ``end_date_min=None`` must not inject the key."""
+    fixture = _load_event_fixture()
+    http = _mock_http_pages([fixture, fixture], [fixture])  # two pages
+    client = GammaClient(http=http)
+
+    collected = [event async for event in client.iter_events(page_size=2)]
+
+    assert len(collected) == 3
+    assert http.get.await_count == 2
+    for call in http.get.await_args_list:
+        assert "end_date_min" not in call.kwargs["params"]
+
+
 async def test_aclose_does_not_close_borrowed_http() -> None:
     http = _mock_http_returning([])
     client = GammaClient(http=http)

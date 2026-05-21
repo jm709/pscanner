@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 
 from pscanner.poly.http import PolyHttpClient
@@ -14,6 +15,15 @@ _BASE_URL = "https://gamma-api.polymarket.com"
 def _bool_param(value: bool) -> str:
     """Render a boolean for Polymarket's lower-case query-string convention."""
     return "true" if value else "false"
+
+
+def _format_end_date_min(unix_seconds: int) -> str:
+    """Render a unix timestamp as ISO 8601 with ``Z`` suffix (UTC, no microseconds).
+
+    Gamma's ``/events?end_date_min=`` accepts both ISO and unix; we use ISO
+    for readable URLs in logs and error messages.
+    """
+    return datetime.fromtimestamp(unix_seconds, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class GammaClient:
@@ -46,6 +56,7 @@ class GammaClient:
         closed: bool = False,
         limit: int = 100,
         offset: int = 0,
+        end_date_min: int | None = None,
     ) -> list[Event]:
         """Fetch one page of events matching the filters.
 
@@ -54,16 +65,22 @@ class GammaClient:
             closed: Include closed events.
             limit: Page size (server-capped at 500).
             offset: Pagination offset.
+            end_date_min: Filter to events whose ``endDate >= end_date_min``
+                (unix seconds). When ``None`` (default) no filter is sent.
+                Used by the corpus refresh path to skip events already
+                enumerated on prior runs.
 
         Returns:
             A list of validated ``Event`` models (possibly empty).
         """
-        params = {
+        params: dict[str, Any] = {
             "active": _bool_param(active),
             "closed": _bool_param(closed),
             "limit": limit,
             "offset": offset,
         }
+        if end_date_min is not None:
+            params["end_date_min"] = _format_end_date_min(end_date_min)
         payload = await self._http.get("/events", params=params)
         return _parse_list(payload, Event)
 
@@ -73,6 +90,7 @@ class GammaClient:
         active: bool = True,
         closed: bool = False,
         page_size: int = 100,
+        end_date_min: int | None = None,
     ) -> AsyncIterator[Event]:
         """Async-iterate every event matching the filters across all pages.
 
@@ -80,6 +98,8 @@ class GammaClient:
             active: Restrict to currently-active events.
             closed: Include closed events.
             page_size: Page size sent to the server per request.
+            end_date_min: Filter to events whose ``endDate >= end_date_min``
+                (unix seconds). Forwarded to every ``list_events`` page call.
 
         Yields:
             Each ``Event`` exactly once until the catalogue is exhausted.
@@ -91,6 +111,7 @@ class GammaClient:
                 closed=closed,
                 limit=page_size,
                 offset=offset,
+                end_date_min=end_date_min,
             )
             if not page:
                 return

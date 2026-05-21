@@ -103,16 +103,22 @@ async def enumerate_closed_markets(
         gamma: Gamma client with ``iter_events``.
         repo: Markets repo to insert into.
         now_ts: Unix seconds at enumeration time (recorded on rows).
-        since_ts: Reserved for future use; currently ignored. Kept in the
-            signature so refresh and backfill share an interface.
+        since_ts: Lower bound (unix seconds) on event ``endDate``.
+            Forwarded to gamma as ``end_date_min`` so the server elides
+            already-seen events. ``None`` (fresh corpus or reset state)
+            disables the filter and walks the full closed catalog.
 
     Returns:
         Count of markets actually inserted (excluding duplicates).
     """
-    del since_ts  # not yet used; gamma /events doesn't expose a precise close ts
     inserted = 0
     try:
-        async for event in gamma.iter_events(active=False, closed=True, page_size=100):
+        async for event in gamma.iter_events(
+            active=False,
+            closed=True,
+            page_size=100,
+            end_date_min=since_ts,
+        ):
             for corpus in _qualifying_markets(event, now_ts):
                 inserted += repo.insert_pending(corpus)
     except httpx.HTTPStatusError as exc:
@@ -124,5 +130,5 @@ async def enumerate_closed_markets(
             status=status,
             url=str(exc.request.url),
         )
-    _log.info("corpus.enumerated", inserted=inserted)
+    _log.info("corpus.enumerated", inserted=inserted, since_ts=since_ts)
     return inserted
