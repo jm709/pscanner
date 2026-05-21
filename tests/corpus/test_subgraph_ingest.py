@@ -300,12 +300,13 @@ def _row(
     maker_addr: str = "0x" + "11" * 20,
     taker_addr: str = "0x" + "22" * 20,
     fee: str = "0",
+    timestamp: str = "1700000000",
 ) -> dict[str, Any]:
     """Build a new-schema OrderFilledEvent row for tests."""
     return {
         "id": row_id,
         "transactionHash": tx_hash or ("0x" + "ab" * 32),
-        "timestamp": "1700000000",
+        "timestamp": timestamp,
         "orderHash": "0x" + "ee" * 32,
         "maker": {"id": maker_addr},
         "taker": {"id": taker_addr},
@@ -405,28 +406,24 @@ async def test_run_subgraph_backfill_processes_pending_market(
 
     def _route(request: httpx.Request) -> httpx.Response:
         body = _json.loads(request.read())
-        side = "maker" if "makerAssetId_in" in body["query"] else "taker"
         cursor = body["variables"]["cursor"]
-        if side == "maker" and cursor == "":
-            # SELL from maker POV: maker gives CTF (asset 111), taker gives USDC
+        if cursor == "":
+            # SELL from maker POV (side=1): maker gives CTF token 111, taker gives USDC.
             return httpx.Response(
                 200,
                 json={
                     "data": {
                         "orderFilledEvents": [
-                            {
-                                "id": "0xtx1_0xord1",
-                                "transactionHash": "0x" + "ee" * 32,
-                                "timestamp": "1700001500",
-                                "orderHash": "0x" + "ab" * 32,
-                                "maker": "0x" + "ff" * 20,
-                                "taker": "0x" + "22" * 20,
-                                "makerAssetId": "111",
-                                "takerAssetId": "0",
-                                "makerAmountFilled": "40000000",
-                                "takerAmountFilled": "20000000",
-                                "fee": "0",
-                            }
+                            _row(
+                                side="1",
+                                token_id=111,
+                                maker_amt=40_000_000,
+                                taker_amt=20_000_000,
+                                row_id="0xtx1_0xord1",
+                                tx_hash="0x" + "ee" * 32,
+                                maker_addr="0x" + "ff" * 20,
+                                timestamp="1700001500",
+                            )
                         ]
                     }
                 },
