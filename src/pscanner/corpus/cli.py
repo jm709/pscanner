@@ -72,7 +72,7 @@ _DEFAULT_SUBGRAPH_PAGE_SIZE = 1000
 # Graph Explorer (https://thegraph.com/explorer) — the subgraph's title is
 # "Polymarket Orderbook" and both Exchange + NegRiskExchange contracts write
 # into the same OrderFilledEvent entity.
-_DEFAULT_SUBGRAPH_ID = "7fu2DWYK93ePfzB24c2wrP94S3x4LGHUrQxphhoEypyY"
+_DEFAULT_SUBGRAPH_ID = "B9mm21DKCex8ka4g8cteQU4NQqtviwmcTjQAYLbzQ1eR"
 _GATEWAY_URL_TEMPLATE = "https://gateway.thegraph.com/api/{api_key}/subgraphs/id/{subgraph_id}"
 
 

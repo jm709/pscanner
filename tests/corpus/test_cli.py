@@ -281,8 +281,8 @@ async def test_subgraph_backfill_missing_api_key_exits(
 
 
 def test_default_subgraph_id_matches_polymarket_orderbook() -> None:
-    """The pinned default must be the verified Polymarket Orderbook subgraph id."""
-    assert _DEFAULT_SUBGRAPH_ID == "7fu2DWYK93ePfzB24c2wrP94S3x4LGHUrQxphhoEypyY"
+    """The pinned default must be the current Polymarket Orderbook subgraph id."""
+    assert _DEFAULT_SUBGRAPH_ID == "B9mm21DKCex8ka4g8cteQU4NQqtviwmcTjQAYLbzQ1eR"
 
 
 def test_backfill_parser_accepts_platform_manifold() -> None:
