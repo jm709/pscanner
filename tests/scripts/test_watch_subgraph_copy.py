@@ -114,7 +114,9 @@ async def test_fetch_events_since_paginates_until_partial_page() -> None:
     fake = _FakeSubgraphClient([page1, page2, page3])
 
     events, indexer_ts = await watch_subgraph_copy._fetch_events_since(
-        fake, addrs=["0xaaa"], last_seen_ts=99,
+        fake,
+        addrs=["0xaaa"],
+        last_seen_ts=99,
     )
 
     # 3 pages queried.
