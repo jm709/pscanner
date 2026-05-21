@@ -302,6 +302,12 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
       traders_json TEXT NOT NULL DEFAULT '[]'
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS subgraph_watch_state (
+      key TEXT PRIMARY KEY,
+      last_seen_ts INTEGER NOT NULL
+    )
+    """,
 )
 
 _MIGRATIONS: tuple[str, ...] = (
