@@ -547,9 +547,9 @@ async def main() -> int:
     daemon_conn.row_factory = sqlite3.Row
     daemon_conn.execute("PRAGMA busy_timeout=5000")
 
-    # Corpus DB — read-only for asset_index.
-    corpus_uri = f"file:{args.corpus_db}?mode=ro"
-    corpus_conn = sqlite3.connect(corpus_uri, uri=True)
+    # Corpus DB — read/write so the token resolver can upsert asset_index on
+    # gamma fallback hits.
+    corpus_conn = sqlite3.connect(args.corpus_db)
     corpus_conn.row_factory = sqlite3.Row
     corpus_conn.execute("PRAGMA busy_timeout=5000")
 
