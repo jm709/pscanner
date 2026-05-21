@@ -104,14 +104,14 @@ def test_subgraph_row_to_event_parses_sell_side_row() -> None:
         "orderHash": "0x" + "ab" * 32,
         "maker": {"id": "0x" + "11" * 20},
         "taker": {"id": "0x" + "22" * 20},
-        "tokenId": "111",
+        "tokenId": str(2**255 + 42),  # production-scale CTF token id
         "side": "1",
         "makerAmountFilled": "40000000",
         "takerAmountFilled": "20000000",
         "fee": "0",
     }
     event = subgraph_row_to_event(row)
-    assert event.maker_asset_id == 111
+    assert event.maker_asset_id == 2**255 + 42  # side=1 → maker gives tokenId
     assert event.taker_asset_id == 0
     assert event.making == 40_000_000
     assert event.taking == 20_000_000
@@ -135,6 +135,8 @@ def test_subgraph_row_to_event_accepts_int_values_for_bigints() -> None:
     event = subgraph_row_to_event(row)
     assert event.making == 20_000_000
     assert event.taking == 40_000_000
+    assert event.maker_asset_id == 0    # side=0 → maker gives USDC
+    assert event.taker_asset_id == 222  # tokenId went to taker side
 
 
 def test_subgraph_row_to_event_buy_side_maps_assets_correctly() -> None:
