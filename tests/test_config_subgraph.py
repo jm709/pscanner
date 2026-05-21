@@ -27,6 +27,4 @@ def test_subgraph_copy_evaluator_defaults() -> None:
 def test_root_config_wires_subgraph_sections() -> None:
     root = Config()
     assert isinstance(root.subgraph_trades, SubgraphTradeCollectorConfig)
-    assert isinstance(
-        root.paper_trading.evaluators.subgraph_copy, SubgraphCopyEvaluatorConfig
-    )
+    assert isinstance(root.paper_trading.evaluators.subgraph_copy, SubgraphCopyEvaluatorConfig)

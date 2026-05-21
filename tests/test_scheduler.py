@@ -32,6 +32,7 @@ from pscanner.config import (
     ClusterConfig,
     Config,
     ConvergenceConfig,
+    EvaluatorsConfig,
     EventsConfig,
     MarketsConfig,
     MispricingConfig,
@@ -1129,7 +1130,9 @@ async def test_subgraph_trades_wired_when_enabled(
         subgraph_trades=SubgraphTradeCollectorConfig(enabled=True),
         paper_trading=PaperTradingConfig(
             enabled=True,
-            evaluators={"subgraph_copy": SubgraphCopyEvaluatorConfig(enabled=True)},
+            evaluators=EvaluatorsConfig(
+                subgraph_copy=SubgraphCopyEvaluatorConfig(enabled=True),
+            ),
         ),
     )
     scanner = Scanner(config=config, db_path=tmp_path / "p.sqlite3")
