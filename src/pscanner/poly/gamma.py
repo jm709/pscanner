@@ -90,6 +90,7 @@ class GammaClient:
         active: bool = True,
         closed: bool = False,
         page_size: int = 100,
+        end_date_min: int | None = None,
     ) -> AsyncIterator[Event]:
         """Async-iterate every event matching the filters across all pages.
 
@@ -97,6 +98,8 @@ class GammaClient:
             active: Restrict to currently-active events.
             closed: Include closed events.
             page_size: Page size sent to the server per request.
+            end_date_min: Filter to events whose ``endDate >= end_date_min``
+                (unix seconds). Forwarded to every ``list_events`` page call.
 
         Yields:
             Each ``Event`` exactly once until the catalogue is exhausted.
@@ -108,6 +111,7 @@ class GammaClient:
                 closed=closed,
                 limit=page_size,
                 offset=offset,
+                end_date_min=end_date_min,
             )
             if not page:
                 return
