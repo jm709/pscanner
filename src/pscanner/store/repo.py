@@ -2516,6 +2516,34 @@ class PaperTradesRepo:
             for r in rows
         ]
 
+    def count_by_source_wallet(self, *, detector: str) -> dict[str, int]:
+        """Return ``{source_wallet: count}`` for entries with the given detector.
+
+        Rows whose ``source_wallet`` is NULL are excluded — the consumer
+        (`SubgraphCopyEvaluator`) only meaningfully counts trades attributed
+        to a known wallet. Entries of any ``rule_variant`` are aggregated
+        together.
+
+        Args:
+            detector: Value of ``triggering_alert_detector`` to filter on
+                (e.g. ``"subgraph_copy"``).
+
+        Returns:
+            Mapping from lower-cased wallet address to total entry count.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT source_wallet, COUNT(*)
+              FROM paper_trades
+             WHERE triggering_alert_detector = ?
+               AND trade_kind = 'entry'
+               AND source_wallet IS NOT NULL
+             GROUP BY source_wallet
+            """,
+            (detector,),
+        ).fetchall()
+        return {str(r[0]): int(r[1]) for r in rows}
+
 
 class SubgraphWatchStateRepo:
     """Key/value persistence for the SubgraphTradeCollector watermark.
