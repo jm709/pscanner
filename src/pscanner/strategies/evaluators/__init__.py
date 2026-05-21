@@ -13,6 +13,7 @@ from pscanner.strategies.evaluators.protocol import (
     SignalEvaluator,
 )
 from pscanner.strategies.evaluators.smart_money import SmartMoneyEvaluator
+from pscanner.strategies.evaluators.subgraph_copy import SubgraphCopyEvaluator
 from pscanner.strategies.evaluators.velocity import VelocityEvaluator
 
 __all__ = [
@@ -23,5 +24,6 @@ __all__ = [
     "ParsedSignal",
     "SignalEvaluator",
     "SmartMoneyEvaluator",
+    "SubgraphCopyEvaluator",
     "VelocityEvaluator",
 ]
