@@ -12,7 +12,7 @@ import sqlite3
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -29,14 +29,14 @@ from pscanner.poly.subgraph import SubgraphClient
 _LOG = structlog.get_logger(__name__)
 
 _REQUIRED_KEYS = (
-    "id",  # consumed by _paginate_side (Task 4) cursor logic, not by the adapter
+    "id",  # consumed by _paginate_side cursor logic, not by the adapter
     "transactionHash",
-    "timestamp",  # consumed by iter_market_trades (Task 4), not by the adapter
+    "timestamp",  # consumed by iter_market_trades, not by the adapter
     "orderHash",
-    "maker",
-    "taker",
-    "makerAssetId",
-    "takerAssetId",
+    "maker",  # value is the nested {"id": "0x..."} object, see _parse_account_id below
+    "taker",  # same
+    "tokenId",
+    "side",
     "makerAmountFilled",
     "takerAmountFilled",
     "fee",
@@ -62,12 +62,36 @@ def _parse_str_field(key: str, raw: object) -> str:
     return raw
 
 
+def _parse_account_id(key: str, raw: object) -> str:
+    """Extract ``.id`` from a nested ``Account`` object.
+
+    The new subgraph schema returns ``maker`` and ``taker`` as nested
+    objects ``{"id": "0x..."}``. The old schema returned them as bare
+    Bytes strings. This helper unwraps and validates.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError(f"{key} must be a nested object, got {type(raw).__name__}")
+    account = cast(Mapping[str, object], raw)
+    inner = account.get("id")
+    if not isinstance(inner, str):
+        raise ValueError(f"{key}.id must be str, got {type(inner).__name__}")
+    return inner
+
+
 def subgraph_row_to_event(row: Mapping[str, object]) -> OrderFilledEvent:
-    """Adapt one GraphQL ``OrderFilledEvent`` row to a Phase 2 dataclass.
+    """Adapt one GraphQL ``OrderFilledEvent`` row to the on-chain dataclass.
+
+    The new subgraph schema collapses ``makerAssetId`` / ``takerAssetId``
+    into ``tokenId`` (= ``Market.id``, the conditional token traded) +
+    ``side`` (Int: 0=BUY, 1=SELL, indicating the maker's order direction).
+    The amount fields ``makerAmountFilled`` / ``takerAmountFilled`` follow
+    the same maker/taker convention as the old schema and flow through
+    directly.
 
     Args:
         row: One element of the GraphQL ``orderFilledEvents`` list. Must
-            carry every key in ``_REQUIRED_KEYS``.
+            carry every key in ``_REQUIRED_KEYS``; ``maker`` and ``taker``
+            are nested ``Account`` objects with an ``id`` field.
 
     Returns:
         ``OrderFilledEvent`` with ``block_number=0`` and ``log_index=0``
@@ -76,8 +100,8 @@ def subgraph_row_to_event(row: Mapping[str, object]) -> OrderFilledEvent:
 
     Raises:
         KeyError: A required key is missing.
-        ValueError: A numeric field is not parseable as int, or a string
-            field has the wrong type.
+        ValueError: A numeric field is not parseable, a string field has
+            the wrong type, or ``side`` is not 0 or 1.
     """
     for key in _REQUIRED_KEYS:
         if key not in row:
@@ -89,12 +113,25 @@ def subgraph_row_to_event(row: Mapping[str, object]) -> OrderFilledEvent:
     def as_str(key: str) -> str:
         return _parse_str_field(key, row[key])
 
+    side = as_int("side")
+    token_id = as_int("tokenId")
+    if side == 0:
+        # Maker placed a BUY order: gave USDC, took conditional tokens.
+        maker_asset_id = 0
+        taker_asset_id = token_id
+    elif side == 1:
+        # Maker placed a SELL order: gave conditional tokens, took USDC.
+        maker_asset_id = token_id
+        taker_asset_id = 0
+    else:
+        raise ValueError(f"unexpected side: {side}")
+
     return OrderFilledEvent(
         order_hash=as_str("orderHash"),
-        maker=as_str("maker"),
-        taker=as_str("taker"),
-        maker_asset_id=as_int("makerAssetId"),
-        taker_asset_id=as_int("takerAssetId"),
+        maker=_parse_account_id("maker", row["maker"]),
+        taker=_parse_account_id("taker", row["taker"]),
+        maker_asset_id=maker_asset_id,
+        taker_asset_id=taker_asset_id,
         making=as_int("makerAmountFilled"),
         taking=as_int("takerAmountFilled"),
         fee=as_int("fee"),

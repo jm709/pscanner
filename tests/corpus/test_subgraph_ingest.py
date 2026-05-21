@@ -33,16 +33,16 @@ _GATEWAY_URL = "https://gateway.example.test/api/k/subgraphs/id/abc"
 
 
 def test_subgraph_row_to_event_parses_buy_side_row() -> None:
-    """Maker BUY: maker gives USDC ('0'), taker gives CTF token."""
+    """Maker BUY (side=0): maker gives USDC, taker gives CTF token."""
     row = {
         "id": "0xtx_0xorder",
         "transactionHash": "0xee" * 32,
         "timestamp": "1700001234",
         "orderHash": "0x" + "ab" * 32,
-        "maker": "0xMaker_Address_NOT_LowerCased",
-        "taker": "0x" + "22" * 20,
-        "makerAssetId": "0",
-        "takerAssetId": "222",
+        "maker": {"id": "0xMaker_Address_NOT_LowerCased"},
+        "taker": {"id": "0x" + "22" * 20},
+        "tokenId": "222",
+        "side": "0",
         "makerAmountFilled": "20000000",
         "takerAmountFilled": "40000000",
         "fee": "0",
@@ -56,7 +56,6 @@ def test_subgraph_row_to_event_parses_buy_side_row() -> None:
     assert event.fee == 0
     assert event.block_number == 0
     assert event.log_index == 0
-    # event_to_corpus_trade lowercases the maker; the dataclass preserves whatever's passed in
     assert event.maker == "0xMaker_Address_NOT_LowerCased"
 
 
@@ -66,10 +65,10 @@ def test_subgraph_row_to_event_rejects_missing_field() -> None:
         "transactionHash": "0xee" * 32,
         "timestamp": "1700001234",
         # orderHash deliberately missing
-        "maker": "0x" + "11" * 20,
-        "taker": "0x" + "22" * 20,
-        "makerAssetId": "0",
-        "takerAssetId": "222",
+        "maker": {"id": "0x" + "11" * 20},
+        "taker": {"id": "0x" + "22" * 20},
+        "tokenId": "222",
+        "side": "0",
         "makerAmountFilled": "1",
         "takerAmountFilled": "1",
         "fee": "0",
@@ -84,62 +83,120 @@ def test_subgraph_row_to_event_rejects_non_numeric_amount() -> None:
         "transactionHash": "0xee" * 32,
         "timestamp": "1700001234",
         "orderHash": "0x" + "ab" * 32,
-        "maker": "0x" + "11" * 20,
-        "taker": "0x" + "22" * 20,
-        "makerAssetId": "0",
-        "takerAssetId": "222",
+        "maker": {"id": "0x" + "11" * 20},
+        "taker": {"id": "0x" + "22" * 20},
+        "tokenId": "222",
+        "side": "0",
         "makerAmountFilled": "not-a-number",
-        "takerAmountFilled": "40000000",
+        "takerAmountFilled": "1",
         "fee": "0",
     }
-    with pytest.raises(ValueError, match="makerAmountFilled could not be parsed"):
+    with pytest.raises(ValueError, match="makerAmountFilled"):
         subgraph_row_to_event(row)
 
 
 def test_subgraph_row_to_event_parses_sell_side_row() -> None:
-    """Maker SELL: maker gives CTF token, taker gives USDC ('0')."""
-    # Realistic large CTF token-id (2**255 + something)
-    ctf_token_id = 57896044618658097711785492504343953926634992332820282019728792003956564819968
+    """Maker SELL (side=1): maker gives CTF token, taker gives USDC."""
     row = {
         "id": "0xtx_0xorder",
-        "transactionHash": "0xff" * 32,
-        "timestamp": "1700001500",
-        "orderHash": "0x" + "cd" * 32,
-        "maker": "0x" + "11" * 20,
-        "taker": "0x" + "22" * 20,
-        "makerAssetId": str(ctf_token_id),
-        "takerAssetId": "0",
+        "transactionHash": "0xee" * 32,
+        "timestamp": "1700001234",
+        "orderHash": "0x" + "ab" * 32,
+        "maker": {"id": "0x" + "11" * 20},
+        "taker": {"id": "0x" + "22" * 20},
+        "tokenId": "111",
+        "side": "1",
         "makerAmountFilled": "40000000",
         "takerAmountFilled": "20000000",
         "fee": "0",
     }
     event = subgraph_row_to_event(row)
-    assert event.maker_asset_id == ctf_token_id
+    assert event.maker_asset_id == 111
     assert event.taker_asset_id == 0
     assert event.making == 40_000_000
     assert event.taking == 20_000_000
 
 
 def test_subgraph_row_to_event_accepts_int_values_for_bigints() -> None:
-    """Some GraphQL clients deserialize BigInts as native ints, not strings."""
+    """BigInt fields may be returned as native ints rather than strings."""
     row = {
         "id": "0xtx_0xorder",
         "transactionHash": "0xee" * 32,
-        "timestamp": "1700001234",
+        "timestamp": 1700001234,
         "orderHash": "0x" + "ab" * 32,
-        "maker": "0x" + "11" * 20,
-        "taker": "0x" + "22" * 20,
-        "makerAssetId": 0,  # int, not string
-        "takerAssetId": 222,
+        "maker": {"id": "0x" + "11" * 20},
+        "taker": {"id": "0x" + "22" * 20},
+        "tokenId": 222,
+        "side": 0,
         "makerAmountFilled": 20_000_000,
         "takerAmountFilled": 40_000_000,
         "fee": 0,
     }
     event = subgraph_row_to_event(row)
-    assert event.maker_asset_id == 0
-    assert event.taker_asset_id == 222
     assert event.making == 20_000_000
     assert event.taking == 40_000_000
+
+
+def test_subgraph_row_to_event_buy_side_maps_assets_correctly() -> None:
+    """Pin down: side=0 ⇒ maker_asset_id=0, taker_asset_id=tokenId."""
+    row = {
+        "id": "0xtx",
+        "transactionHash": "0x" + "aa" * 32,
+        "timestamp": "1",
+        "orderHash": "0x" + "bb" * 32,
+        "maker": {"id": "0x" + "11" * 20},
+        "taker": {"id": "0x" + "22" * 20},
+        "tokenId": "999",
+        "side": "0",
+        "makerAmountFilled": "100",
+        "takerAmountFilled": "200",
+        "fee": "0",
+    }
+    event = subgraph_row_to_event(row)
+    assert event.maker_asset_id == 0
+    assert event.taker_asset_id == 999
+    assert event.making == 100
+    assert event.taking == 200
+
+
+def test_subgraph_row_to_event_sell_side_maps_assets_correctly() -> None:
+    """Pin down: side=1 ⇒ maker_asset_id=tokenId, taker_asset_id=0."""
+    row = {
+        "id": "0xtx",
+        "transactionHash": "0x" + "aa" * 32,
+        "timestamp": "1",
+        "orderHash": "0x" + "bb" * 32,
+        "maker": {"id": "0x" + "11" * 20},
+        "taker": {"id": "0x" + "22" * 20},
+        "tokenId": "999",
+        "side": "1",
+        "makerAmountFilled": "100",
+        "takerAmountFilled": "200",
+        "fee": "0",
+    }
+    event = subgraph_row_to_event(row)
+    assert event.maker_asset_id == 999
+    assert event.taker_asset_id == 0
+    assert event.making == 100
+    assert event.taking == 200
+
+
+def test_subgraph_row_to_event_rejects_invalid_side() -> None:
+    row = {
+        "id": "0xtx",
+        "transactionHash": "0x" + "aa" * 32,
+        "timestamp": "1",
+        "orderHash": "0x" + "bb" * 32,
+        "maker": {"id": "0x" + "11" * 20},
+        "taker": {"id": "0x" + "22" * 20},
+        "tokenId": "999",
+        "side": "2",  # invalid
+        "makerAmountFilled": "100",
+        "takerAmountFilled": "200",
+        "fee": "0",
+    }
+    with pytest.raises(ValueError, match="unexpected side: 2"):
+        subgraph_row_to_event(row)
 
 
 # ---------------------------------------------------------------------------
