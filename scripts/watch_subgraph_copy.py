@@ -374,7 +374,7 @@ class _BookingParams:
     shares: float
 
 
-async def _resolve_event_booking(  # noqa: PLR0911  # spec-required: each guard logs a distinct event key
+async def _resolve_event_booking(  # noqa: PLR0911  # each guard logs a distinct event key
     *,
     ev: dict[str, Any],
     watchlist_set: set[str],
