@@ -2515,3 +2515,40 @@ class PaperTradesRepo:
             )
             for r in rows
         ]
+
+
+class SubgraphWatchStateRepo:
+    """Key/value persistence for the SubgraphTradeCollector watermark.
+
+    One row keyed by ``"default"`` holds the most recently observed
+    ``timestamp`` from the V2 subgraph's ``orderFilledEvents`` feed.
+    Survives daemon restarts so we resume rather than re-scan.
+    """
+
+    _KEY = "default"
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        """Bind the repo to an already-initialised connection."""
+        self._conn = conn
+
+    def get_last_seen_ts(self) -> int | None:
+        """Return the persisted watermark, or ``None`` if no row exists."""
+        row = self._conn.execute(
+            "SELECT last_seen_ts FROM subgraph_watch_state WHERE key = ?",
+            (self._KEY,),
+        ).fetchone()
+        if row is None:
+            return None
+        return int(row[0])
+
+    def set_last_seen_ts(self, ts: int) -> None:
+        """Atomically upsert the watermark to ``ts``."""
+        self._conn.execute(
+            """
+            INSERT INTO subgraph_watch_state (key, last_seen_ts)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET last_seen_ts = excluded.last_seen_ts
+            """,
+            (self._KEY, int(ts)),
+        )
+        self._conn.commit()
