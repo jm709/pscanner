@@ -332,6 +332,20 @@ async def test_iter_events_forwards_end_date_min_to_every_page() -> None:
         assert call.kwargs["params"]["end_date_min"] == "2026-05-17T00:00:00Z"
 
 
+async def test_iter_events_omits_end_date_min_when_none() -> None:
+    """``iter_events`` with default ``end_date_min=None`` must not inject the key."""
+    fixture = _load_event_fixture()
+    http = _mock_http_pages([fixture, fixture], [fixture])  # two pages
+    client = GammaClient(http=http)
+
+    collected = [event async for event in client.iter_events(page_size=2)]
+
+    assert len(collected) == 3
+    assert http.get.await_count == 2
+    for call in http.get.await_args_list:
+        assert "end_date_min" not in call.kwargs["params"]
+
+
 async def test_aclose_does_not_close_borrowed_http() -> None:
     http = _mock_http_returning([])
     client = GammaClient(http=http)
