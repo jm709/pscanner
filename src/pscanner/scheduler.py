@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable
@@ -40,11 +41,14 @@ from pscanner.collectors.events import EventCollector
 from pscanner.collectors.market_scoped_trades import MarketScopedTradeCollector
 from pscanner.collectors.markets import MarketCollector
 from pscanner.collectors.positions import PositionCollector
+from pscanner.collectors.subgraph_trades import SubgraphTradeCollector
 from pscanner.collectors.ticks import MarketTickCollector
 from pscanner.collectors.trades import TradeCollector
 from pscanner.collectors.watchlist import WatchlistRegistry, WatchlistSyncer
 from pscanner.config import Config
+from pscanner.corpus.db import init_corpus_db
 from pscanner.corpus.features import MarketMetadata
+from pscanner.corpus.repos import AssetIndexRepo
 from pscanner.daemon.live_history import LiveHistoryProvider
 from pscanner.detectors.cluster import ClusterDetector
 from pscanner.detectors.convergence import ConvergenceDetector
@@ -60,6 +64,7 @@ from pscanner.poly.clob_ws import MarketWebSocket
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.http import PolyHttpClient
+from pscanner.poly.subgraph import SubgraphClient
 from pscanner.poly.tick_stream import BroadcastTickStream
 from pscanner.store.db import init_db
 from pscanner.store.repo import (
@@ -72,6 +77,7 @@ from pscanner.store.repo import (
     MarketTicksRepo,
     PaperTradesRepo,
     PositionSnapshotsRepo,
+    SubgraphWatchStateRepo,
     TrackedWalletCategoriesRepo,
     TrackedWalletsRepo,
     WalletActivityEventsRepo,
@@ -89,6 +95,7 @@ from pscanner.strategies.evaluators import (
     MoveAttributionEvaluator,
     SignalEvaluator,
     SmartMoneyEvaluator,
+    SubgraphCopyEvaluator,
     VelocityEvaluator,
 )
 from pscanner.strategies.paper_resolver import PaperResolver
@@ -148,6 +155,10 @@ class Scanner:
         self._clock: Clock = clock if clock is not None else RealClock()
         resolved_db = db_path if db_path is not None else config.scanner.db_path
         self._db = init_db(resolved_db)
+        self._corpus_conn: sqlite3.Connection | None = None
+        if self._config.subgraph_trades.enabled:
+            corpus_path = Path("data/corpus.sqlite3")
+            self._corpus_conn = init_corpus_db(corpus_path)
         self._tracked_repo = TrackedWalletsRepo(self._db)
         self._snapshots_repo = PositionSnapshotsRepo(self._db)
         self._first_seen_repo = WalletFirstSeenRepo(self._db)
@@ -334,7 +345,41 @@ class Scanner:
                 provider=self._live_history_provider,
                 market_cache=self._market_cache_repo,
             )
+        self._maybe_attach_subgraph_trade_collector(collectors)
         return collectors
+
+    def _maybe_attach_subgraph_trade_collector(
+        self,
+        collectors: dict[str, Collector],
+    ) -> None:
+        """Wire the SubgraphTradeCollector when ``subgraph_trades`` is enabled."""
+        if not self._config.subgraph_trades.enabled:
+            return
+        if self._corpus_conn is None:
+            msg = (
+                "subgraph_trades.enabled=true but corpus connection is None; "
+                "Scanner.__init__ should have opened it."
+            )
+            raise RuntimeError(msg)
+        api_key = os.environ.get("GRAPH_API_KEY", "")
+        subgraph_url = (
+            f"https://gateway.thegraph.com/api/{api_key}"
+            f"/subgraphs/id/{self._config.subgraph_trades.subgraph_id}"
+        )
+        collectors["subgraph_trades"] = SubgraphTradeCollector(
+            config=self._config.subgraph_trades,
+            subgraph_client=SubgraphClient(
+                url=subgraph_url,
+                rpm=self._config.subgraph_trades.rpm,
+            ),
+            gamma_client=self._clients.gamma_client,
+            watchlist=self._watchlist_registry,
+            asset_index=AssetIndexRepo(self._corpus_conn),
+            market_cache=self._market_cache_repo,
+            sink=self._sink,
+            state_repo=SubgraphWatchStateRepo(self._db),
+            clock=self._clock,
+        )
 
     def _build_detectors(self) -> dict[str, Any]:
         """Instantiate the enabled detectors from config."""
@@ -422,7 +467,7 @@ class Scanner:
         paper_trades_repo = PaperTradesRepo(self._db)
         detectors["paper_trader"] = PaperTrader(
             config=self._config.paper_trading,
-            evaluators=self._build_paper_evaluators(),
+            evaluators=self._build_paper_evaluators(paper_trades_repo),
             market_cache=self._market_cache_repo,
             paper_trades=paper_trades_repo,
             market_ticks=self._ticks_repo,
@@ -437,7 +482,10 @@ class Scanner:
             clock=self._clock,
         )
 
-    def _build_paper_evaluators(self) -> list[SignalEvaluator]:
+    def _build_paper_evaluators(
+        self,
+        paper_trades_repo: PaperTradesRepo | None = None,
+    ) -> list[SignalEvaluator]:
         """Construct enabled evaluators in fixed order.
 
         Each evaluator is gated by its ``enabled`` flag in
@@ -478,6 +526,15 @@ class Scanner:
         if cfg.gate_model.enabled:
             evaluators.append(
                 GateModelEvaluator(config=cfg.gate_model),
+            )
+        if cfg.subgraph_copy.enabled:
+            repo = paper_trades_repo if paper_trades_repo is not None else PaperTradesRepo(self._db)
+            evaluators.append(
+                SubgraphCopyEvaluator(
+                    config=cfg.subgraph_copy,
+                    watchlist_repo=self._watchlist_repo,
+                    paper_trades=repo,
+                )
             )
         return evaluators
 
@@ -523,22 +580,31 @@ class Scanner:
           ``MarketCacheRepo`` that ``GateModelDetector._resolve_outcome_side``
           depends on; without it, every trade silently drops to ``""`` —
           see issue #101).
+
+        When ``subgraph_trades`` is enabled, refuses to start unless
+        ``GRAPH_API_KEY`` is set in the environment — the SubgraphClient
+        needs it to construct the gateway URL.
         """
-        if not self._config.gate_model.enabled:
-            return
-        row = self._db.execute("SELECT 1 FROM wallet_state_live LIMIT 1").fetchone()
-        if row is None:
+        if self._config.gate_model.enabled:
+            row = self._db.execute("SELECT 1 FROM wallet_state_live LIMIT 1").fetchone()
+            if row is None:
+                msg = (
+                    "gate_model.enabled=true but wallet_state_live is empty. "
+                    "Run `pscanner daemon bootstrap-features` first."
+                )
+                raise RuntimeError(msg)
+            if not self._config.markets.enabled:
+                msg = (
+                    "gate_model.enabled=true but markets.enabled=false. "
+                    "The gate-model detector requires the markets collector to "
+                    "populate MarketCacheRepo (used to map asset_id -> YES/NO). "
+                    "Set [markets] enabled = true in your config."
+                )
+                raise RuntimeError(msg)
+        if self._config.subgraph_trades.enabled and not os.environ.get("GRAPH_API_KEY"):
             msg = (
-                "gate_model.enabled=true but wallet_state_live is empty. "
-                "Run `pscanner daemon bootstrap-features` first."
-            )
-            raise RuntimeError(msg)
-        if not self._config.markets.enabled:
-            msg = (
-                "gate_model.enabled=true but markets.enabled=false. "
-                "The gate-model detector requires the markets collector to "
-                "populate MarketCacheRepo (used to map asset_id -> YES/NO). "
-                "Set [markets] enabled = true in your config."
+                "subgraph_trades.enabled=true but GRAPH_API_KEY is not set. "
+                "Export it before starting the daemon."
             )
             raise RuntimeError(msg)
 
@@ -898,6 +964,9 @@ class Scanner:
             await self._close_owned_clients()
         with contextlib.suppress(sqlite3.Error):
             self._db.close()
+        if self._corpus_conn is not None:
+            with contextlib.suppress(sqlite3.Error):
+                self._corpus_conn.close()
         _LOG.info("scanner.shutdown.complete")
 
     async def _close_owned_clients(self) -> None:
