@@ -362,6 +362,26 @@ class GateModelMarketFilterConfig(_Section):
     ``min_outcome_price``)."""
 
 
+class SubgraphTradeCollectorConfig(_Section):
+    """Tunables for the live SubgraphTradeCollector (#152).
+
+    Polls the Polymarket V2 subgraph for trades by watchlisted wallets and
+    emits ``subgraph_copy`` alerts. Coexists with the ``/activity``-based
+    ``TradeCollector`` — both run independently.
+    """
+
+    enabled: bool = False
+    subgraph_id: str = "B9mm21DKCex8ka4g8cteQU4NQqtviwmcTjQAYLbzQ1eR"
+    poll_interval_seconds: float = 10.0
+    rpm: int = 60
+    page_size: int = 1000
+    cold_start_lookback_seconds: int = 0
+    """Seconds before ``now()`` to start from on first daemon boot when
+    ``subgraph_watch_state`` is empty. ``0`` ignores history."""
+    indexer_lag_warn_seconds: int = 60
+    indexer_lag_error_seconds: int = 600
+
+
 class SmartMoneyEvaluatorConfig(_Section):
     """Smart-money copy-trade evaluator tunables.
 
@@ -450,6 +470,19 @@ class GateModelEvaluatorConfig(_Section):
     position_fraction: float = 0.005
 
 
+class SubgraphCopyEvaluatorConfig(_Section):
+    """Tunables for the subgraph-copy paper-trading evaluator (#152).
+
+    Sizes each copy at ``bankroll * position_fraction * multiplier`` where
+    ``multiplier`` decays as a wallet's share of total subgraph_copy trades
+    exceeds ``1.0 / active_watchlist_size``, floored at ``min_multiplier``.
+    """
+
+    enabled: bool = False
+    position_fraction: float = 0.005
+    min_multiplier: float = 0.10
+
+
 class EvaluatorsConfig(_Section):
     """Container for the per-source evaluator configs.
 
@@ -466,6 +499,9 @@ class EvaluatorsConfig(_Section):
     mispricing: MispricingEvaluatorConfig = Field(default_factory=MispricingEvaluatorConfig)
     monotone: MonotoneEvaluatorConfig = Field(default_factory=MonotoneEvaluatorConfig)
     gate_model: GateModelEvaluatorConfig = Field(default_factory=GateModelEvaluatorConfig)
+    subgraph_copy: SubgraphCopyEvaluatorConfig = Field(
+        default_factory=SubgraphCopyEvaluatorConfig,
+    )
 
 
 class PaperTradingConfig(_Section):
@@ -530,6 +566,9 @@ class Config(BaseModel):
     gate_model: GateModelConfig = Field(default_factory=GateModelConfig)
     gate_model_market_filter: GateModelMarketFilterConfig = Field(
         default_factory=GateModelMarketFilterConfig,
+    )
+    subgraph_trades: SubgraphTradeCollectorConfig = Field(
+        default_factory=SubgraphTradeCollectorConfig,
     )
     paper_trading: PaperTradingConfig = Field(default_factory=PaperTradingConfig)
     worker_sink: WorkerSinkConfig = Field(default_factory=WorkerSinkConfig)
