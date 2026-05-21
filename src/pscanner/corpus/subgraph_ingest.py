@@ -148,36 +148,32 @@ def subgraph_row_to_event(row: Mapping[str, object]) -> OrderFilledEvent:
 # The Graph's hard cap on a single page of results.
 _MAX_PAGE_SIZE = 1000
 
-# Two separate query constants rather than one template: the filter field
-# name (makerAssetId_in vs takerAssetId_in) is a structural part of the
-# GraphQL document, not a $variable, so it can't be parameterised. Keeping
-# them as separate string literals avoids any string-formatting on GraphQL
-# document text — which would be a query-injection foot-gun.
-_TRADES_QUERY_MAKER_SIDE = """
-query MarketTradesMakerSide($assets: [String!]!, $cursor: String!, $first: Int!) {
+# Single query — the new subgraph's market_in filter catches every fill
+# involving any of the listed tokens (maker side or taker side), so the
+# old maker/taker two-query split is no longer needed.
+_TRADES_QUERY = """
+query($assets: [String!]!, $cursor: String!, $first: Int!) {
   orderFilledEvents(
-    where: { makerAssetId_in: $assets, id_gt: $cursor }
-    orderBy: id
+    where: { market_in: $assets, id_gt: $cursor }
     first: $first
+    orderBy: id
+    orderDirection: asc
   ) {
-    id transactionHash timestamp orderHash maker taker
-    makerAssetId takerAssetId makerAmountFilled takerAmountFilled fee
+    id
+    orderHash
+    transactionHash
+    timestamp
+    maker { id }
+    taker { id }
+    market { id }
+    tokenId
+    side
+    makerAmountFilled
+    takerAmountFilled
+    fee
   }
 }
-""".strip()
-
-_TRADES_QUERY_TAKER_SIDE = """
-query MarketTradesTakerSide($assets: [String!]!, $cursor: String!, $first: Int!) {
-  orderFilledEvents(
-    where: { takerAssetId_in: $assets, id_gt: $cursor }
-    orderBy: id
-    first: $first
-  ) {
-    id transactionHash timestamp orderHash maker taker
-    makerAssetId takerAssetId makerAmountFilled takerAmountFilled fee
-  }
-}
-""".strip()
+"""
 
 
 async def _paginate_side(
@@ -187,11 +183,11 @@ async def _paginate_side(
     asset_ids: Sequence[str],
     page_size: int,
 ) -> AsyncGenerator[tuple[OrderFilledEvent, int]]:
-    """Yield decoded events from one filter side, paginated by id_gt.
+    """Yield decoded events from a single query, paginated by id_gt.
 
     Args:
         client: Open ``SubgraphClient``.
-        graphql: One of ``_TRADES_QUERY_MAKER_SIDE`` or ``_TRADES_QUERY_TAKER_SIDE``.
+        graphql: GraphQL query string (e.g. ``_TRADES_QUERY``).
         asset_ids: CTF token ids (as strings) to filter on.
         page_size: Rows per query page (≤ ``_MAX_PAGE_SIZE``).
 
@@ -224,22 +220,22 @@ async def iter_market_trades(
     asset_ids: Sequence[str],
     page_size: int = _MAX_PAGE_SIZE,
 ) -> AsyncIterator[tuple[OrderFilledEvent, int]]:
-    """Yield every ``OrderFilledEvent`` whose maker- or taker-side asset is in ``asset_ids``.
+    """Yield every ``OrderFilledEvent`` involving any asset in ``asset_ids``.
 
-    Runs maker-side queries to exhaustion, then taker-side queries.  Each side
-    uses ``id_gt`` cursor pagination so restarts are safe (no duplicates on
-    resume, only forward progress).
+    Uses the new subgraph's ``market_in`` filter so a single paginated
+    query catches every fill on the listed tokens (no maker/taker split
+    needed). Cursor-paginated via ``id_gt`` so restarts are safe (no
+    duplicates on resume, only forward progress).
 
     Args:
         client: Open ``SubgraphClient``.
         asset_ids: CTF token ids (as decimal strings) belonging to one condition.
             Pass both YES and NO token ids for a binary market.
         page_size: Rows per query, capped at ``_MAX_PAGE_SIZE`` (1000) by
-            The Graph.  Reduce for lower memory pressure during tests.
+            The Graph. Reduce for lower memory pressure during tests.
 
     Yields:
-        ``(event, ts)`` tuples — same shape as ``iter_order_filled_logs``
-        from Phase 2 so the orchestrator can mirror its loop body.
+        ``(event, ts)`` tuples.
 
     Raises:
         ValueError: ``page_size`` is out of the ``1.._MAX_PAGE_SIZE`` range.
@@ -251,15 +247,7 @@ async def iter_market_trades(
 
     async for ev, ts in _paginate_side(
         client=client,
-        graphql=_TRADES_QUERY_MAKER_SIDE,
-        asset_ids=asset_ids,
-        page_size=page_size,
-    ):
-        yield ev, ts
-
-    async for ev, ts in _paginate_side(
-        client=client,
-        graphql=_TRADES_QUERY_TAKER_SIDE,
+        graphql=_TRADES_QUERY,
         asset_ids=asset_ids,
         page_size=page_size,
     ):
