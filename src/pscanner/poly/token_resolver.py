@@ -122,16 +122,30 @@ def _upsert_and_resolve(
 ) -> ResolvedToken | None:
     """Write the gamma Market into both tables, then return the resolved tuple.
 
-    Returns None if the queried ``token_id`` is not present in
-    ``market.clob_token_ids`` (defensive — gamma indexing inconsistency).
+    Returns None (without writing anything) if the queried ``token_id`` is not
+    present in ``market.clob_token_ids`` — defensive against gamma indexing
+    drift, where a clob_token_ids filter returns a market that doesn't actually
+    contain the queried token. We don't trust the response in that case.
     """
     if market.condition_id is None:
         _LOG.warning("token_resolver.gamma_market_missing_condition_id", token_id=token_id)
         return None
-    # Write market_cache first so any concurrent reader sees a complete row.
+    # Containment check first: if the queried token isn't actually in this
+    # market's clob_token_ids, the gamma response is inconsistent. Don't
+    # persist anything from it.
+    asset_id_strs = [str(a) for a in market.clob_token_ids]
+    try:
+        target_idx = asset_id_strs.index(str(token_id))
+    except ValueError:
+        _LOG.warning(
+            "token_resolver.gamma_market_missing_token",
+            token_id=token_id,
+            condition_id=str(market.condition_id),
+            clob_token_ids=asset_id_strs,
+        )
+        return None
+    # Containment confirmed; write both tables.
     market_cache.upsert(market)
-    # Persist both sides of the binary market into asset_index. Polymarket's
-    # convention is outcomes[0] = YES-equivalent (idx 0), outcomes[1] = NO (idx 1).
     for idx, asset_id in enumerate(market.clob_token_ids):
         side = "YES" if idx == 0 else "NO"
         asset_index.upsert(
@@ -142,17 +156,6 @@ def _upsert_and_resolve(
                 outcome_index=idx,
             )
         )
-    # Resolve from the just-written rows.
-    try:
-        target_idx = [str(a) for a in market.clob_token_ids].index(str(token_id))
-    except ValueError:
-        _LOG.warning(
-            "token_resolver.gamma_market_missing_token",
-            token_id=token_id,
-            condition_id=str(market.condition_id),
-            clob_token_ids=[str(a) for a in market.clob_token_ids],
-        )
-        return None
     return ResolvedToken(
         condition_id=ConditionId(str(market.condition_id)),
         asset_id=AssetId(str(token_id)),

@@ -168,8 +168,9 @@ async def test_resolve_token_gamma_payload_missing_token_returns_none(
 ) -> None:
     """Defensive: gamma returns a Market whose clob_token_ids don't include the queried token.
 
-    Would indicate a gamma indexing inconsistency. Resolver returns None and does NOT write
-    an incorrect mapping into asset_index for the queried token.
+    Would indicate a gamma indexing inconsistency. Resolver returns None and
+    does NOT persist any rows from the inconsistent response — neither the
+    queried token, the foreign tokens, nor the market itself.
     """
     asset_index = AssetIndexRepo(corpus_conn)
     market_cache = MarketCacheRepo(daemon_conn)
@@ -185,4 +186,9 @@ async def test_resolve_token_gamma_payload_missing_token_returns_none(
     )
 
     assert result is None
+    # Neither the queried token nor the foreign tokens land in asset_index.
     assert asset_index.get(_TOKEN_NO) is None
+    assert asset_index.get(AssetId("1111")) is None
+    assert asset_index.get(AssetId("2222")) is None
+    # And the market itself is not persisted to market_cache.
+    assert market_cache.get_by_condition_id(ConditionId(_CID)) is None
