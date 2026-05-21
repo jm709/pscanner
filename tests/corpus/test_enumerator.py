@@ -59,6 +59,24 @@ def _fake_gamma(events: list[Event]) -> MagicMock:
     return stub
 
 
+def _capturing_gamma() -> tuple[MagicMock, dict[str, object]]:
+    """Build a gamma stub that captures its ``iter_events`` kwargs and yields nothing.
+
+    Unlike :func:`_fake_gamma` (which discards kwargs via ``lambda **_kw:``),
+    this helper records every kwarg passed to ``iter_events`` so callers can
+    assert what the enumerator forwarded.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture_iter_events(**kwargs: object) -> AsyncIterator[Event]:
+        captured.update(kwargs)
+        return _async_events([])
+
+    stub = MagicMock()
+    stub.iter_events = _capture_iter_events
+    return stub, captured
+
+
 @pytest.mark.asyncio
 async def test_enumerate_inserts_above_gate(tmp_corpus_db: sqlite3.Connection) -> None:
     repo = CorpusMarketsRepo(tmp_corpus_db)
@@ -255,35 +273,27 @@ async def test_enumerate_forwards_since_ts_as_end_date_min(
 ) -> None:
     """``enumerate_closed_markets(since_ts=N)`` must call ``iter_events(end_date_min=N)``."""
     repo = CorpusMarketsRepo(tmp_corpus_db)
-    captured_kwargs: dict[str, object] = {}
-
-    def _capture_iter_events(**kwargs: object) -> AsyncIterator[Event]:
-        captured_kwargs.update(kwargs)
-        return _async_events([])
-
-    stub = MagicMock()
-    stub.iter_events = _capture_iter_events
+    stub, captured = _capturing_gamma()
 
     await enumerate_closed_markets(gamma=stub, repo=repo, now_ts=1_000, since_ts=1_779_000_000)
 
-    assert captured_kwargs.get("end_date_min") == 1_779_000_000
+    assert "end_date_min" in captured
+    assert captured["end_date_min"] == 1_779_000_000
 
 
 @pytest.mark.asyncio
 async def test_enumerate_passes_none_when_since_ts_is_none(
     tmp_corpus_db: sqlite3.Connection,
 ) -> None:
-    """Fresh-corpus path: ``since_ts=None`` must yield ``end_date_min=None``."""
+    """Fresh-corpus path: ``since_ts=None`` must yield ``end_date_min=None``.
+
+    Assert the key is present AND ``None`` — a regression that silently
+    dropped the kwarg would pass an `is None` check on the missing key.
+    """
     repo = CorpusMarketsRepo(tmp_corpus_db)
-    captured_kwargs: dict[str, object] = {}
-
-    def _capture_iter_events(**kwargs: object) -> AsyncIterator[Event]:
-        captured_kwargs.update(kwargs)
-        return _async_events([])
-
-    stub = MagicMock()
-    stub.iter_events = _capture_iter_events
+    stub, captured = _capturing_gamma()
 
     await enumerate_closed_markets(gamma=stub, repo=repo, now_ts=1_000, since_ts=None)
 
-    assert captured_kwargs.get("end_date_min") is None
+    assert "end_date_min" in captured
+    assert captured["end_date_min"] is None
