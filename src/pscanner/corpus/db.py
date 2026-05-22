@@ -157,6 +157,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
       onchain_processed_at INTEGER,
       tags_json TEXT NOT NULL DEFAULT '[]',
       categories_json TEXT NOT NULL DEFAULT '[]',
+      outcome_side_backfilled_at INTEGER,
       PRIMARY KEY (platform, condition_id)
     )
     """,
@@ -300,6 +301,8 @@ _MIGRATIONS: tuple[str, ...] = (
     # (issue #121) and by `enumerate_closed_markets` on new inserts going forward.
     "ALTER TABLE corpus_markets ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'",
     "ALTER TABLE corpus_markets ADD COLUMN categories_json TEXT NOT NULL DEFAULT '[]'",
+    # Sentinel tracking when outcome_side was backfilled for this market (issue #167).
+    "ALTER TABLE corpus_markets ADD COLUMN outcome_side_backfilled_at INTEGER",
     # Multi-label category indicator columns (issue #122). One per Category
     # enum member; build-features writes 0/1 per row from `features.market_categories`.
     "ALTER TABLE training_examples ADD COLUMN cat_sports INTEGER NOT NULL DEFAULT 0",
