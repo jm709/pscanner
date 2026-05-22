@@ -26,15 +26,18 @@ def _parse_json_string_list(value: Any) -> list[Any]:
     pass through untouched.
 
     Args:
-        value: A list, a JSON-encoded string, or ``None``/empty string.
+        value: A list, a JSON-encoded string, or ``None``/empty/``"null"``.
+            The literal string ``"null"`` is accepted because gamma
+            occasionally returns it in place of a JSON list for stale
+            markets (#161).
 
     Returns:
-        A Python list (empty if input was ``None`` or empty).
+        A Python list (empty if input was ``None``, ``""``, or ``"null"``).
 
     Raises:
         ValueError: If ``value`` is a string but not valid JSON-list.
     """
-    if value is None or value == "":
+    if value is None or value in {"", "null"}:
         return []
     if isinstance(value, list):
         return value
