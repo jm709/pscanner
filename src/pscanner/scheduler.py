@@ -156,6 +156,7 @@ class Scanner:
         resolved_db = db_path if db_path is not None else config.scanner.db_path
         self._db = init_db(resolved_db)
         self._corpus_conn: sqlite3.Connection | None = None
+        self._subgraph_client: SubgraphClient | None = None
         if self._config.subgraph_trades.enabled:
             corpus_path = Path("data/corpus.sqlite3")
             self._corpus_conn = init_corpus_db(corpus_path)
@@ -366,12 +367,13 @@ class Scanner:
             f"https://gateway.thegraph.com/api/{api_key}"
             f"/subgraphs/id/{self._config.subgraph_trades.subgraph_id}"
         )
+        self._subgraph_client = SubgraphClient(
+            url=subgraph_url,
+            rpm=self._config.subgraph_trades.rpm,
+        )
         collectors["subgraph_trades"] = SubgraphTradeCollector(
             config=self._config.subgraph_trades,
-            subgraph_client=SubgraphClient(
-                url=subgraph_url,
-                rpm=self._config.subgraph_trades.rpm,
-            ),
+            subgraph_client=self._subgraph_client,
             gamma_client=self._clients.gamma_client,
             watchlist=self._watchlist_registry,
             asset_index=AssetIndexRepo(self._corpus_conn),
@@ -962,6 +964,9 @@ class Scanner:
             await self._renderer.stop()
         if self._owns_clients:
             await self._close_owned_clients()
+        if self._subgraph_client is not None:
+            with contextlib.suppress(Exception):
+                await self._subgraph_client.aclose()
         with contextlib.suppress(sqlite3.Error):
             self._db.close()
         if self._corpus_conn is not None:

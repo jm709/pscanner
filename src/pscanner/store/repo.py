@@ -2529,7 +2529,9 @@ class PaperTradesRepo:
                 (e.g. ``"subgraph_copy"``).
 
         Returns:
-            Mapping from lower-cased wallet address to total entry count.
+            Mapping keyed by ``source_wallet`` as stored (case-preserving).
+            Consumers that need case-insensitive matching must normalize on
+            their side.
         """
         rows = self._conn.execute(
             """

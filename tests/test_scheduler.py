@@ -1163,3 +1163,25 @@ async def test_subgraph_trades_preflight_requires_graph_api_key(
             scanner.preflight()
     finally:
         await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_subgraph_trades_aclose_closes_subgraph_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: Scanner.aclose() must close the SubgraphClient (#152 review)."""
+    monkeypatch.setenv("GRAPH_API_KEY", "test-key")
+    corpus_path = tmp_path / "corpus.sqlite3"
+    monkeypatch.setattr(
+        scheduler_mod,
+        "init_corpus_db",
+        lambda _p: init_corpus_db(corpus_path),
+    )
+    config = Config(subgraph_trades=SubgraphTradeCollectorConfig(enabled=True))
+    scanner = Scanner(config=config, db_path=tmp_path / "p.sqlite3")
+    assert scanner._subgraph_client is not None
+    sub_client = scanner._subgraph_client
+    await scanner.aclose()
+    # SubgraphClient's `_closed` flag flips to True after aclose().
+    assert sub_client._closed is True
