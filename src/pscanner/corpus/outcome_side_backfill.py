@@ -165,3 +165,29 @@ def apply_market_backfill(
             """,
             (now_ts, condition_id),
         )
+
+
+def validate_backfill_state(conn: sqlite3.Connection) -> int:
+    """Return the count of binary markets still stored as NO+NO in asset_index.
+
+    A clean post-backfill state returns ``0``. Non-zero indicates markets
+    that failed resolution (gamma missing, non-binary, etc.); operator
+    should re-run.
+
+    Unlike :func:`find_buggy_markets`, this ignores the sentinel column
+    so it reports the true asset_index health, not the work-queue size.
+    """
+    row = conn.execute(
+        """
+        SELECT COUNT(*) FROM (
+          SELECT condition_id
+            FROM asset_index
+           WHERE platform = 'polymarket'
+           GROUP BY condition_id
+          HAVING COUNT(*) = 2
+             AND COUNT(DISTINCT outcome_side) = 1
+             AND MIN(outcome_side) = 'NO'
+        )
+        """,
+    ).fetchone()
+    return int(row[0])

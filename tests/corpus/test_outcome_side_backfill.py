@@ -13,6 +13,7 @@ from pscanner.corpus.outcome_side_backfill import (
     apply_market_backfill,
     find_buggy_markets,
     resolve_correct_mapping,
+    validate_backfill_state,
 )
 from pscanner.poly.models import Market
 
@@ -322,3 +323,27 @@ def test_apply_market_backfill_creates_sentinel_row_when_missing(
         ).fetchall()
     )
     assert ai == {"t-yes": "YES", "t-no": "NO"}
+
+
+# Tests for validate_backfill_state
+
+
+def test_validate_backfill_state_returns_zero_when_clean(conn: sqlite3.Connection) -> None:
+    """validate_backfill_state returns 0 when no NO+NO pairs exist."""
+    _seed_corpus_market(conn, "cond1")
+    _seed_asset(conn, condition_id="cond1", asset_id="t1", outcome_side="YES", outcome_index=0)
+    _seed_asset(conn, condition_id="cond1", asset_id="t2", outcome_side="NO", outcome_index=1)
+    assert validate_backfill_state(conn) == 0
+
+
+def test_validate_backfill_state_counts_remaining_buggy(conn: sqlite3.Connection) -> None:
+    """validate_backfill_state counts all markets still stored as NO+NO."""
+    _seed_corpus_market(conn, "buggy1")
+    _seed_asset(conn, condition_id="buggy1", asset_id="t1", outcome_side="NO", outcome_index=1)
+    _seed_asset(conn, condition_id="buggy1", asset_id="t2", outcome_side="NO", outcome_index=1)
+
+    _seed_corpus_market(conn, "buggy2")
+    _seed_asset(conn, condition_id="buggy2", asset_id="t3", outcome_side="NO", outcome_index=1)
+    _seed_asset(conn, condition_id="buggy2", asset_id="t4", outcome_side="NO", outcome_index=1)
+
+    assert validate_backfill_state(conn) == 2
