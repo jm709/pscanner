@@ -354,7 +354,9 @@ def _make_data_client() -> _DataCM:
     return _DataCM()
 
 
-async def _drain_pending(*, conn: sqlite3.Connection, data: DataClient) -> int:
+async def _drain_pending(
+    *, conn: sqlite3.Connection, data: DataClient, gamma: GammaClient
+) -> int:
     """Drain `corpus_markets` work queue, walking each pending market once."""
     markets_repo = CorpusMarketsRepo(conn)
     trades_repo = CorpusTradesRepo(conn)
@@ -368,6 +370,7 @@ async def _drain_pending(*, conn: sqlite3.Connection, data: DataClient) -> int:
                 inserted = await walk_market(
                     condition_id=m.condition_id,
                     data=data,
+                    gamma=gamma,
                     markets_repo=markets_repo,
                     trades_repo=trades_repo,
                     now_ts=int(time.time()),
@@ -442,7 +445,7 @@ async def _run_polymarket_backfill(args: argparse.Namespace) -> int:
                 now_ts=int(time.time()),
                 since_ts=None,
             )
-            await _drain_pending(conn=conn, data=data)
+            await _drain_pending(conn=conn, data=data, gamma=gamma)
             await _register_missing_polymarket_resolutions(
                 conn=conn,
                 gamma=gamma,
@@ -523,7 +526,7 @@ async def _run_polymarket_refresh(args: argparse.Namespace) -> int:
                 now_ts=int(time.time()),
                 since_ts=since_ts,
             )
-            await _drain_pending(conn=conn, data=data)
+            await _drain_pending(conn=conn, data=data, gamma=gamma)
             await _register_missing_polymarket_resolutions(
                 conn=conn,
                 gamma=gamma,
