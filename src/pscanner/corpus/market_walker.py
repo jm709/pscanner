@@ -18,16 +18,75 @@ from pscanner.corpus.repos import (
     CorpusTradesRepo,
 )
 from pscanner.poly.data import DataClient
+from pscanner.poly.gamma import GammaClient
 
 _log = structlog.get_logger(__name__)
 _PAGE_SIZE: Final[int] = 500
 _OFFSET_CAP: Final[int] = (
     3000  # Polymarket /trades hard cap (server: "max historical activity offset of 3000 exceeded")  # noqa: E501
 )
+_BINARY_MARKET_OUTCOME_COUNT: Final[int] = 2
 
 
-def _parse_trade(item: dict[str, Any], condition_id: str) -> CorpusTrade | None:
+async def _resolve_outcome_side_index(
+    condition_id: str,
+    *,
+    data: DataClient,
+    gamma: GammaClient,
+) -> dict[str, str]:
+    """Build ``{asset_id: "YES" | "NO"}`` from the market's ``clob_token_ids``.
+
+    Polymarket convention: ``clob_token_ids[0]`` is the YES-equivalent leg,
+    ``clob_token_ids[1]`` is the NO-equivalent leg (parallel to ``outcomes``).
+    The `/trades` row's ``outcome`` field is the human-readable name
+    (e.g. ``"Cavaliers"``), which is unreliable for non-binary-Yes/No markets.
+    Deriving ``outcome_side`` from the token-id position fixes the
+    long-standing sports-collapse bug (#159).
+
+    Returns an empty mapping when the market cannot be resolved or is not
+    binary; the caller falls back to the legacy outcome-name heuristic.
+    """
+    try:
+        slug = await data.get_market_slug_by_condition_id(condition_id)
+    except Exception:
+        _log.warning("corpus.outcome_side_index.slug_lookup_failed", condition_id=condition_id)
+        return {}
+    if slug is None:
+        return {}
+    try:
+        market = await gamma.get_market_by_slug(slug)
+    except Exception:
+        _log.warning(
+            "corpus.outcome_side_index.gamma_lookup_failed",
+            condition_id=condition_id,
+            slug=slug,
+        )
+        return {}
+    if market is None:
+        return {}
+    if len(market.clob_token_ids) != _BINARY_MARKET_OUTCOME_COUNT:
+        return {}
+    return {
+        str(market.clob_token_ids[0]): "YES",
+        str(market.clob_token_ids[1]): "NO",
+    }
+
+
+def _parse_trade(
+    item: dict[str, Any],
+    condition_id: str,
+    *,
+    outcome_side_by_asset_id: dict[str, str],
+) -> CorpusTrade | None:
     """Best-effort parse of a `/trades` JSON item to ``CorpusTrade``.
+
+    ``outcome_side`` is derived from ``outcome_side_by_asset_id`` (built
+    once per ``walk_market`` from the market's ``clob_token_ids``). When
+    the trade's ``asset`` is not present in the map (e.g. resolution
+    failed or this is a non-binary market), falls back to the legacy
+    outcome-name heuristic, which collapses non-``yes`` labels to ``NO``
+    (the #159 bug, kept as the fallback because it preserves earlier
+    behavior for unresolvable markets).
 
     Returns ``None`` if required fields are missing or malformed.
     """
@@ -52,12 +111,15 @@ def _parse_trade(item: dict[str, Any], condition_id: str) -> CorpusTrade | None:
         return None
     if price_f is None or size_f is None:
         return None
+    resolved_side = outcome_side_by_asset_id.get(asset)
+    if resolved_side is None:
+        resolved_side = "YES" if outcome.lower() == "yes" else "NO"
     return CorpusTrade(
         tx_hash=tx,
         asset_id=asset,
         wallet_address=wallet,
         condition_id=condition_id,
-        outcome_side="YES" if outcome.lower() == "yes" else "NO",
+        outcome_side=resolved_side,
         bs="BUY" if side.upper() == "BUY" else "SELL",
         price=price_f,
         size=size_f,
@@ -70,15 +132,23 @@ async def walk_market(
     *,
     condition_id: str,
     data: DataClient,
+    gamma: GammaClient,
     markets_repo: CorpusMarketsRepo,
     trades_repo: CorpusTradesRepo,
     now_ts: int,
 ) -> int:
     """Pull every trade on ``condition_id``; record progress and final state.
 
+    Pre-fetches the parent ``Market`` once via gamma so each trade's
+    ``outcome_side`` can be derived from the position of its ``asset`` in
+    ``clob_token_ids`` (#159). When the gamma lookup fails, every trade
+    falls back to the legacy outcome-name heuristic; the walk still
+    proceeds with the older (known-buggy) labelling rather than aborting.
+
     Args:
         condition_id: Polymarket market identifier.
-        data: Data client used for ``/trades`` pagination.
+        data: Data client used for ``/trades`` pagination + slug resolution.
+        gamma: Gamma client used to fetch ``clob_token_ids`` once.
         markets_repo: Markets repo to update progress/state on.
         trades_repo: Trades repo for inserts.
         now_ts: Unix seconds for state-machine timestamps.
@@ -91,6 +161,10 @@ async def walk_market(
     total_inserted = 0
     truncated = False
 
+    outcome_side_by_asset_id = await _resolve_outcome_side_index(
+        condition_id, data=data, gamma=gamma
+    )
+
     try:
         total_inserted, truncated = await _fetch_all_pages(
             condition_id=condition_id,
@@ -98,6 +172,7 @@ async def walk_market(
             markets_repo=markets_repo,
             trades_repo=trades_repo,
             start_offset=offset,
+            outcome_side_by_asset_id=outcome_side_by_asset_id,
         )
     except Exception as exc:
         markets_repo.mark_failed(condition_id, error_message=str(exc))
@@ -110,6 +185,7 @@ async def walk_market(
         condition_id=condition_id,
         trades_inserted=total_inserted,
         truncated=truncated,
+        outcome_side_resolved=bool(outcome_side_by_asset_id),
     )
     return total_inserted
 
@@ -121,6 +197,7 @@ async def _fetch_all_pages(
     markets_repo: CorpusMarketsRepo,
     trades_repo: CorpusTradesRepo,
     start_offset: int,
+    outcome_side_by_asset_id: dict[str, str],
 ) -> tuple[int, bool]:
     """Fetch and store all pages of trades for one market.
 
@@ -136,7 +213,16 @@ async def _fetch_all_pages(
         if not page:
             truncated = offset >= _OFFSET_CAP
             break
-        parsed = [t for item in page if (t := _parse_trade(item, condition_id)) is not None]
+        parsed = [
+            t
+            for item in page
+            if (
+                t := _parse_trade(
+                    item, condition_id, outcome_side_by_asset_id=outcome_side_by_asset_id
+                )
+            )
+            is not None
+        ]
         inserted = trades_repo.insert_batch(parsed)
         total_inserted += inserted
         offset += len(page)

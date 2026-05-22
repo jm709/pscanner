@@ -37,7 +37,7 @@ def _parse_json_string_list(value: Any) -> list[Any]:
     Raises:
         ValueError: If ``value`` is a string but not valid JSON-list.
     """
-    if value is None or value in {"", "null"}:
+    if value is None or value in ("", "null"):
         return []
     if isinstance(value, list):
         return value
