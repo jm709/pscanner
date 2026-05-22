@@ -386,3 +386,58 @@ def test_summary_by_source_groups_correctly(tmp_db: sqlite3.Connection) -> None:
     assert by_key[("velocity", "fade")].resolved_count == 1
     assert by_key[("velocity", "fade")].realized_pnl == pytest.approx(-2.5)
     assert by_key[("velocity", "fade")].win_rate == pytest.approx(0.0)
+
+
+def test_count_by_source_wallet_empty(tmp_db: sqlite3.Connection) -> None:
+    repo = PaperTradesRepo(tmp_db)
+    assert repo.count_by_source_wallet(detector="subgraph_copy") == {}
+
+
+def test_count_by_source_wallet_groups(tmp_db: sqlite3.Connection) -> None:
+    repo = PaperTradesRepo(tmp_db)
+    cond = ConditionId("0xcond")
+    ass = AssetId("123")
+
+    def _insert(wallet: str, key: str, detector: str) -> None:
+        repo.insert_entry(
+            triggering_alert_key=key,
+            triggering_alert_detector=detector,
+            rule_variant=None,
+            source_wallet=wallet,
+            condition_id=cond,
+            asset_id=ass,
+            outcome="Yes",
+            shares=1.0,
+            fill_price=0.5,
+            cost_usd=0.5,
+            nav_after_usd=1000.0,
+            ts=1_700_000_000,
+        )
+
+    _insert("0xaa", "k1", "subgraph_copy")
+    _insert("0xaa", "k2", "subgraph_copy")
+    _insert("0xbb", "k3", "subgraph_copy")
+    _insert("0xaa", "k4", "gate_buy")  # different detector, should NOT count
+
+    counts = repo.count_by_source_wallet(detector="subgraph_copy")
+    assert counts == {"0xaa": 2, "0xbb": 1}
+
+
+def test_count_by_source_wallet_excludes_null_wallet(tmp_db: sqlite3.Connection) -> None:
+    repo = PaperTradesRepo(tmp_db)
+    repo.insert_entry(
+        triggering_alert_key="k1",
+        triggering_alert_detector="subgraph_copy",
+        rule_variant=None,
+        source_wallet=None,
+        condition_id=ConditionId("0xcond"),
+        asset_id=AssetId("123"),
+        outcome="Yes",
+        shares=1.0,
+        fill_price=0.5,
+        cost_usd=0.5,
+        nav_after_usd=1000.0,
+        ts=1_700_000_000,
+    )
+    counts = repo.count_by_source_wallet(detector="subgraph_copy")
+    assert counts == {}

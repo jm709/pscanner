@@ -19,6 +19,7 @@ DetectorName = Literal[
     "cluster",
     "move_attribution",
     "gate_buy",
+    "subgraph_copy",
 ]
 
 

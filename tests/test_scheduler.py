@@ -16,12 +16,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import pscanner.scheduler as scheduler_mod
 from pscanner.alerts.models import Alert
 from pscanner.alerts.sink import AlertSink
 from pscanner.collectors.activity import ActivityCollector
 from pscanner.collectors.events import EventCollector
 from pscanner.collectors.markets import MarketCollector
 from pscanner.collectors.positions import PositionCollector
+from pscanner.collectors.subgraph_trades import SubgraphTradeCollector
 from pscanner.collectors.ticks import MarketTickCollector
 from pscanner.collectors.trades import TradeCollector
 from pscanner.collectors.watchlist import WatchlistSyncer
@@ -30,6 +32,7 @@ from pscanner.config import (
     ClusterConfig,
     Config,
     ConvergenceConfig,
+    EvaluatorsConfig,
     EventsConfig,
     MarketsConfig,
     MispricingConfig,
@@ -40,10 +43,13 @@ from pscanner.config import (
     RatelimitConfig,
     ScannerConfig,
     SmartMoneyConfig,
+    SubgraphCopyEvaluatorConfig,
+    SubgraphTradeCollectorConfig,
     TicksConfig,
     VelocityConfig,
     WhalesConfig,
 )
+from pscanner.corpus.db import init_corpus_db
 from pscanner.detectors.convergence import ConvergenceDetector
 from pscanner.detectors.move_attribution import MoveAttributionDetector
 from pscanner.detectors.velocity import PriceVelocityDetector
@@ -59,6 +65,7 @@ from pscanner.store.repo import (
     TrackedWalletsRepo,
 )
 from pscanner.strategies.evaluators import MonotoneEvaluator
+from pscanner.strategies.evaluators.subgraph_copy import SubgraphCopyEvaluator
 from pscanner.strategies.paper_resolver import PaperResolver
 from pscanner.strategies.paper_trader import PaperTrader
 from pscanner.util.clock import FakeClock
@@ -1104,3 +1111,77 @@ async def test_replay_paper_trader_noop_when_disabled(db_path: Path) -> None:
         await scanner._replay_paper_trader()  # must not raise
     finally:
         await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_subgraph_trades_wired_when_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GRAPH_API_KEY", "test-key")
+    # Redirect the corpus DB to a tmp path so we don't touch the real one.
+    corpus_path = tmp_path / "corpus.sqlite3"
+    monkeypatch.setattr(
+        scheduler_mod,
+        "init_corpus_db",
+        lambda _p: init_corpus_db(corpus_path),
+    )
+    config = Config(
+        subgraph_trades=SubgraphTradeCollectorConfig(enabled=True),
+        paper_trading=PaperTradingConfig(
+            enabled=True,
+            evaluators=EvaluatorsConfig(
+                subgraph_copy=SubgraphCopyEvaluatorConfig(enabled=True),
+            ),
+        ),
+    )
+    scanner = Scanner(config=config, db_path=tmp_path / "p.sqlite3")
+    try:
+        assert isinstance(scanner._collectors.get("subgraph_trades"), SubgraphTradeCollector)
+        pt = scanner._detectors["paper_trader"]
+        assert any(isinstance(e, SubgraphCopyEvaluator) for e in pt._evaluators)
+    finally:
+        await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_subgraph_trades_preflight_requires_graph_api_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GRAPH_API_KEY", raising=False)
+    corpus_path = tmp_path / "corpus.sqlite3"
+    monkeypatch.setattr(
+        scheduler_mod,
+        "init_corpus_db",
+        lambda _p: init_corpus_db(corpus_path),
+    )
+    config = Config(subgraph_trades=SubgraphTradeCollectorConfig(enabled=True))
+    scanner = Scanner(config=config, db_path=tmp_path / "p.sqlite3")
+    try:
+        with pytest.raises(RuntimeError, match="GRAPH_API_KEY"):
+            scanner.preflight()
+    finally:
+        await scanner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_subgraph_trades_aclose_closes_subgraph_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: Scanner.aclose() must close the SubgraphClient (#152 review)."""
+    monkeypatch.setenv("GRAPH_API_KEY", "test-key")
+    corpus_path = tmp_path / "corpus.sqlite3"
+    monkeypatch.setattr(
+        scheduler_mod,
+        "init_corpus_db",
+        lambda _p: init_corpus_db(corpus_path),
+    )
+    config = Config(subgraph_trades=SubgraphTradeCollectorConfig(enabled=True))
+    scanner = Scanner(config=config, db_path=tmp_path / "p.sqlite3")
+    assert scanner._subgraph_client is not None
+    sub_client = scanner._subgraph_client
+    await scanner.aclose()
+    # SubgraphClient's `_closed` flag flips to True after aclose().
+    assert sub_client._closed is True
