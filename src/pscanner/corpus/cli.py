@@ -36,6 +36,7 @@ from pscanner.corpus.onchain_backfill import (
     run_onchain_backfill,
 )
 from pscanner.corpus.onchain_targeted import run_targeted_backfill
+from pscanner.corpus.outcome_side_backfill import run_backfill as _run_outcome_side_backfill
 from pscanner.corpus.repos import (
     CorpusMarketsRepo,
     CorpusStateRepo,
@@ -321,6 +322,14 @@ def build_corpus_parser() -> argparse.ArgumentParser:
         default=50,
         help="Gamma requests per minute ceiling (default: 50).",
     )
+    sp_backfill_outcome = sub.add_parser(
+        "backfill-outcome-side",
+        help="Rewrite NO+NO binary markets in asset_index + corpus_trades (#167).",
+    )
+    _add_db_arg(sp_backfill_outcome)
+    sp_backfill_outcome.add_argument("--rpm", type=int, default=50)
+    sp_backfill_outcome.add_argument("--limit", type=int, default=None)
+    sp_backfill_outcome.add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -888,6 +897,26 @@ async def _cmd_backfill_gamma_tags(args: argparse.Namespace) -> int:
         conn.close()
 
 
+async def _cmd_backfill_outcome_side(args: argparse.Namespace) -> int:
+    """``corpus backfill-outcome-side`` — repair NO+NO binary markets (#167)."""
+    conn = init_corpus_db(Path(args.db))
+    try:
+        async with AsyncExitStack() as stack:
+            gamma = await stack.enter_async_context(_make_gamma_client())
+            data = await stack.enter_async_context(_make_data_client())
+            stats = await _run_outcome_side_backfill(
+                conn,
+                data=data,
+                gamma=gamma,
+                dry_run=bool(args.dry_run),
+                limit=args.limit,
+            )
+        _log.info("corpus.backfill_outcome_side.cli_done", **stats)
+        return 0
+    finally:
+        conn.close()
+
+
 _HANDLERS = {
     "backfill": _cmd_backfill,
     "refresh": _cmd_refresh,
@@ -896,6 +925,7 @@ _HANDLERS = {
     "onchain-backfill-targeted": _cmd_onchain_backfill_targeted,
     "subgraph-backfill": _cmd_subgraph_backfill,
     "backfill-gamma-tags": _cmd_backfill_gamma_tags,
+    "backfill-outcome-side": _cmd_backfill_outcome_side,
 }
 
 
