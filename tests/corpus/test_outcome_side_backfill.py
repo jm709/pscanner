@@ -9,7 +9,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from pscanner.corpus.db import init_corpus_db
-from pscanner.corpus.outcome_side_backfill import find_buggy_markets, resolve_correct_mapping
+from pscanner.corpus.outcome_side_backfill import (
+    apply_market_backfill,
+    find_buggy_markets,
+    resolve_correct_mapping,
+)
 from pscanner.poly.models import Market
 
 
@@ -200,3 +204,121 @@ async def test_resolve_correct_mapping_returns_none_on_gamma_exception() -> None
     gamma = AsyncMock()
     gamma.get_market_by_slug = AsyncMock(side_effect=RuntimeError("boom"))
     assert await resolve_correct_mapping("cond1", data=data, gamma=gamma) is None
+
+
+# Tests for apply_market_backfill
+
+
+def _seed_trade(
+    conn: sqlite3.Connection,
+    *,
+    condition_id: str,
+    asset_id: str,
+    outcome_side: str,
+    tx_hash: str,
+) -> None:
+    """Insert a corpus_trades row."""
+    conn.execute(
+        "INSERT INTO corpus_trades (platform, tx_hash, asset_id, wallet_address, "
+        " condition_id, outcome_side, bs, price, size, notional_usd, ts) "
+        "VALUES ('polymarket', ?, ?, '0xWALLET', ?, ?, 'BUY', 0.5, 100.0, 50.0, 1)",
+        (tx_hash, asset_id, condition_id, outcome_side),
+    )
+    conn.commit()
+
+
+def test_apply_market_backfill_rewrites_asset_index_and_corpus_trades(
+    conn: sqlite3.Connection,
+) -> None:
+    """apply_market_backfill rewrites asset_index and corpus_trades."""
+    _seed_corpus_market(conn, "cond1")
+    _seed_asset(conn, condition_id="cond1", asset_id="t-yes", outcome_side="NO", outcome_index=1)
+    _seed_asset(conn, condition_id="cond1", asset_id="t-no", outcome_side="NO", outcome_index=1)
+    _seed_trade(conn, condition_id="cond1", asset_id="t-yes", outcome_side="NO", tx_hash="0xA")
+    _seed_trade(conn, condition_id="cond1", asset_id="t-yes", outcome_side="NO", tx_hash="0xB")
+    _seed_trade(conn, condition_id="cond1", asset_id="t-no", outcome_side="NO", tx_hash="0xC")
+
+    mapping = {"t-yes": ("YES", 0), "t-no": ("NO", 1)}
+    apply_market_backfill(conn, "cond1", mapping, now_ts=1_700_000_500)
+
+    # asset_index updated to YES + NO
+    ai = dict(
+        conn.execute(
+            "SELECT asset_id, outcome_side FROM asset_index WHERE condition_id='cond1'"
+        ).fetchall()
+    )
+    assert ai == {"t-yes": "YES", "t-no": "NO"}
+
+    # corpus_trades updated: YES on t-yes rows, NO on t-no rows
+    yes_rows = [
+        r[0]
+        for r in conn.execute(
+            "SELECT tx_hash FROM corpus_trades"
+            " WHERE condition_id='cond1' AND outcome_side='YES' ORDER BY tx_hash"
+        )
+    ]
+    assert yes_rows == ["0xA", "0xB"]
+    no_rows = [
+        r[0]
+        for r in conn.execute(
+            "SELECT tx_hash FROM corpus_trades"
+            " WHERE condition_id='cond1' AND outcome_side='NO' ORDER BY tx_hash"
+        )
+    ]
+    assert no_rows == ["0xC"]
+
+    # Sentinel set
+    sentinel = conn.execute(
+        "SELECT outcome_side_backfilled_at FROM corpus_markets WHERE condition_id='cond1'"
+    ).fetchone()[0]
+    assert sentinel == 1_700_000_500
+
+
+def test_apply_market_backfill_idempotent(conn: sqlite3.Connection) -> None:
+    """apply_market_backfill is idempotent; last write wins on sentinel."""
+    _seed_corpus_market(conn, "cond1")
+    _seed_asset(conn, condition_id="cond1", asset_id="t-yes", outcome_side="NO", outcome_index=1)
+    _seed_asset(conn, condition_id="cond1", asset_id="t-no", outcome_side="NO", outcome_index=1)
+    _seed_trade(conn, condition_id="cond1", asset_id="t-yes", outcome_side="NO", tx_hash="0xA")
+    mapping = {"t-yes": ("YES", 0), "t-no": ("NO", 1)}
+
+    apply_market_backfill(conn, "cond1", mapping, now_ts=1_700_000_500)
+    apply_market_backfill(conn, "cond1", mapping, now_ts=1_700_000_999)
+
+    ai = dict(
+        conn.execute(
+            "SELECT asset_id, outcome_side FROM asset_index WHERE condition_id='cond1'"
+        ).fetchall()
+    )
+    assert ai == {"t-yes": "YES", "t-no": "NO"}
+    sentinel = conn.execute(
+        "SELECT outcome_side_backfilled_at FROM corpus_markets WHERE condition_id='cond1'"
+    ).fetchone()[0]
+    assert sentinel == 1_700_000_999  # last write wins
+
+
+def test_apply_market_backfill_creates_sentinel_row_when_missing(
+    conn: sqlite3.Connection,
+) -> None:
+    """apply_market_backfill handles orphan asset_index with no corpus_markets row."""
+    # No corpus_markets row at all (orphan asset_index entries from token_resolver)
+    _seed_asset(conn, condition_id="orphan1", asset_id="t-yes", outcome_side="NO", outcome_index=1)
+    _seed_asset(conn, condition_id="orphan1", asset_id="t-no", outcome_side="NO", outcome_index=1)
+    mapping = {"t-yes": ("YES", 0), "t-no": ("NO", 1)}
+
+    apply_market_backfill(conn, "orphan1", mapping, now_ts=1_700_000_500)
+
+    # We DON'T fabricate a corpus_markets row — the sentinel UPDATE is a no-op
+    # when no row exists. find_buggy_markets gates on asset_index leg-sides,
+    # so once the asset_index is corrected the market drops out regardless.
+    sentinel = conn.execute(
+        "SELECT outcome_side_backfilled_at FROM corpus_markets WHERE condition_id='orphan1'"
+    ).fetchone()
+    assert sentinel is None
+
+    ai = dict(
+        conn.execute(
+            "SELECT asset_id, outcome_side FROM asset_index WHERE condition_id='orphan1'"
+        ).fetchall()
+    )
+    assert ai == {"t-yes": "YES", "t-no": "NO"}
