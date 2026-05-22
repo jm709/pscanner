@@ -901,9 +901,13 @@ async def _cmd_backfill_outcome_side(args: argparse.Namespace) -> int:
     """``corpus backfill-outcome-side`` — repair NO+NO binary markets (#167)."""
     conn = init_corpus_db(Path(args.db))
     try:
-        async with AsyncExitStack() as stack:
-            gamma = await stack.enter_async_context(_make_gamma_client())
-            data = await stack.enter_async_context(_make_data_client())
+        # Instantiate directly so ``--rpm`` actually propagates. The
+        # ``_make_gamma_client`` / ``_make_data_client`` helpers hardcode
+        # rpm=50; this command needs operator tuning to coexist with the
+        # live daemon (which also uses gamma).
+        gamma = GammaClient(rpm=args.rpm)
+        data = DataClient(rpm=args.rpm)
+        try:
             stats = await _run_outcome_side_backfill(
                 conn,
                 data=data,
@@ -911,8 +915,11 @@ async def _cmd_backfill_outcome_side(args: argparse.Namespace) -> int:
                 dry_run=bool(args.dry_run),
                 limit=args.limit,
             )
-        _log.info("corpus.backfill_outcome_side.cli_done", **stats)
-        return 0
+            _log.info("corpus.backfill_outcome_side.cli_done", **stats)
+            return 0
+        finally:
+            await gamma.aclose()
+            await data.aclose()
     finally:
         conn.close()
 

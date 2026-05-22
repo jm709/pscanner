@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
-from contextlib import asynccontextmanager
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -53,34 +52,46 @@ def _seed_buggy_market(conn: sqlite3.Connection, condition_id: str) -> None:
     conn.commit()
 
 
+def _install_fake_clients(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    slug: str | None,
+    market: Market | None,
+) -> tuple[MagicMock, MagicMock]:
+    """Replace ``GammaClient`` + ``DataClient`` in ``cli_mod`` namespace.
+
+    Returns the two class-mocks so callers can inspect constructor args
+    (e.g. ``rpm`` propagation).
+    """
+    fake_gamma_instance = AsyncMock()
+    fake_gamma_instance.get_market_by_slug = AsyncMock(return_value=market)
+    fake_gamma_instance.aclose = AsyncMock()
+    fake_gamma_class = MagicMock(return_value=fake_gamma_instance)
+
+    fake_data_instance = AsyncMock()
+    fake_data_instance.get_market_slug_by_condition_id = AsyncMock(return_value=slug)
+    fake_data_instance.aclose = AsyncMock()
+    fake_data_class = MagicMock(return_value=fake_data_instance)
+
+    monkeypatch.setattr(cli_mod, "GammaClient", fake_gamma_class)
+    monkeypatch.setattr(cli_mod, "DataClient", fake_data_class)
+    return fake_gamma_class, fake_data_class
+
+
 @pytest.mark.asyncio
-async def test_cli_backfill_outcome_side_end_to_end(tmp_path: Path, monkeypatch) -> None:
+async def test_cli_backfill_outcome_side_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     db_path = tmp_path / "corpus.sqlite3"
     conn = init_corpus_db(db_path)
     _seed_buggy_market(conn, "cond1")
     conn.close()
 
-    # Stub the gamma + data context managers used by cli.py.
-    fake_data = AsyncMock()
-    fake_data.get_market_slug_by_condition_id = AsyncMock(return_value="slug-cond1")
-    fake_data.aclose = AsyncMock()
-
-    fake_gamma = AsyncMock()
-    fake_gamma.get_market_by_slug = AsyncMock(
-        return_value=_make_market(slug="slug-cond1", tokens=("y-cond1", "n-cond1"))
+    _install_fake_clients(
+        monkeypatch,
+        slug="slug-cond1",
+        market=_make_market(slug="slug-cond1", tokens=("y-cond1", "n-cond1")),
     )
-    fake_gamma.aclose = AsyncMock()
-
-    @asynccontextmanager
-    async def _gamma_cm():
-        yield fake_gamma
-
-    @asynccontextmanager
-    async def _data_cm():
-        yield fake_data
-
-    monkeypatch.setattr(cli_mod, "_make_gamma_client", _gamma_cm)
-    monkeypatch.setattr(cli_mod, "_make_data_client", _data_cm)
 
     args = argparse.Namespace(
         db=str(db_path),
@@ -108,3 +119,28 @@ async def test_cli_backfill_outcome_side_end_to_end(tmp_path: Path, monkeypatch)
     ).fetchone()[0]
     assert sentinel is not None
     conn.close()
+
+
+@pytest.mark.asyncio
+async def test_cli_backfill_outcome_side_propagates_rpm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: ``--rpm`` must reach the client constructors (final-review fix)."""
+    db_path = tmp_path / "corpus.sqlite3"
+    conn = init_corpus_db(db_path)
+    conn.close()
+
+    fake_gamma_class, fake_data_class = _install_fake_clients(
+        monkeypatch, slug=None, market=None
+    )
+
+    args = argparse.Namespace(
+        db=str(db_path),
+        rpm=17,
+        limit=None,
+        dry_run=False,
+    )
+    rc = await cli_mod._cmd_backfill_outcome_side(args)
+    assert rc == 0
+    fake_gamma_class.assert_called_once_with(rpm=17)
+    fake_data_class.assert_called_once_with(rpm=17)
