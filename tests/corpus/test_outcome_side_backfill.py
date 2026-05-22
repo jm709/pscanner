@@ -13,6 +13,7 @@ from pscanner.corpus.outcome_side_backfill import (
     apply_market_backfill,
     find_buggy_markets,
     resolve_correct_mapping,
+    run_backfill,
     validate_backfill_state,
 )
 from pscanner.poly.models import Market
@@ -347,3 +348,98 @@ def test_validate_backfill_state_counts_remaining_buggy(conn: sqlite3.Connection
     _seed_asset(conn, condition_id="buggy2", asset_id="t4", outcome_side="NO", outcome_index=1)
 
     assert validate_backfill_state(conn) == 2
+
+
+# Tests for run_backfill
+
+
+@pytest.mark.asyncio
+async def test_run_backfill_processes_buggy_markets(conn: sqlite3.Connection) -> None:
+    _seed_corpus_market(conn, "buggy1")
+    _seed_asset(conn, condition_id="buggy1", asset_id="t-yes", outcome_side="NO", outcome_index=1)
+    _seed_asset(conn, condition_id="buggy1", asset_id="t-no", outcome_side="NO", outcome_index=1)
+    _seed_trade(conn, condition_id="buggy1", asset_id="t-yes", outcome_side="NO", tx_hash="0xA")
+
+    data = _fake_data("slug-buggy1")
+    market = _make_market(
+        condition_id="buggy1",
+        outcomes=("Cavaliers", "Knicks"),
+        tokens=("t-yes", "t-no"),
+    )
+    gamma = _fake_gamma(market)
+
+    stats = await run_backfill(conn, data=data, gamma=gamma, dry_run=False, limit=None)
+
+    assert stats == {"processed": 1, "resolved": 1, "skipped": 0, "remaining": 0}
+    assert validate_backfill_state(conn) == 0
+
+
+@pytest.mark.asyncio
+async def test_run_backfill_dry_run_skips_writes(conn: sqlite3.Connection) -> None:
+    _seed_corpus_market(conn, "buggy1")
+    _seed_asset(conn, condition_id="buggy1", asset_id="t-yes", outcome_side="NO", outcome_index=1)
+    _seed_asset(conn, condition_id="buggy1", asset_id="t-no", outcome_side="NO", outcome_index=1)
+
+    data = _fake_data("slug-buggy1")
+    market = _make_market(
+        condition_id="buggy1",
+        outcomes=("Cavaliers", "Knicks"),
+        tokens=("t-yes", "t-no"),
+    )
+    gamma = _fake_gamma(market)
+
+    stats = await run_backfill(conn, data=data, gamma=gamma, dry_run=True, limit=None)
+
+    assert stats == {"processed": 1, "resolved": 1, "skipped": 0, "remaining": 1}
+    # asset_index unchanged
+    ai = dict(
+        conn.execute(
+            "SELECT asset_id, outcome_side FROM asset_index WHERE condition_id='buggy1'"
+        ).fetchall()
+    )
+    assert ai == {"t-yes": "NO", "t-no": "NO"}
+
+
+@pytest.mark.asyncio
+async def test_run_backfill_skips_unresolvable_markets(conn: sqlite3.Connection) -> None:
+    _seed_corpus_market(conn, "buggy1")
+    _seed_asset(conn, condition_id="buggy1", asset_id="t1", outcome_side="NO", outcome_index=1)
+    _seed_asset(conn, condition_id="buggy1", asset_id="t2", outcome_side="NO", outcome_index=1)
+
+    data = _fake_data(None)  # slug not found
+    gamma = _fake_gamma(None)
+    stats = await run_backfill(conn, data=data, gamma=gamma, dry_run=False, limit=None)
+
+    assert stats == {"processed": 1, "resolved": 0, "skipped": 1, "remaining": 1}
+    # Sentinel NOT written so the market re-queues on the next run
+    sentinel = conn.execute(
+        "SELECT outcome_side_backfilled_at FROM corpus_markets WHERE condition_id='buggy1'"
+    ).fetchone()[0]
+    assert sentinel is None
+
+
+@pytest.mark.asyncio
+async def test_run_backfill_limit_caps_work(conn: sqlite3.Connection) -> None:
+    for cid in ("a1", "a2", "a3"):
+        _seed_corpus_market(conn, cid)
+        _seed_asset(conn, condition_id=cid, asset_id=f"y-{cid}", outcome_side="NO", outcome_index=1)
+        _seed_asset(conn, condition_id=cid, asset_id=f"n-{cid}", outcome_side="NO", outcome_index=1)
+
+    data = AsyncMock()
+    data.get_market_slug_by_condition_id = AsyncMock(side_effect=lambda c: f"slug-{c}")
+    gamma = AsyncMock()
+
+    def _market_for(slug: str) -> Market:
+        cid = slug.replace("slug-", "")
+        return _make_market(
+            condition_id=cid,
+            outcomes=("A", "B"),
+            tokens=(f"y-{cid}", f"n-{cid}"),
+        )
+
+    gamma.get_market_by_slug = AsyncMock(side_effect=_market_for)
+
+    stats = await run_backfill(conn, data=data, gamma=gamma, dry_run=False, limit=2)
+    assert stats["processed"] == 2
+    assert stats["resolved"] == 2
+    assert stats["remaining"] == 1

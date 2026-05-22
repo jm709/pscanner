@@ -11,6 +11,7 @@ PR #166 forward-fixed the parser; this module rewrites the historical rows.
 from __future__ import annotations
 
 import sqlite3
+import time
 
 import structlog
 
@@ -191,3 +192,67 @@ def validate_backfill_state(conn: sqlite3.Connection) -> int:
         """,
     ).fetchone()
     return int(row[0])
+
+
+async def run_backfill(
+    conn: sqlite3.Connection,
+    *,
+    data: DataClient,
+    gamma: GammaClient,
+    dry_run: bool,
+    limit: int | None,
+) -> dict[str, int]:
+    """Walk every buggy market, resolve the correct mapping, apply UPDATEs.
+
+    Returns a stats dict: ``processed``, ``resolved``, ``skipped``,
+    ``remaining`` (post-run count of NO+NO markets still in asset_index).
+
+    Per-market failures (gamma missing, non-binary) increment ``skipped``
+    and do NOT touch the DB; the market stays in the work queue for a
+    future re-run.
+    """
+    buggy = find_buggy_markets(conn)
+    if limit is not None:
+        buggy = buggy[:limit]
+
+    processed = 0
+    resolved = 0
+    skipped = 0
+    for condition_id in buggy:
+        mapping = await resolve_correct_mapping(condition_id, data=data, gamma=gamma)
+        processed += 1
+        if mapping is None:
+            skipped += 1
+            continue
+        resolved += 1
+        if dry_run:
+            _log.info(
+                "corpus.backfill_outcome_side.dry_run_resolve",
+                condition_id=condition_id,
+                mapping={k: v[0] for k, v in mapping.items()},
+            )
+            continue
+        apply_market_backfill(conn, condition_id, mapping, now_ts=int(time.time()))
+        if processed % 100 == 0:
+            _log.info(
+                "corpus.backfill_outcome_side.progress",
+                processed=processed,
+                resolved=resolved,
+                skipped=skipped,
+            )
+
+    remaining = validate_backfill_state(conn)
+    _log.info(
+        "corpus.backfill_outcome_side.done",
+        processed=processed,
+        resolved=resolved,
+        skipped=skipped,
+        remaining=remaining,
+        dry_run=dry_run,
+    )
+    return {
+        "processed": processed,
+        "resolved": resolved,
+        "skipped": skipped,
+        "remaining": remaining,
+    }
