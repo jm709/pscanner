@@ -12,6 +12,11 @@ from __future__ import annotations
 
 import sqlite3
 
+import structlog
+
+from pscanner.poly.data import DataClient
+from pscanner.poly.gamma import GammaClient
+
 
 def find_buggy_markets(conn: sqlite3.Connection) -> list[str]:
     """Return the ``condition_id``s of binary markets stored as NO+NO.
@@ -46,3 +51,59 @@ def find_buggy_markets(conn: sqlite3.Connection) -> list[str]:
         """,
     ).fetchall()
     return [row[0] for row in rows]
+
+
+_log = structlog.get_logger(__name__)
+
+_BINARY_MARKET_OUTCOME_COUNT = 2
+
+
+async def resolve_correct_mapping(
+    condition_id: str,
+    *,
+    data: DataClient,
+    gamma: GammaClient,
+) -> dict[str, tuple[str, int]] | None:
+    """Return ``{token_id: (outcome_side, outcome_index)}`` for ``condition_id``.
+
+    Uses the established ``data.get_market_slug_by_condition_id`` →
+    ``gamma.get_market_by_slug`` chain (the same one ``PaperTrader._backfill_market_cache``
+    and ``market_walker.walk_market`` use post-#166).
+
+    Returns ``None`` when:
+    - either client raises
+    - the slug lookup returns ``None``
+    - the gamma market lookup returns ``None``
+    - the market has ``len(clob_token_ids) != 2`` (non-binary)
+
+    The caller treats ``None`` as "skip this market, no sentinel written".
+    """
+    try:
+        slug = await data.get_market_slug_by_condition_id(condition_id)
+    except Exception:
+        _log.warning("corpus.backfill_outcome_side.slug_lookup_failed", condition_id=condition_id)
+        return None
+    if slug is None:
+        return None
+    try:
+        market = await gamma.get_market_by_slug(slug)
+    except Exception:
+        _log.warning(
+            "corpus.backfill_outcome_side.gamma_lookup_failed",
+            condition_id=condition_id,
+            slug=slug,
+        )
+        return None
+    if market is None:
+        return None
+    if len(market.clob_token_ids) != _BINARY_MARKET_OUTCOME_COUNT:
+        _log.info(
+            "corpus.backfill_outcome_side.not_binary",
+            condition_id=condition_id,
+            n_outcomes=len(market.clob_token_ids),
+        )
+        return None
+    return {
+        str(market.clob_token_ids[0]): ("YES", 0),
+        str(market.clob_token_ids[1]): ("NO", 1),
+    }

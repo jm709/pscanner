@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from unittest.mock import AsyncMock
 
 import pytest
 
 from pscanner.corpus.db import init_corpus_db
-from pscanner.corpus.outcome_side_backfill import find_buggy_markets
+from pscanner.corpus.outcome_side_backfill import find_buggy_markets, resolve_correct_mapping
+from pscanner.poly.models import Market
 
 
 @pytest.fixture
@@ -96,3 +98,105 @@ def test_find_buggy_markets_includes_markets_with_no_corpus_markets_row(
     _seed_asset(conn, condition_id="orphan1", asset_id="t1", outcome_side="NO", outcome_index=1)
     _seed_asset(conn, condition_id="orphan1", asset_id="t2", outcome_side="NO", outcome_index=1)
     assert find_buggy_markets(conn) == ["orphan1"]
+
+
+def _make_market(
+    *, condition_id: str, outcomes: tuple[str, str], tokens: tuple[str, str]
+) -> Market:
+    """Create a test Market with the given condition_id, outcomes, and token IDs."""
+    return Market.model_validate(
+        {
+            "id": "m1",
+            "question": "q",
+            "slug": f"slug-{condition_id}",
+            "conditionId": condition_id,
+            "outcomes": list(outcomes),
+            "outcomePrices": ["0.5", "0.5"],
+            "clobTokenIds": list(tokens),
+            "active": True,
+            "closed": False,
+        }
+    )
+
+
+def _fake_data(slug: str | None) -> AsyncMock:
+    """Create a mock DataClient that returns the given slug."""
+    data = AsyncMock()
+    data.get_market_slug_by_condition_id = AsyncMock(return_value=slug)
+    return data
+
+
+def _fake_gamma(market: Market | None) -> AsyncMock:
+    """Create a mock GammaClient that returns the given market."""
+    gamma = AsyncMock()
+    gamma.get_market_by_slug = AsyncMock(return_value=market)
+    return gamma
+
+
+@pytest.mark.asyncio
+async def test_resolve_correct_mapping_returns_yes_no_dict() -> None:
+    """resolve_correct_mapping returns {token_id: (outcome_side, index)} for binary market."""
+    data = _fake_data("slug-cond1")
+    market = _make_market(
+        condition_id="cond1",
+        outcomes=("Cavaliers", "Knicks"),
+        tokens=("token-cavs", "token-knicks"),
+    )
+    gamma = _fake_gamma(market)
+    mapping = await resolve_correct_mapping("cond1", data=data, gamma=gamma)
+    assert mapping == {"token-cavs": ("YES", 0), "token-knicks": ("NO", 1)}
+
+
+@pytest.mark.asyncio
+async def test_resolve_correct_mapping_returns_none_on_missing_slug() -> None:
+    """resolve_correct_mapping returns None when slug lookup returns None."""
+    data = _fake_data(None)
+    gamma = _fake_gamma(None)
+    assert await resolve_correct_mapping("cond1", data=data, gamma=gamma) is None
+    gamma.get_market_by_slug.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_resolve_correct_mapping_returns_none_on_missing_market() -> None:
+    """resolve_correct_mapping returns None when gamma market lookup returns None."""
+    data = _fake_data("slug-cond1")
+    gamma = _fake_gamma(None)
+    assert await resolve_correct_mapping("cond1", data=data, gamma=gamma) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_correct_mapping_returns_none_on_non_binary() -> None:
+    """resolve_correct_mapping returns None for non-binary markets."""
+    data = _fake_data("slug-cond1")
+    three_outcome = Market.model_validate(
+        {
+            "id": "m1",
+            "question": "q",
+            "slug": "slug-cond1",
+            "outcomes": ["A", "B", "C"],
+            "outcomePrices": ["0.33", "0.33", "0.34"],
+            "clobTokenIds": ["t-a", "t-b", "t-c"],
+            "active": True,
+            "closed": False,
+        }
+    )
+    gamma = _fake_gamma(three_outcome)
+    assert await resolve_correct_mapping("cond1", data=data, gamma=gamma) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_correct_mapping_returns_none_on_data_exception() -> None:
+    """resolve_correct_mapping returns None when data client raises."""
+    data = AsyncMock()
+    data.get_market_slug_by_condition_id = AsyncMock(side_effect=RuntimeError("boom"))
+    gamma = _fake_gamma(None)
+    assert await resolve_correct_mapping("cond1", data=data, gamma=gamma) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_correct_mapping_returns_none_on_gamma_exception() -> None:
+    """resolve_correct_mapping returns None when gamma client raises."""
+    data = _fake_data("slug-cond1")
+    gamma = AsyncMock()
+    gamma.get_market_by_slug = AsyncMock(side_effect=RuntimeError("boom"))
+    assert await resolve_correct_mapping("cond1", data=data, gamma=gamma) is None
