@@ -13,10 +13,11 @@ import os
 import re
 import sqlite3
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import psutil
 import structlog
@@ -327,10 +328,8 @@ async def _register_missing_polymarket_resolutions(
 
 async def _cmd_backfill(args: argparse.Namespace) -> int:
     """Run the corpus backfill for the requested platform."""
-    if args.platform == "manifold":
-        return await _run_manifold_backfill(args)
-    if args.platform == "kalshi":
-        return await _run_kalshi_backfill(args)
+    if args.platform in _ALT_PLATFORM_BINDINGS:
+        return await _run_alt_platform_backfill(args, _ALT_PLATFORM_BINDINGS[args.platform])
     return await _run_polymarket_backfill(args)
 
 
@@ -364,58 +363,10 @@ async def _run_polymarket_backfill(args: argparse.Namespace) -> int:
         conn.close()
 
 
-async def _run_manifold_backfill(args: argparse.Namespace) -> int:
-    """Manifold path: enumerate resolved binary markets, then walk each one."""
-    conn = init_corpus_db(Path(args.db))
-    markets_repo = CorpusMarketsRepo(conn)
-    trades_repo = CorpusTradesRepo(conn)
-    now_ts = int(time.time())
-    try:
-        async with ManifoldClient() as client:
-            await enumerate_resolved_manifold_markets(client, markets_repo, now_ts=now_ts)
-            while pending := markets_repo.next_pending(limit=10, platform="manifold"):
-                for market in pending:
-                    await walk_manifold_market(
-                        client,
-                        markets_repo,
-                        trades_repo,
-                        market_id=ManifoldMarketId(market.condition_id),
-                        now_ts=now_ts,
-                    )
-        return 0
-    finally:
-        conn.close()
-
-
-async def _run_kalshi_backfill(args: argparse.Namespace) -> int:
-    """Kalshi path: enumerate settled binary markets, then walk each one's trades."""
-    conn = init_corpus_db(Path(args.db))
-    markets_repo = CorpusMarketsRepo(conn)
-    trades_repo = CorpusTradesRepo(conn)
-    now_ts = int(time.time())
-    try:
-        async with KalshiClient() as client:
-            await enumerate_resolved_kalshi_markets(client, markets_repo, now_ts=now_ts)
-            while pending := markets_repo.next_pending(limit=10, platform="kalshi"):
-                for market in pending:
-                    await walk_kalshi_market(
-                        client,
-                        markets_repo,
-                        trades_repo,
-                        market_ticker=KalshiMarketTicker(market.condition_id),
-                        now_ts=now_ts,
-                    )
-        return 0
-    finally:
-        conn.close()
-
-
 async def _cmd_refresh(args: argparse.Namespace) -> int:
     """Run the corpus refresh for the requested platform."""
-    if args.platform == "manifold":
-        return await _run_manifold_refresh(args)
-    if args.platform == "kalshi":
-        return await _run_kalshi_refresh(args)
+    if args.platform in _ALT_PLATFORM_BINDINGS:
+        return await _run_alt_platform_refresh(args, _ALT_PLATFORM_BINDINGS[args.platform])
     return await _run_polymarket_refresh(args)
 
 
@@ -446,62 +397,127 @@ async def _run_polymarket_refresh(args: argparse.Namespace) -> int:
         conn.close()
 
 
-async def _run_manifold_refresh(args: argparse.Namespace) -> int:
-    """Manifold refresh: re-enumerate, then record resolutions for missing markets."""
-    db_path = Path(args.db)
-    conn = init_corpus_db(db_path)
+# ---------------------------------------------------------------------------
+# Manifold / Kalshi shared backfill+refresh shell.
+#
+# Both platforms follow the same shape: enumerate resolved markets, then
+# either walk every pending market's trades (backfill) or record resolutions
+# for completed markets missing them (refresh). Only the client class, the
+# identifier-wrapper type, the enumerator, the walker, and the resolution
+# recorder differ. ``_AltPlatformBinding`` carries those per-platform
+# differences; ``_run_alt_platform_*`` are the shared loops.
+# ---------------------------------------------------------------------------
+
+
+async def _walk_manifold(
+    client: ManifoldClient,
+    markets_repo: CorpusMarketsRepo,
+    trades_repo: CorpusTradesRepo,
+    *,
+    condition_id: str,
+    now_ts: int,
+) -> int:
+    return await walk_manifold_market(
+        client,
+        markets_repo,
+        trades_repo,
+        market_id=ManifoldMarketId(condition_id),
+        now_ts=now_ts,
+    )
+
+
+async def _walk_kalshi(
+    client: KalshiClient,
+    markets_repo: CorpusMarketsRepo,
+    trades_repo: CorpusTradesRepo,
+    *,
+    condition_id: str,
+    now_ts: int,
+) -> int:
+    return await walk_kalshi_market(
+        client,
+        markets_repo,
+        trades_repo,
+        market_ticker=KalshiMarketTicker(condition_id),
+        now_ts=now_ts,
+    )
+
+
+@dataclass(frozen=True)
+class _AltPlatformBinding:
+    """Per-platform glue for the Manifold/Kalshi shared backfill+refresh loops."""
+
+    platform: str
+    client_factory: Callable[[], Any]
+    enumerate_fn: Callable[..., Awaitable[int]]
+    walk_fn: Callable[..., Awaitable[int]]
+    record_fn: Callable[..., Awaitable[int]]
+
+
+_ALT_PLATFORM_BINDINGS: Mapping[str, _AltPlatformBinding] = {
+    "manifold": _AltPlatformBinding(
+        platform="manifold",
+        client_factory=ManifoldClient,
+        enumerate_fn=enumerate_resolved_manifold_markets,
+        walk_fn=_walk_manifold,
+        record_fn=record_manifold_resolutions,
+    ),
+    "kalshi": _AltPlatformBinding(
+        platform="kalshi",
+        client_factory=KalshiClient,
+        enumerate_fn=enumerate_resolved_kalshi_markets,
+        walk_fn=_walk_kalshi,
+        record_fn=record_kalshi_resolutions,
+    ),
+}
+
+
+async def _run_alt_platform_backfill(args: argparse.Namespace, binding: _AltPlatformBinding) -> int:
+    """Manifold/Kalshi backfill: enumerate resolved markets, walk each one."""
+    conn = init_corpus_db(Path(args.db))
     markets_repo = CorpusMarketsRepo(conn)
-    resolutions_repo = MarketResolutionsRepo(conn)
+    trades_repo = CorpusTradesRepo(conn)
     now_ts = int(time.time())
     try:
-        async with ManifoldClient() as client:
-            await enumerate_resolved_manifold_markets(client, markets_repo, now_ts=now_ts)
-            rows = conn.execute(
-                "SELECT condition_id, closed_at FROM corpus_markets "
-                "WHERE platform = 'manifold' AND backfill_state = 'complete'"
-            ).fetchall()
-            condition_ids = [row["condition_id"] for row in rows]
-            missing = resolutions_repo.missing_for(condition_ids, platform="manifold")
-            missing_set = set(missing)
-            targets = [
-                (row["condition_id"], int(row["closed_at"]))
-                for row in rows
-                if row["condition_id"] in missing_set
-            ]
-            await record_manifold_resolutions(
-                client=client,
-                repo=resolutions_repo,
-                targets=targets,
-                now_ts=now_ts,
-            )
+        async with binding.client_factory() as client:
+            await binding.enumerate_fn(client, markets_repo, now_ts=now_ts)
+            while pending := markets_repo.next_pending(limit=10, platform=binding.platform):
+                for market in pending:
+                    await binding.walk_fn(
+                        client,
+                        markets_repo,
+                        trades_repo,
+                        condition_id=market.condition_id,
+                        now_ts=now_ts,
+                    )
+        return 0
     finally:
         conn.close()
-    return 0
 
 
-async def _run_kalshi_refresh(args: argparse.Namespace) -> int:
-    """Kalshi refresh: re-enumerate, then record resolutions for missing markets."""
-    db_path = Path(args.db)
-    conn = init_corpus_db(db_path)
+async def _run_alt_platform_refresh(args: argparse.Namespace, binding: _AltPlatformBinding) -> int:
+    """Manifold/Kalshi refresh: re-enumerate, record resolutions for missing markets."""
+    conn = init_corpus_db(Path(args.db))
     markets_repo = CorpusMarketsRepo(conn)
     resolutions_repo = MarketResolutionsRepo(conn)
     now_ts = int(time.time())
     try:
-        async with KalshiClient() as client:
-            await enumerate_resolved_kalshi_markets(client, markets_repo, now_ts=now_ts)
+        async with binding.client_factory() as client:
+            await binding.enumerate_fn(client, markets_repo, now_ts=now_ts)
             rows = conn.execute(
                 "SELECT condition_id, closed_at FROM corpus_markets "
-                "WHERE platform = 'kalshi' AND backfill_state = 'complete'"
+                "WHERE platform = ? AND backfill_state = 'complete'",
+                (binding.platform,),
             ).fetchall()
             condition_ids = [row["condition_id"] for row in rows]
-            missing = resolutions_repo.missing_for(condition_ids, platform="kalshi")
+            missing = resolutions_repo.missing_for(condition_ids, platform=binding.platform)
             missing_set = set(missing)
             targets = [
                 (row["condition_id"], int(row["closed_at"]))
                 for row in rows
                 if row["condition_id"] in missing_set
             ]
-            await record_kalshi_resolutions(
+            await binding.record_fn(
                 client=client,
                 repo=resolutions_repo,
                 targets=targets,
