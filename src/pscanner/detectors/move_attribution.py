@@ -22,6 +22,7 @@ from pscanner.alerts.sink import AlertSink
 from pscanner.config import MoveAttributionConfig
 from pscanner.poly.data import DataClient
 from pscanner.store.repo import WatchlistRepo
+from pscanner.util.async_dispatch import AsyncDispatcher
 
 _LOG = structlog.get_logger(__name__)
 
@@ -297,7 +298,14 @@ class MoveAttributionDetector:
         self._data_client = data_client
         self._watchlist_repo = watchlist_repo
         self._sink: AlertSink | None = None
-        self._pending_tasks: set[asyncio.Task[None]] = set()
+        self._dispatcher = AsyncDispatcher(
+            log_event_no_loop="move_attribution.no_event_loop",
+        )
+
+    @property
+    def pending_tasks(self) -> set[asyncio.Task[None]]:
+        """Live view of in-flight ``evaluate`` tasks (aclose() hook)."""
+        return self._dispatcher.pending
 
     def wire_sink(self, sink: AlertSink) -> None:
         """Pre-wire the alert sink before :meth:`run` starts.
@@ -316,19 +324,13 @@ class MoveAttributionDetector:
     def handle_alert_sync(self, alert: Alert) -> None:
         """Subscriber callback fanned out by ``AlertSink.emit``.
 
-        Spawns ``evaluate(alert)`` as a tracked task so it isn't garbage
-        collected mid-flight. No-ops if there is no running event loop.
+        Spawns ``evaluate(alert)`` as a tracked task. No-ops (with a
+        ``move_attribution.no_event_loop`` debug event) when no event
+        loop is running.
         """
         if alert.detector not in self._config.trigger_detectors:
             return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            _LOG.debug("move_attribution.no_event_loop", alert_key=alert.alert_key)
-            return
-        task = loop.create_task(self.evaluate(alert))
-        self._pending_tasks.add(task)
-        task.add_done_callback(self._pending_tasks.discard)
+        self._dispatcher.spawn(self.evaluate(alert), alert_key=alert.alert_key)
 
     async def evaluate(self, alert: Alert) -> None:
         """Run the full pipeline for one triggering alert."""
@@ -439,9 +441,9 @@ class MoveAttributionDetector:
 
     async def aclose(self) -> None:
         """Wait for any in-flight evaluation tasks to finish (test helper)."""
-        if not self._pending_tasks:
+        if not self._dispatcher.pending:
             return
-        await asyncio.gather(*self._pending_tasks, return_exceptions=True)
+        await asyncio.gather(*self._dispatcher.pending, return_exceptions=True)
 
 
 __all__ = ["BurstHit", "MoveAttributionDetector", "_backwalk", "_detect_burst"]

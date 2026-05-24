@@ -44,6 +44,7 @@ from pscanner.store.repo import (
     WalletTrade,
     WalletTradesRepo,
 )
+from pscanner.util.async_dispatch import AsyncDispatcher
 from pscanner.util.clock import Clock, RealClock
 
 _LOG = structlog.get_logger(__name__)
@@ -94,7 +95,12 @@ class ClusterDetector:
         self._members = members_repo
         self._clock: Clock = clock if clock is not None else RealClock()
         self._sink: AlertSink | None = None
-        self._pending_tasks: set[asyncio.Task[None]] = set()
+        self._dispatcher = AsyncDispatcher(log_event_no_loop="cluster.no_event_loop")
+
+    @property
+    def pending_tasks(self) -> set[asyncio.Task[None]]:
+        """Live view of in-flight ``evaluate_active`` tasks (test hook)."""
+        return self._dispatcher.pending
 
     def wire_sink(self, sink: AlertSink) -> None:
         """Pre-wire the alert sink before :meth:`run` starts.
@@ -129,21 +135,17 @@ class ClusterDetector:
     def handle_trade_sync(self, trade: WalletTrade) -> None:
         """Sync entry called by the trade collector callback.
 
-        Spawns ``evaluate_active(trade)`` as an async task and tracks it so
-        it isn't garbage collected mid-flight. No-ops if there is no running
-        event loop (e.g. test setup that hasn't started one yet).
+        Spawns ``evaluate_active(trade)`` as a tracked task. No-ops (with
+        a ``cluster.no_event_loop`` debug event) when no event loop is
+        running.
 
         Args:
             trade: Newly-inserted ``WalletTrade`` row.
         """
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            _LOG.debug("cluster.no_event_loop", tx=trade.transaction_hash)
-            return
-        task = loop.create_task(self.evaluate_active(trade))
-        self._pending_tasks.add(task)
-        task.add_done_callback(self._pending_tasks.discard)
+        self._dispatcher.spawn(
+            self.evaluate_active(trade),
+            tx=trade.transaction_hash,
+        )
 
     async def evaluate_active(self, trade: WalletTrade) -> None:
         """Emit ``cluster.active`` when several cluster members hit one market.

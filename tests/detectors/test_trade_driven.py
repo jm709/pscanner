@@ -64,7 +64,7 @@ def test_handle_trade_sync_no_running_loop_is_noop() -> None:
     detector = _RecordingDetector()
     detector.handle_trade_sync(_make_trade())
     assert detector.evaluated == []
-    assert detector._pending_tasks == set()
+    assert detector.pending_tasks == set()
 
 
 @pytest.mark.asyncio
@@ -74,13 +74,13 @@ async def test_handle_trade_sync_spawns_and_tracks_then_clears_task() -> None:
     trade = _make_trade()
 
     detector.handle_trade_sync(trade)
-    assert len(detector._pending_tasks) == 1
+    assert len(detector.pending_tasks) == 1
 
     for _ in range(10):
         await asyncio.sleep(0)
 
     assert detector.evaluated == [trade]
-    assert detector._pending_tasks == set()
+    assert detector.pending_tasks == set()
 
 
 @pytest.mark.asyncio
