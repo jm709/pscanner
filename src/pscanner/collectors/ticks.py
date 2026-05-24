@@ -1,13 +1,25 @@
 """Market tick collector — append-only price snapshots from the WS orderbook.
 
-Owns its own ``MarketWebSocket`` connection. Maintains an in-memory orderbook
-per subscribed asset (driven by ``book``/``price_change``/``last_trade_price``
-events) and, on each tick interval, writes one row per asset to
-``MarketTicksRepo`` with derived best_bid/best_ask/mid/spread/depth fields.
+:class:`MarketTickCollector` is a long-lived async orchestrator over three
+internal collaborators:
 
-Subscription scope = (assets held by watched wallets) U (active markets above
-``tick_volume_floor_usd``), capped at ``max_assets``. Re-evaluated on
-``subscription_refresh_seconds``.
+- :class:`_BookApplier` owns the in-memory orderbook state per asset and
+  applies ``book`` / ``price_change`` / ``last_trade_price`` WS messages.
+- :class:`_SubscriptionManager` owns the WS subscription set + the
+  ``asset → condition_id`` and ``asset → CachedMarket`` lookups, and runs
+  the periodic refresh cycle: union of (assets held by watched wallets)
+  and (active markets above ``tick_volume_floor_usd``), capped at
+  ``max_assets``.
+- :class:`_SnapshotWriter` persists one MarketTick per asset per snapshot
+  pass into ``MarketTicksRepo`` and owns the in-memory mid/tick history
+  ring buffers consumed by ``get_recent_mids`` / ``get_recent_ticks``.
+
+The orchestrator runs three concurrent loops — subscription refresh,
+WS consume, snapshot — and on each snapshot pass joins the applier's
+book snapshot with the subscription manager's condition lookup, writes
+each row via the writer, then publishes a :class:`TickEvent` (when a
+:class:`BroadcastTickStream` is wired) enriched with the subscription
+manager's cached market metadata.
 """
 
 from __future__ import annotations
@@ -467,11 +479,12 @@ class _SnapshotWriter:
 
 
 class MarketTickCollector:
-    """Maintains an in-memory orderbook per subscribed asset and writes ticks.
+    """Long-lived orchestrator: subscribe + ingest + snapshot, fan out via three loops.
 
     Owns its own ``MarketWebSocket`` connection (separate from any other WS
-    consumer). Subscription scope = (assets held by watched wallets) U (active
-    markets above ``tick_volume_floor_usd``), capped at ``max_assets``.
+    consumer). Internal state lives on the three collaborators (see module
+    docstring): :class:`_BookApplier`, :class:`_SubscriptionManager`,
+    :class:`_SnapshotWriter`. This class composes them.
     """
 
     name: str = "tick_collector"
