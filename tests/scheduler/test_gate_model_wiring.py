@@ -22,15 +22,16 @@ from pscanner.corpus.repos import (
     MarketResolution,
     MarketResolutionsRepo,
 )
+from pscanner.daemon.corpus_loader import (
+    load_corpus_metadata as _load_corpus_metadata,
+)
+from pscanner.daemon.corpus_loader import (
+    load_corpus_resolutions_into as _load_corpus_resolutions,
+)
 from pscanner.daemon.live_history import LiveHistoryProvider
 from pscanner.detectors.gate_model import GateModelDetector
 from pscanner.poly.models import Event, Market
-from pscanner.scheduler import (
-    Scanner,
-    SchedulerClients,
-    _load_corpus_metadata,
-    _load_corpus_resolutions,
-)
+from pscanner.scheduler import Scanner, SchedulerClients
 from pscanner.store.db import init_db
 
 

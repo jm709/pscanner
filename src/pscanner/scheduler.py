@@ -24,10 +24,9 @@ import os
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable
-from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import structlog
 
@@ -47,8 +46,12 @@ from pscanner.collectors.trades import TradeCollector
 from pscanner.collectors.watchlist import WatchlistRegistry, WatchlistSyncer
 from pscanner.config import Config
 from pscanner.corpus.db import init_corpus_db
-from pscanner.corpus.features import MarketMetadata
 from pscanner.corpus.repos import AssetIndexRepo
+from pscanner.daemon.corpus_loader import (
+    DEFAULT_CORPUS_DB,
+    load_corpus_metadata,
+    load_corpus_resolutions_into,
+)
 from pscanner.daemon.live_history import LiveHistoryProvider
 from pscanner.detectors.cluster import ClusterDetector
 from pscanner.detectors.convergence import ConvergenceDetector
@@ -114,6 +117,8 @@ _RUN_ONCE_EVENTS_PAGE_SIZE = 100
 _RUN_ONCE_MAX_EVENT_PAGES = 5
 _RUN_ONCE_LEADERBOARD_LIMIT = 25
 
+_CollectorT = TypeVar("_CollectorT", bound=Collector)
+
 
 @dataclass(frozen=True, slots=True)
 class SchedulerClients:
@@ -158,8 +163,7 @@ class Scanner:
         self._corpus_conn: sqlite3.Connection | None = None
         self._subgraph_client: SubgraphClient | None = None
         if self._config.subgraph_trades.enabled:
-            corpus_path = Path("data/corpus.sqlite3")
-            self._corpus_conn = init_corpus_db(corpus_path)
+            self._corpus_conn = init_corpus_db(DEFAULT_CORPUS_DB)
         self._tracked_repo = TrackedWalletsRepo(self._db)
         self._snapshots_repo = PositionSnapshotsRepo(self._db)
         self._first_seen_repo = WalletFirstSeenRepo(self._db)
@@ -181,9 +185,9 @@ class Scanner:
         if self._config.gate_model.enabled:
             self._live_history_provider = LiveHistoryProvider(
                 conn=self._db,
-                metadata=_load_corpus_metadata(platform=self._config.gate_model.platform),
+                metadata=load_corpus_metadata(platform=self._config.gate_model.platform),
             )
-            _load_corpus_resolutions(
+            load_corpus_resolutions_into(
                 self._live_history_provider,
                 platform=self._config.gate_model.platform,
             )
@@ -772,11 +776,36 @@ class Scanner:
         await self._run_once_watchlist_sync()
         await self._run_once_trade_collector()
         return {
-            "position_snapshots": await self._run_once_position_collector(),
-            "activity_events": await self._run_once_activity_collector(),
-            "market_snapshots": await self._run_once_market_collector(),
-            "event_snapshots": await self._run_once_event_collector(),
-            "tick_snapshots": await self._run_once_tick_collector(),
+            "position_snapshots": await self._run_once_collector(
+                key="position_collector",
+                type_=PositionCollector,
+                call=PositionCollector.snapshot_all_wallets,
+                log_event="scanner.run_once.positions_failed",
+            ),
+            "activity_events": await self._run_once_collector(
+                key="activity_collector",
+                type_=ActivityCollector,
+                call=ActivityCollector.poll_all_wallets,
+                log_event="scanner.run_once.activity_failed",
+            ),
+            "market_snapshots": await self._run_once_collector(
+                key="market_collector",
+                type_=MarketCollector,
+                call=MarketCollector.snapshot_all_markets,
+                log_event="scanner.run_once.markets_failed",
+            ),
+            "event_snapshots": await self._run_once_collector(
+                key="event_collector",
+                type_=EventCollector,
+                call=EventCollector.snapshot_all_events,
+                log_event="scanner.run_once.events_failed",
+            ),
+            "tick_snapshots": await self._run_once_collector(
+                key="tick_collector",
+                type_=MarketTickCollector,
+                call=MarketTickCollector.snapshot_once,
+                log_event="scanner.run_once.ticks_failed",
+            ),
         }
 
     async def _run_once_watchlist_sync(self) -> None:
@@ -799,59 +828,27 @@ class Scanner:
         except Exception:
             _LOG.exception("scanner.run_once.trade_collector.failed")
 
-    async def _run_once_position_collector(self) -> int:
-        """Single-shot snapshot of every watched wallet's positions."""
-        collector = self._collectors.get("position_collector")
-        if not isinstance(collector, PositionCollector):
-            return 0
-        try:
-            return await collector.snapshot_all_wallets()
-        except Exception:
-            _LOG.exception("scanner.run_once.positions_failed")
-            return 0
+    async def _run_once_collector(
+        self,
+        *,
+        key: str,
+        type_: type[_CollectorT],
+        call: Callable[[_CollectorT], Awaitable[int]],
+        log_event: str,
+    ) -> int:
+        """Run one int-returning collector's single-pass entrypoint.
 
-    async def _run_once_activity_collector(self) -> int:
-        """Single-shot poll of every watched wallet's full activity stream."""
-        collector = self._collectors.get("activity_collector")
-        if not isinstance(collector, ActivityCollector):
+        Returns 0 when the collector is missing, the wrong type, or the
+        call raises — matches the pre-collapse per-method behaviour where
+        single-shot mode reports whatever it can finish.
+        """
+        collector = self._collectors.get(key)
+        if not isinstance(collector, type_):
             return 0
         try:
-            return await collector.poll_all_wallets()
+            return await call(collector)
         except Exception:
-            _LOG.exception("scanner.run_once.activity_failed")
-            return 0
-
-    async def _run_once_market_collector(self) -> int:
-        """Single-shot snapshot of every active market."""
-        collector = self._collectors.get("market_collector")
-        if not isinstance(collector, MarketCollector):
-            return 0
-        try:
-            return await collector.snapshot_all_markets()
-        except Exception:
-            _LOG.exception("scanner.run_once.markets_failed")
-            return 0
-
-    async def _run_once_event_collector(self) -> int:
-        """Single-shot snapshot of every active event."""
-        collector = self._collectors.get("event_collector")
-        if not isinstance(collector, EventCollector):
-            return 0
-        try:
-            return await collector.snapshot_all_events()
-        except Exception:
-            _LOG.exception("scanner.run_once.events_failed")
-            return 0
-
-    async def _run_once_tick_collector(self) -> int:
-        """Single-shot snapshot of the WS-driven tick collector's in-memory state."""
-        collector = self._collectors.get("tick_collector")
-        if not isinstance(collector, MarketTickCollector):
-            return 0
-        try:
-            return await collector.snapshot_once()
-        except Exception:
-            _LOG.exception("scanner.run_once.ticks_failed")
+            _LOG.exception(log_event)
             return 0
 
     async def _run_once_mispricing(self) -> int:
@@ -976,119 +973,13 @@ class Scanner:
 
     async def _close_owned_clients(self) -> None:
         """Close HTTP clients we own (data_client owns its lb_http internally)."""
-        with contextlib.suppress(Exception):
-            await self._clients.data_client.aclose()
-        with contextlib.suppress(Exception):
-            await self._clients.gamma_client.aclose()
-        with contextlib.suppress(Exception):
-            await self._clients.gamma_http.aclose()
-        with contextlib.suppress(Exception):
-            await self._clients.data_http.aclose()
-        with contextlib.suppress(Exception):
-            await self._clients.ticks_ws.close()
-
-
-def _load_corpus_metadata(*, platform: str = "polymarket") -> dict[str, MarketMetadata]:
-    """Load corpus_markets metadata for the gate-model detector.
-
-    Reads ``data/corpus.sqlite3`` if it exists; returns an empty dict if
-    not. The dict is consumed by :class:`LiveHistoryProvider` for the
-    ``market_metadata(condition_id)`` lookup that ``compute_features`` uses.
-
-    Args:
-        platform: Scope the SELECT to a single platform. Defaults to
-            ``"polymarket"``. Mixing platforms here would put non-Polymarket
-            markets in the metadata dict; with disjoint condition_id
-            namespaces today nothing breaks at inference time, but it's
-            wasted memory. The filter keeps the dict aligned with the
-            model's training scope.
-
-    Empty-dict fallback is acceptable for v1: the detector handles
-    ``KeyError`` from ``market_metadata`` by skipping the trade. Operators
-    running gate_model in production should also have a corpus DB.
-    """
-    corpus_path = Path("data/corpus.sqlite3")
-    if not corpus_path.exists():
-        _LOG.warning("scanner.corpus_db_missing", path=str(corpus_path))
-        return {}
-    out: dict[str, MarketMetadata] = {}
-    with closing(sqlite3.connect(str(corpus_path))) as conn:
-        for row in conn.execute(
-            """
-            SELECT condition_id,
-                   COALESCE(category, ''),
-                   COALESCE(closed_at, 0),
-                   COALESCE(enumerated_at, 0)
-            FROM corpus_markets
-            WHERE platform = ?
-            """,
-            (platform,),
-        ):
-            cond_id, category, closed_at, opened_at = row
-            out[cond_id] = MarketMetadata(
-                condition_id=cond_id,
-                category=category,
-                closed_at=int(closed_at),
-                opened_at=int(opened_at),
-            )
-    return out
-
-
-def _load_corpus_resolutions(provider: LiveHistoryProvider, *, platform: str = "polymarket") -> int:
-    """Load market_resolutions from the corpus DB into the provider.
-
-    Mirrors ``_load_corpus_metadata`` but populates the provider's in-memory
-    ``_resolutions`` dict so the lazy drain inside
-    :meth:`LiveHistoryProvider.wallet_state` can apply resolutions
-    accumulated during ``pscanner daemon bootstrap-features``.
-
-    Without this, ``prior_resolved_buys`` / ``prior_wins`` / ``prior_losses``
-    stay at zero forever — the bootstrap walk only stores buys to the
-    per-wallet ``unresolved_buys_json``; the drain triggers in
-    ``wallet_state(...)``, which checks the resolutions dict before
-    folding each buy. An empty resolutions dict means no buy ever drains.
-
-    Args:
-        provider: The :class:`LiveHistoryProvider` to populate.
-        platform: Scope the SELECT to a single platform. Default
-            ``"polymarket"``; non-Polymarket models would pass their own.
-
-    Returns:
-        Count of resolutions registered. Zero if the corpus DB is missing
-        (empty-dict fallback is acceptable for the same reasons documented
-        on ``_load_corpus_metadata``).
-    """
-    corpus_path = Path("data/corpus.sqlite3")
-    if not corpus_path.exists():
-        _LOG.warning("scanner.corpus_db_missing", path=str(corpus_path))
-        return 0
-    n = 0
-    with closing(sqlite3.connect(str(corpus_path))) as conn:
-        try:
-            cursor = conn.execute(
-                """
-                SELECT condition_id, resolved_at, outcome_yes_won
-                FROM market_resolutions
-                WHERE platform = ?
-                """,
-                (platform,),
-            )
-        except sqlite3.OperationalError as exc:
-            # ``market_resolutions`` predates the platform-column migration.
-            # Open the corpus via ``init_corpus_db`` to apply the schema
-            # migration before retry — same fallback path as the bootstrap.
-            _LOG.warning(
-                "scanner.corpus_db_unmigrated_market_resolutions",
-                err=str(exc),
-                path=str(corpus_path),
-            )
-            return 0
-        for cond_id, resolved_at, yes_won in cursor:
-            provider.register_resolution(
-                condition_id=cond_id,
-                resolved_at=int(resolved_at),
-                outcome_yes_won=int(yes_won),
-            )
-            n += 1
-    _LOG.info("scanner.resolutions_loaded", count=n, platform=platform)
-    return n
+        closers: tuple[Callable[[], Awaitable[None]], ...] = (
+            self._clients.data_client.aclose,
+            self._clients.gamma_client.aclose,
+            self._clients.gamma_http.aclose,
+            self._clients.data_http.aclose,
+            self._clients.ticks_ws.close,
+        )
+        for closer in closers:
+            with contextlib.suppress(Exception):
+                await closer()

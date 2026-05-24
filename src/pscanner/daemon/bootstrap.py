@@ -33,11 +33,14 @@ import structlog
 
 from pscanner.corpus.db import init_corpus_db
 from pscanner.corpus.features import (
-    MarketMetadata,
     StreamingHistoryProvider,
     Trade,
     _UnresolvedBuy,
     _WalletAccumulator,
+)
+from pscanner.daemon.corpus_loader import (
+    load_corpus_metadata,
+    load_corpus_resolutions_into,
 )
 from pscanner.store.db import init_db
 
@@ -68,18 +71,9 @@ def run_bootstrap(
     corpus_conn = init_corpus_db(corpus_db)
     daemon_conn = init_db(daemon_db)
     try:
-        metadata = _load_metadata(corpus_conn, platform=platform)
+        metadata = load_corpus_metadata(conn=corpus_conn, platform=platform)
         provider = StreamingHistoryProvider(metadata=metadata)
-        for cond_id, resolved_at, yes_won in corpus_conn.execute(
-            "SELECT condition_id, resolved_at, outcome_yes_won "
-            "FROM market_resolutions WHERE platform = ?",
-            (platform,),
-        ):
-            provider.register_resolution(
-                condition_id=cond_id,
-                resolved_at=int(resolved_at),
-                outcome_yes_won=int(yes_won),
-            )
+        load_corpus_resolutions_into(provider, conn=corpus_conn, platform=platform)
         n = _walk_corpus_trades(corpus_conn, provider, platform=platform, log_every=log_every)
         _LOG.info("daemon.bootstrap.dump_started", wallets=len(provider._wallets))
         _bulk_write_wallets(daemon_conn, provider)
@@ -223,27 +217,3 @@ def _bulk_write_markets(
         rows,
     )
     daemon_conn.commit()
-
-
-def _load_metadata(
-    conn: sqlite3.Connection, *, platform: str = "polymarket"
-) -> dict[str, MarketMetadata]:
-    out: dict[str, MarketMetadata] = {}
-    for cond_id, category, closed_at, opened_at in conn.execute(
-        """
-        SELECT condition_id,
-               COALESCE(category, ''),
-               COALESCE(closed_at, 0),
-               COALESCE(enumerated_at, 0)
-        FROM corpus_markets
-        WHERE platform = ?
-        """,
-        (platform,),
-    ):
-        out[cond_id] = MarketMetadata(
-            condition_id=cond_id,
-            category=category,
-            closed_at=int(closed_at),
-            opened_at=int(opened_at),
-        )
-    return out
