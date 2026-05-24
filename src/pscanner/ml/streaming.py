@@ -162,29 +162,20 @@ class StreamingDataset:
             implied[offset:end] = implied_chunk
             offset = end
 
-        # Parallel small SELECT for unencoded top_category strings.
-        # Mirrors the deleted _extract_top_category: nulls become "".
-        # Bulk fetchall + np.array is multiple orders of magnitude faster than
-        # the per-row loop pattern at corpus scale (~2M rows takes seconds vs
-        # ~10+ minutes for the row-at-a-time numpy assignment).
-        sql = (
+        # Parallel small SELECTs for unencoded top_category + total_volume_usd
+        # share one connection + one _split_markets temp table. Bulk fetchall +
+        # np.array is multiple orders of magnitude faster than the per-row loop
+        # pattern at corpus scale.
+        sql_top_category = (
             "SELECT COALESCE(te.top_category, '') "
             "FROM training_examples te "
             "JOIN _split_markets sm USING (condition_id) "
             "WHERE te.platform = ? "
             "ORDER BY te.id"
         )
-        conn = sqlite3.connect(str(self._db_path))
-        try:
-            _populate_temp_table(conn, "_split_markets", self._test_markets)
-            rows = conn.execute(sql, (self._platform,)).fetchall()
-        finally:
-            conn.close()
-        top_categories = np.array([r[0] for r in rows], dtype=object)
-
-        # Parallel small SELECT for total_volume_usd, JOINed to corpus_markets
-        # via (platform, condition_id). Used by per_volume_bucket_edge_breakdown
-        # (#109) to stratify the test edge by market lifetime volume.
+        # total_volume_usd JOINs corpus_markets via (platform, condition_id).
+        # Used by per_volume_bucket_edge_breakdown (#109) to stratify the test
+        # edge by market lifetime volume.
         sql_volume = (
             "SELECT COALESCE(cm.total_volume_usd, 0.0) "
             "FROM training_examples te "
@@ -198,9 +189,11 @@ class StreamingDataset:
         conn = sqlite3.connect(str(self._db_path))
         try:
             _populate_temp_table(conn, "_split_markets", self._test_markets)
+            top_rows = conn.execute(sql_top_category, (self._platform,)).fetchall()
             volume_rows = conn.execute(sql_volume, (self._platform,)).fetchall()
         finally:
             conn.close()
+        top_categories = np.array([r[0] for r in top_rows], dtype=object)
         total_volume_usd = np.array([r[0] for r in volume_rows], dtype=np.float32)
 
         return TestSplit(
