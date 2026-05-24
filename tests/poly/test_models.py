@@ -42,8 +42,6 @@ def test_list_input_is_pass_through() -> None:
     early ``value in {...}`` set check raised ``TypeError`` on every list
     payload. The check must use a tuple so the equality path is taken.
     """
-    market = Market.model_validate(
-        _payload(outcomes=["Yes", "No"], outcomePrices=["0.5", "0.5"])
-    )
+    market = Market.model_validate(_payload(outcomes=["Yes", "No"], outcomePrices=["0.5", "0.5"]))
     assert market.outcomes == ["Yes", "No"]
     assert market.outcome_prices == [0.5, 0.5]
