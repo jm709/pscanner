@@ -23,7 +23,8 @@ import json
 import logging
 import sqlite3
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
 
@@ -262,6 +263,16 @@ def _configure_logging(level: str) -> None:
     )
 
 
+@contextmanager
+def _daemon_db(config: Config) -> Iterator[sqlite3.Connection]:
+    """Open the daemon SQLite DB, closing it on context exit."""
+    conn = init_db(Path(config.scanner.db_path))
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 def _cmd_run(config: Config, *, once: bool) -> int:
     """Dispatch to the daemon or the single-shot snapshot path."""
     if once:
@@ -323,12 +334,8 @@ def _cmd_status(config: Config) -> int:
     if not Path(db_path).exists():
         sys.stderr.write(f"{_PROG}: no database at {db_path}; run the daemon first\n")
         return 1
-    conn = init_db(Path(db_path))
-    try:
-        repo = AlertsRepo(conn)
-        alerts = repo.recent(limit=_STATUS_LIMIT)
-    finally:
-        conn.close()
+    with _daemon_db(config) as conn:
+        alerts = AlertsRepo(conn).recent(limit=_STATUS_LIMIT)
     _print_status_table(alerts)
     return 0
 
@@ -360,13 +367,8 @@ def _cmd_watch(config: Config, *, address: str, reason: str | None) -> int:
     Idempotent: re-running for the same address simply preserves the existing
     row (``WatchlistRepo.upsert`` keeps first-seen provenance).
     """
-    db_path = Path(config.scanner.db_path)
-    conn = init_db(db_path)
-    try:
-        repo = WatchlistRepo(conn)
-        inserted = repo.upsert(address=address, source="manual", reason=reason)
-    finally:
-        conn.close()
+    with _daemon_db(config) as conn:
+        inserted = WatchlistRepo(conn).upsert(address=address, source="manual", reason=reason)
     console = Console()
     if inserted:
         console.print(f"watching [bold]{address}[/bold]")
@@ -377,30 +379,21 @@ def _cmd_watch(config: Config, *, address: str, reason: str | None) -> int:
 
 def _cmd_unwatch(config: Config, *, address: str) -> int:
     """Deactivate a watchlist entry. No-op when the address is unknown."""
-    db_path = Path(config.scanner.db_path)
-    conn = init_db(db_path)
-    try:
+    with _daemon_db(config) as conn:
         repo = WatchlistRepo(conn)
         existing = repo.get(address)
         if existing is None:
             Console().print(f"[dim]{address} not in watchlist (no-op)[/dim]")
             return 0
         repo.set_active(address, False)
-    finally:
-        conn.close()
     Console().print(f"unwatched [bold]{address}[/bold]")
     return 0
 
 
 def _cmd_watchlist(config: Config) -> int:
     """Print every watchlist entry (active + inactive) as a ``rich`` table."""
-    db_path = Path(config.scanner.db_path)
-    conn = init_db(db_path)
-    try:
-        repo = WatchlistRepo(conn)
-        entries = repo.list_all()
-    finally:
-        conn.close()
+    with _daemon_db(config) as conn:
+        entries = WatchlistRepo(conn).list_all()
     _print_watchlist_table(entries)
     return 0
 
@@ -434,8 +427,7 @@ def _print_watchlist_table(entries: list[WatchlistEntry]) -> None:
 
 def _cmd_paper_status(config: Config) -> int:
     """Print paper-trading status (NAV, open/closed counts, realized PnL, top trades)."""
-    conn = init_db(Path(config.scanner.db_path))
-    try:
+    with _daemon_db(config) as conn:
         paper = PaperTradesRepo(conn)
         summary = paper.summary_stats(
             starting_bankroll=config.paper_trading.starting_bankroll_usd,
@@ -445,8 +437,6 @@ def _cmd_paper_status(config: Config) -> int:
         worst = _paper_extreme_rows(conn, order="ASC")
         sources = paper.summary_by_source()
         pred_buckets = paper.summary_by_pred_bucket()
-    finally:
-        conn.close()
     console = Console(highlight=False)
     _print_paper_summary(console, summary)
     _print_paper_leaderboard(console, leaderboard)
