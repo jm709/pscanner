@@ -15,13 +15,12 @@ them to a clean terminal state.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 import structlog
 
 from pscanner.corpus.repos import CorpusMarket, CorpusMarketsRepo
 from pscanner.kalshi.client import KalshiClient
 from pscanner.kalshi.models import KalshiMarket
+from pscanner.kalshi.shared import iso_to_epoch
 
 _log = structlog.get_logger(__name__)
 
@@ -102,27 +101,9 @@ def _to_corpus_market(market: KalshiMarket, *, now_ts: int) -> CorpusMarket:
         condition_id=market.ticker,
         event_slug=market.event_ticker,
         category=market.market_type,
-        closed_at=_iso_to_epoch(market.close_time, fallback=now_ts),
+        closed_at=iso_to_epoch(market.close_time, fallback=now_ts),
         total_volume_usd=market.volume_fp,
         enumerated_at=now_ts,
         market_slug=market.ticker,
         platform="kalshi",
     )
-
-
-def _iso_to_epoch(iso: str, *, fallback: int) -> int:
-    """Parse an ISO 8601 datetime string to epoch seconds.
-
-    Returns ``fallback`` if the input is empty or unparseable. Kalshi wire
-    format is ``"2026-05-04T12:00:00Z"``; ``datetime.fromisoformat`` handles
-    the trailing ``Z`` since Python 3.11.
-    """
-    if not iso:
-        return fallback
-    try:
-        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-    except ValueError:
-        return fallback
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return int(dt.timestamp())
