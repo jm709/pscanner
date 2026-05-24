@@ -224,7 +224,7 @@ def _make_detector(
         wallet_first_seen=first_seen or StubFirstSeen(),  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
     )
     if sink is not None:
-        detector._sink = sink  # type: ignore[assignment]  # ty:ignore[invalid-assignment]
+        detector.wire_sink(sink)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
     if seed_condition_map:
         cached = cache.get(_MARKET_ID)
         if cached is not None:

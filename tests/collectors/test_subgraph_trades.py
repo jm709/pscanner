@@ -139,7 +139,7 @@ async def test_poll_once_empty_watchlist_short_circuits(
         clock=FakeClock(),
     )
     with capture_logs() as logs:
-        await collector._poll_once()
+        await collector.poll_once()
     sub_client.query.assert_not_called()
     assert any(log["event"] == "subgraph_trades.empty_watchlist" for log in logs)
 
@@ -201,7 +201,7 @@ async def test_poll_once_emits_alert_for_watchlist_buy(
         state_repo=SubgraphWatchStateRepo(daemon_conn),
         clock=FakeClock(),
     )
-    await collector._poll_once()
+    await collector.poll_once()
 
     assert len(emitted) == 1
     alert = emitted[0]
@@ -267,7 +267,7 @@ async def test_poll_once_persists_new_last_seen_ts(
         state_repo=state_repo,
         clock=FakeClock(),
     )
-    await collector._poll_once()
+    await collector.poll_once()
     assert state_repo.get_last_seen_ts() == 1_700_000_200
 
 
@@ -306,7 +306,7 @@ async def test_poll_once_skips_sells_silently(
         state_repo=SubgraphWatchStateRepo(daemon_conn),
         clock=FakeClock(),
     )
-    await collector._poll_once()
+    await collector.poll_once()
     assert emitted == []
 
 

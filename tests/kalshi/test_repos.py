@@ -166,7 +166,7 @@ def test_markets_repo_cached_at_populated(tmp_db: sqlite3.Connection) -> None:
 
 
 def test_kalshi_markets_repo_roundtrips_result_field(tmp_db: sqlite3.Connection) -> None:
-    """`upsert` writes the result column; the value survives round-trip."""
+    """`upsert` writes the result column; the value survives round-trip via `get`."""
     repo = KalshiMarketsRepo(tmp_db)
     market = KalshiMarket.model_validate(
         {
@@ -182,6 +182,19 @@ def test_kalshi_markets_repo_roundtrips_result_field(tmp_db: sqlite3.Connection)
         "SELECT result FROM kalshi_markets WHERE ticker = ?", (market.ticker,)
     ).fetchone()
     assert row[0] == "yes"
+    # KalshiMarketRow now carries the result field, so repo.get also surfaces it.
+    fetched = repo.get(market.ticker)
+    assert fetched is not None
+    assert fetched.result == "yes"
+
+
+def test_kalshi_markets_repo_result_field_none_round_trips(tmp_db: sqlite3.Connection) -> None:
+    """An unresolved market (`result=None`) round-trips as None, not empty string."""
+    repo = KalshiMarketsRepo(tmp_db)
+    repo.upsert(_sample_market())  # _MARKET_PAYLOAD has no `result` key
+    fetched = repo.get("KXELONMARS-99")
+    assert fetched is not None
+    assert fetched.result is None
 
 
 # ---------------------------------------------------------------------------

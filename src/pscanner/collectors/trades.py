@@ -35,6 +35,7 @@ from typing import Any
 
 import structlog
 
+from pscanner.collectors.base import PollingCollector
 from pscanner.collectors.watchlist import WatchlistRegistry
 from pscanner.poly.data import DataClient
 from pscanner.poly.ids import AssetId, ConditionId
@@ -45,7 +46,7 @@ _LOG = structlog.get_logger(__name__)
 _WALLET_FIRST_SEEN_TTL_SECONDS = 86400  # 24h
 
 
-class TradeCollector:
+class TradeCollector(PollingCollector):
     """Polls the public ``/activity`` endpoint for trades by watched wallets.
 
     Replaces the earlier WS-driven collector: the public market WS channel
@@ -55,6 +56,7 @@ class TradeCollector:
     """
 
     name: str = "trade_collector"
+    log_event_iteration_failed: str = "trades.poll_iteration_failed"
 
     def __init__(
         self,
@@ -78,11 +80,11 @@ class TradeCollector:
             poll_interval_seconds: Cadence for full-watchlist polling cycles.
             activity_page_limit: Per-wallet ``/activity`` page size.
         """
+        super().__init__(interval_seconds=poll_interval_seconds)
         self._registry = registry
         self._data_client = data_client
         self._trades_repo = trades_repo
         self._wallet_first_seen = wallet_first_seen
-        self._poll_interval_seconds = poll_interval_seconds
         self._activity_page_limit = activity_page_limit
         self._pending_add_tasks: set[asyncio.Task[int]] = set()
         self._new_trade_callbacks: list[Callable[[WalletTrade], None]] = []
@@ -100,25 +102,13 @@ class TradeCollector:
         """
         self._new_trade_callbacks.append(callback)
 
-    async def run(self, stop_event: asyncio.Event) -> None:
-        """Run the polling loop until ``stop_event`` is set.
-
-        On each iteration, polls every watched wallet once, then sleeps for
-        ``poll_interval_seconds`` (or returns early if the stop event fires).
-        Per-iteration exceptions are logged and swallowed so a transient
-        upstream hiccup does not kill the loop.
-
-        Args:
-            stop_event: Cooperative shutdown signal set by the scheduler.
-        """
+    async def _on_start(self) -> None:
+        """Subscribe to watchlist additions so off-cycle polls fire immediately."""
         self._registry.subscribe(self._on_watchlist_add)
-        while not stop_event.is_set():
-            try:
-                await self.poll_all_wallets()
-            except Exception:
-                _LOG.exception("trades.poll_iteration_failed")
-            if await self._wait_or_stop(stop_event, self._poll_interval_seconds):
-                return
+
+    async def poll_once(self) -> None:
+        """One polling cycle — delegates to :meth:`poll_all_wallets`."""
+        await self.poll_all_wallets()
 
     async def poll_all_wallets(self) -> int:
         """Poll every watched wallet once; return total new rows inserted.
@@ -246,20 +236,6 @@ class TradeCollector:
             return
         self._pending_add_tasks.add(task)
         task.add_done_callback(self._pending_add_tasks.discard)
-
-    @staticmethod
-    async def _wait_or_stop(stop_event: asyncio.Event, seconds: float) -> bool:
-        """Wait up to ``seconds`` for the stop event.
-
-        Returns:
-            ``True`` if the stop event was set during the wait, ``False`` if
-            the timeout elapsed first.
-        """
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=seconds)
-        except TimeoutError:
-            return False
-        return True
 
 
 def _build_trade_from_activity(

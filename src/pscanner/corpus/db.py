@@ -14,6 +14,8 @@ from pathlib import Path
 
 import structlog
 
+from pscanner.store.migrations import apply_additive_migrations
+
 _log = structlog.get_logger(__name__)
 
 
@@ -661,23 +663,16 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     Runs the platform-column migrations first (which copy old tables into
     new ones with composite PKs), then the additive ALTER TABLE migrations
     in ``_MIGRATIONS``. The platform migrations are idempotent via
-    ``_column_exists`` checks; the additive ones swallow ``duplicate column
-    name`` / ``no such column`` errors.
+    ``_column_exists`` checks; the additive ones swallow the standard
+    idempotent-failure error messages via
+    :func:`pscanner.store.migrations.apply_additive_migrations`.
     """
     _migrate_corpus_markets_add_platform(conn)
     _migrate_corpus_trades_add_platform(conn)
     _migrate_market_resolutions_add_platform(conn)
     _migrate_training_examples_add_platform(conn)
     _migrate_asset_index_add_platform(conn)
-    for stmt in _MIGRATIONS:
-        try:
-            conn.execute(stmt)
-        except sqlite3.OperationalError as exc:
-            msg = str(exc).lower()
-            if "duplicate column name" in msg or "no such column" in msg or "no such table" in msg:
-                continue
-            raise
-    conn.commit()
+    apply_additive_migrations(conn, _MIGRATIONS)
 
 
 def init_corpus_db(path: Path) -> sqlite3.Connection:

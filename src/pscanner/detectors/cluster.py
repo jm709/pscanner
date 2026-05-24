@@ -44,7 +44,9 @@ from pscanner.store.repo import (
     WalletTrade,
     WalletTradesRepo,
 )
+from pscanner.util.async_dispatch import AsyncDispatcher
 from pscanner.util.clock import Clock, RealClock
+from pscanner.util.loops import run_periodic
 
 _LOG = structlog.get_logger(__name__)
 _BEHAVIOR_FARMER_LO = 0.5
@@ -94,7 +96,21 @@ class ClusterDetector:
         self._members = members_repo
         self._clock: Clock = clock if clock is not None else RealClock()
         self._sink: AlertSink | None = None
-        self._pending_tasks: set[asyncio.Task[None]] = set()
+        self._dispatcher = AsyncDispatcher(log_event_no_loop="cluster.no_event_loop")
+
+    @property
+    def pending_tasks(self) -> set[asyncio.Task[None]]:
+        """Live view of in-flight ``evaluate_active`` tasks (test hook)."""
+        return self._dispatcher.pending
+
+    def wire_sink(self, sink: AlertSink) -> None:
+        """Pre-wire the alert sink before :meth:`run` starts.
+
+        Used by the scheduler (and tests) to seed the sink before the
+        trade-callback path fires for the first time. Mirrors the
+        ``if self._sink is None`` ratchet inside :meth:`run`.
+        """
+        self._sink = sink
 
     async def run(self, sink: AlertSink) -> None:
         """Periodic discovery loop — scans for new clusters on a fixed cadence.
@@ -108,33 +124,27 @@ class ClusterDetector:
         """
         if self._sink is None:
             self._sink = sink
-        while True:
-            try:
-                await self.discovery_scan(sink)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                _LOG.exception("cluster.discovery_failed")
-            await self._clock.sleep(self._config.scan_interval_seconds)
+        await run_periodic(
+            lambda: self.discovery_scan(sink),
+            interval_seconds=self._config.scan_interval_seconds,
+            clock=self._clock,
+            log_event="cluster.discovery_failed",
+        )
 
     def handle_trade_sync(self, trade: WalletTrade) -> None:
         """Sync entry called by the trade collector callback.
 
-        Spawns ``evaluate_active(trade)`` as an async task and tracks it so
-        it isn't garbage collected mid-flight. No-ops if there is no running
-        event loop (e.g. test setup that hasn't started one yet).
+        Spawns ``evaluate_active(trade)`` as a tracked task. No-ops (with
+        a ``cluster.no_event_loop`` debug event) when no event loop is
+        running.
 
         Args:
             trade: Newly-inserted ``WalletTrade`` row.
         """
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            _LOG.debug("cluster.no_event_loop", tx=trade.transaction_hash)
-            return
-        task = loop.create_task(self.evaluate_active(trade))
-        self._pending_tasks.add(task)
-        task.add_done_callback(self._pending_tasks.discard)
+        self._dispatcher.spawn(
+            self.evaluate_active(trade),
+            tx=trade.transaction_hash,
+        )
 
     async def evaluate_active(self, trade: WalletTrade) -> None:
         """Emit ``cluster.active`` when several cluster members hit one market.
@@ -178,25 +188,58 @@ class ClusterDetector:
         recent = self._first_seen.list_recent(within=self._config.discovery_lookback_days)
         if len(recent) < self._config.min_cluster_size:
             return 0
+        # Fetch each candidate wallet's recent trades ONCE per scan; thread the
+        # cache through the three downstream consumers (was 3x queries each).
+        trades_by_wallet = self._load_recent_trades(recent)
         seen_cluster_ids: set[str] = set()
         new_count = 0
         # Path 1: existing creation-window partition.
         for group in self._iter_candidate_groups(recent):
-            if await self._consider_group(group, seen_cluster_ids, sink):
+            if await self._consider_group(group, seen_cluster_ids, sink, trades_by_wallet):
                 new_count += 1
         # Path 2: co-occurrence partition (organic clusters via shared
         # obscure-market overlap). _consider_group's _cluster_id_for SHA256
         # dedupe ensures clusters surfaced by both paths emit exactly once.
-        for group in self._iter_co_trade_groups(recent):
-            if await self._consider_group(group, seen_cluster_ids, sink):
+        for group in self._iter_co_trade_groups(recent, trades_by_wallet=trades_by_wallet):
+            if await self._consider_group(group, seen_cluster_ids, sink, trades_by_wallet):
                 new_count += 1
         return new_count
+
+    def _load_recent_trades(
+        self,
+        recent: list[WalletFirstSeen],
+    ) -> dict[str, list[WalletTrade]]:
+        """Pull each candidate wallet's recent trades into a per-scan cache.
+
+        Per-wallet ``recent_for_wallet`` failures are isolated: the failing
+        wallet maps to ``[]`` (treated as no trades by every downstream
+        consumer) and a ``cluster.recent_trades_failed`` warning is emitted.
+        Other wallets in the same scan are unaffected.
+        """
+        out: dict[str, list[WalletTrade]] = {}
+        for wallet in recent:
+            try:
+                out[wallet.address] = list(
+                    self._trades.recent_for_wallet(
+                        wallet.address,
+                        limit=_RECENT_TRADE_LIMIT,
+                    ),
+                )
+            except Exception:
+                _LOG.warning(
+                    "cluster.recent_trades_failed",
+                    wallet=wallet.address,
+                    exc_info=True,
+                )
+                out[wallet.address] = []
+        return out
 
     async def _consider_group(
         self,
         group: list[WalletFirstSeen],
         seen_cluster_ids: set[str],
         sink: AlertSink,
+        trades_by_wallet: dict[str, list[WalletTrade]],
     ) -> bool:
         """Evaluate one candidate group; return True iff a new alert emitted."""
         cluster_id = _cluster_id_for(group)
@@ -205,7 +248,7 @@ class ClusterDetector:
         seen_cluster_ids.add(cluster_id)
         if self._clusters.get(cluster_id) is not None:
             return False
-        scored = self._score_candidate(group)
+        scored = self._score_candidate(group, trades_by_wallet)
         if scored is None:
             return False
         score, shared_markets, behavior_tag = scored
@@ -256,6 +299,8 @@ class ClusterDetector:
     def _iter_co_trade_groups(
         self,
         recent: list[WalletFirstSeen],
+        *,
+        trades_by_wallet: dict[str, list[WalletTrade]] | None = None,
     ) -> Iterable[list[WalletFirstSeen]]:
         """Yield candidate groups derived from shared-obscure-market overlap.
 
@@ -267,41 +312,39 @@ class ClusterDetector:
         This path is independent of creation timestamps — it discovers
         clusters that grew organically over time. Existing scoring
         (B/C/D + the refactored Signal A) is applied per component.
+
+        Args:
+            recent: Candidate wallets.
+            trades_by_wallet: Optional pre-loaded per-wallet trade cache
+                (built by :meth:`discovery_scan` to avoid re-querying
+                across the three downstream consumers). When omitted —
+                as in unit tests that call this method directly — the
+                cache is built inline via :meth:`_load_recent_trades`.
         """
         if len(recent) < self._config.min_cluster_size:
             return
 
-        obscure_markets = self._build_obscure_markets_index(recent)
+        if trades_by_wallet is None:
+            trades_by_wallet = self._load_recent_trades(recent)
+        obscure_markets = self._build_obscure_markets_index(recent, trades_by_wallet)
         adjacency = self._build_cotrade_adjacency(obscure_markets)
         yield from self._yield_components(recent, adjacency)
 
     def _build_obscure_markets_index(
         self,
         recent: list[WalletFirstSeen],
+        trades_by_wallet: dict[str, list[WalletTrade]],
     ) -> dict[str, set[ConditionId]]:
         """Per-wallet set of obscure-market condition_ids.
 
-        Per-wallet ``recent_for_wallet`` failures are isolated — that
-        wallet's set is treated as empty (no edges incident on it). Other
-        wallets unaffected.
+        Reads from the per-scan trade cache built by
+        :meth:`_load_recent_trades`. Wallets that failed during load have
+        empty entries in the cache (treated here as zero obscure markets).
         """
         index: dict[str, set[ConditionId]] = {}
         for wallet in recent:
-            try:
-                trades = self._trades.recent_for_wallet(
-                    wallet.address,
-                    limit=_RECENT_TRADE_LIMIT,
-                )
-            except Exception:
-                _LOG.warning(
-                    "cluster.cotrade_trades_failed",
-                    wallet=wallet.address,
-                    exc_info=True,
-                )
-                index[wallet.address] = set()
-                continue
             obscure: set[ConditionId] = set()
-            for trade in trades:
+            for trade in trades_by_wallet.get(wallet.address, []):
                 cached = self._market_cache.get_by_condition_id(trade.condition_id)
                 if cached is None:
                     continue
@@ -393,6 +436,7 @@ class ClusterDetector:
     def _score_candidate(
         self,
         group: list[WalletFirstSeen],
+        trades_by_wallet: dict[str, list[WalletTrade]],
     ) -> tuple[int, list[CachedMarket], str | None] | None:
         """Score a candidate group and return ``(score, shared_markets, tag)``.
 
@@ -406,11 +450,13 @@ class ClusterDetector:
         # (co-occurrence — added in a later task) it is a real bonus when
         # the discovered cluster also has tight creation timestamps.
         score += self._compute_creation_cohesion_score(group)
-        shared = self._find_shared_obscure_markets(wallets)
+        shared = self._find_shared_obscure_markets(wallets, trades_by_wallet)
         if len(shared) >= self._config.min_shared_markets:
             score += 2
         # Signals C and D inspect cluster trades on shared markets.
-        cluster_trades_by_market = self._collect_cluster_trades(wallets, shared)
+        cluster_trades_by_market = self._collect_cluster_trades(
+            wallets, shared, trades_by_wallet,
+        )
         if self._has_size_correlation(cluster_trades_by_market):
             score += 1
         if self._has_direction_correlation(cluster_trades_by_market):
@@ -419,16 +465,21 @@ class ClusterDetector:
         behavior_tag = _behavior_tag_for(all_trades)
         return score, shared, behavior_tag
 
-    def _find_shared_obscure_markets(self, wallets: list[str]) -> list[CachedMarket]:
+    def _find_shared_obscure_markets(
+        self,
+        wallets: list[str],
+        trades_by_wallet: dict[str, list[WalletTrade]],
+    ) -> list[CachedMarket]:
         """Return obscure markets traded by ≥3 distinct cluster wallets.
 
         "Obscure" means below ``max_shared_market_liquidity_usd`` AND below
         ``max_shared_market_volume_usd``. Markets missing from the cache or
-        with NULL liquidity / volume are conservatively excluded.
+        with NULL liquidity / volume are conservatively excluded. Reads
+        from the per-scan trade cache built by :meth:`_load_recent_trades`.
         """
         traders_per_market: dict[ConditionId, set[str]] = {}
         for wallet in wallets:
-            for trade in self._trades.recent_for_wallet(wallet, limit=_RECENT_TRADE_LIMIT):
+            for trade in trades_by_wallet.get(wallet, []):
                 traders_per_market.setdefault(trade.condition_id, set()).add(wallet)
         shared: list[CachedMarket] = []
         for condition_id, traders in traders_per_market.items():
@@ -454,12 +505,17 @@ class ClusterDetector:
         self,
         wallets: list[str],
         shared: list[CachedMarket],
+        trades_by_wallet: dict[str, list[WalletTrade]],
     ) -> dict[ConditionId, list[WalletTrade]]:
-        """Group cluster trades by ``condition_id`` for the shared markets."""
+        """Group cluster trades by ``condition_id`` for the shared markets.
+
+        Reads from the per-scan trade cache built by
+        :meth:`_load_recent_trades`.
+        """
         shared_ids = {m.condition_id for m in shared if m.condition_id is not None}
         out: dict[ConditionId, list[WalletTrade]] = {cid: [] for cid in shared_ids}
         for wallet in wallets:
-            for trade in self._trades.recent_for_wallet(wallet, limit=_RECENT_TRADE_LIMIT):
+            for trade in trades_by_wallet.get(wallet, []):
                 if trade.condition_id in shared_ids:
                     out[trade.condition_id].append(trade)
         return out

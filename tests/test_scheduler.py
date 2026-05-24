@@ -1183,5 +1183,5 @@ async def test_subgraph_trades_aclose_closes_subgraph_client(
     assert scanner._subgraph_client is not None
     sub_client = scanner._subgraph_client
     await scanner.aclose()
-    # SubgraphClient's `_closed` flag flips to True after aclose().
-    assert sub_client._closed is True
+    # SubgraphClient delegates closure to its shared RateLimitedHttpClient inner.
+    assert sub_client._inner._closed is True

@@ -239,7 +239,7 @@ async def test_rate_limit_token_bucket_blocks_when_exhausted() -> None:
         return_value=httpx.Response(200, json=[]),
     )
     try:
-        _, bucket = await client._ensure_ready()
+        _, bucket = await client._inner._ensure_ready()
         loop = asyncio.get_running_loop()
         bucket._tokens = 0.0  # type: ignore[attr-defined]
         bucket._last_refill = loop.time()  # type: ignore[attr-defined]
@@ -278,6 +278,6 @@ async def test_async_context_manager_closes_on_exit() -> None:
     )
     async with ManifoldClient(base_url=_BASE) as client:
         await client.get_markets()
-        underlying = client._http
+        underlying = client._inner._client
     assert underlying is not None
     assert underlying.is_closed is True

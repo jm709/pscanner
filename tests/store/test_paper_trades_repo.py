@@ -8,7 +8,8 @@ from typing import Any
 import pytest
 
 from pscanner.poly.ids import AssetId, ConditionId
-from pscanner.store.db import _apply_migrations
+from pscanner.store.db import _MIGRATIONS
+from pscanner.store.migrations import apply_additive_migrations
 from pscanner.store.repo import (
     OpenPaperPosition,
     PaperSummary,
@@ -285,7 +286,7 @@ def test_existing_rows_backfilled_to_smart_money(tmp_db: sqlite3.Connection) -> 
         """,
     )
     tmp_db.commit()
-    _apply_migrations(tmp_db)
+    apply_additive_migrations(tmp_db, _MIGRATIONS)
 
     detector = tmp_db.execute(
         "SELECT triggering_alert_detector FROM paper_trades "

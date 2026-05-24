@@ -8,11 +8,11 @@ full sweep can be reconstructed as a point-in-time view.
 
 from __future__ import annotations
 
-import asyncio
 import time
 
 import structlog
 
+from pscanner.collectors.base import PollingCollector
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.ids import EventSlug
 from pscanner.poly.models import Event
@@ -21,7 +21,7 @@ from pscanner.store.repo import EventSnapshot, EventSnapshotsRepo, EventTagCache
 _LOG = structlog.get_logger(__name__)
 
 
-class EventCollector:
+class EventCollector(PollingCollector):
     """Periodically snapshots every active event's metadata.
 
     Paginates gamma ``/events`` bounded by ``snapshot_max`` to keep one
@@ -31,6 +31,7 @@ class EventCollector:
     """
 
     name: str = "event_collector"
+    log_event_iteration_failed: str = "events.snapshot_iteration_failed"
 
     def __init__(
         self,
@@ -52,31 +53,15 @@ class EventCollector:
             snapshot_interval_seconds: Cadence between full sweeps.
             snapshot_max: Hard cap on events fetched per sweep.
         """
+        super().__init__(interval_seconds=snapshot_interval_seconds)
         self._gamma = gamma_client
         self._repo = events_repo
         self._event_tag_cache = event_tag_cache
-        self._interval = snapshot_interval_seconds
         self._max = snapshot_max
 
-    async def run(self, stop_event: asyncio.Event) -> None:
-        """Loop: snapshot all active events every interval until stopped.
-
-        Per-iteration exceptions from :meth:`snapshot_all_events` are logged
-        and swallowed so a transient upstream hiccup does not kill the loop.
-
-        Args:
-            stop_event: Cooperative shutdown signal set by the scheduler.
-        """
-        while not stop_event.is_set():
-            try:
-                await self.snapshot_all_events()
-            except Exception:
-                _LOG.exception("events.snapshot_iteration_failed")
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=self._interval)
-            except TimeoutError:
-                continue
-            return
+    async def poll_once(self) -> None:
+        """One snapshot cycle — delegates to :meth:`snapshot_all_events`."""
+        await self.snapshot_all_events()
 
     async def snapshot_all_events(self) -> int:
         """Snapshot every active event once, bounded by ``snapshot_max``.
