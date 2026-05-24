@@ -41,6 +41,7 @@ from pscanner.store.repo import (
     TrackedWalletsRepo,
 )
 from pscanner.util.clock import Clock, RealClock
+from pscanner.util.loops import run_periodic
 
 _LOG = structlog.get_logger(__name__)
 
@@ -184,23 +185,21 @@ class SmartMoneyDetector:
 
     async def _refresh_loop(self) -> None:
         """Drive :meth:`_refresh_tracked_wallets` on the configured cadence."""
-        interval = self._config.refresh_interval_seconds
-        while True:
-            try:
-                await self._refresh_tracked_wallets()
-            except Exception:
-                _LOG.exception("smart_money.refresh_failed")
-            await self._clock.sleep(interval)
+        await run_periodic(
+            self._refresh_tracked_wallets,
+            interval_seconds=self._config.refresh_interval_seconds,
+            clock=self._clock,
+            log_event="smart_money.refresh_failed",
+        )
 
     async def _poll_loop(self, sink: AlertSink) -> None:
         """Drive :meth:`poll_positions` on the configured cadence."""
-        interval = self._config.position_poll_interval_seconds
-        while True:
-            try:
-                await self.poll_positions(sink)
-            except Exception:
-                _LOG.exception("smart_money.poll_failed")
-            await self._clock.sleep(interval)
+        await run_periodic(
+            lambda: self.poll_positions(sink),
+            interval_seconds=self._config.position_poll_interval_seconds,
+            clock=self._clock,
+            log_event="smart_money.poll_failed",
+        )
 
     async def _refresh_tracked_wallets(self) -> None:
         """Recompute and persist tracked wallets from the live leaderboard."""

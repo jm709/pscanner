@@ -9,15 +9,11 @@ detectors don't need a uniform config shape.
 
 from __future__ import annotations
 
-import asyncio
 from abc import ABC, abstractmethod
-
-import structlog
 
 from pscanner.alerts.sink import AlertSink
 from pscanner.util.clock import Clock, RealClock
-
-_LOG = structlog.get_logger(__name__)
+from pscanner.util.loops import run_periodic
 
 
 class PollingDetector(ABC):
@@ -35,7 +31,8 @@ class PollingDetector(ABC):
     The :meth:`run` loop catches and logs every non-cancellation exception so
     a transient API failure inside ``_scan`` doesn't tear down the detector.
     ``asyncio.CancelledError`` is re-raised so the orchestrating
-    ``asyncio.TaskGroup`` shuts down cleanly.
+    ``asyncio.TaskGroup`` shuts down cleanly. The cancel/swallow/sleep
+    machinery itself lives in :func:`pscanner.util.loops.run_periodic`.
     """
 
     name: str = ""
@@ -67,11 +64,10 @@ class PollingDetector(ABC):
         Args:
             sink: Shared alert sink every iteration emits to.
         """
-        while True:
-            try:
-                await self._scan(sink)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                _LOG.exception("polling.scan_failed", detector=self.name)
-            await self._clock.sleep(self._interval_seconds())
+        await run_periodic(
+            lambda: self._scan(sink),
+            interval_seconds=self._interval_seconds,
+            clock=self._clock,
+            log_event="polling.scan_failed",
+            log_fields={"detector": self.name},
+        )

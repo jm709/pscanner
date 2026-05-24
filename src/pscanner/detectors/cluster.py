@@ -46,6 +46,7 @@ from pscanner.store.repo import (
 )
 from pscanner.util.async_dispatch import AsyncDispatcher
 from pscanner.util.clock import Clock, RealClock
+from pscanner.util.loops import run_periodic
 
 _LOG = structlog.get_logger(__name__)
 _BEHAVIOR_FARMER_LO = 0.5
@@ -123,14 +124,12 @@ class ClusterDetector:
         """
         if self._sink is None:
             self._sink = sink
-        while True:
-            try:
-                await self.discovery_scan(sink)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                _LOG.exception("cluster.discovery_failed")
-            await self._clock.sleep(self._config.scan_interval_seconds)
+        await run_periodic(
+            lambda: self.discovery_scan(sink),
+            interval_seconds=self._config.scan_interval_seconds,
+            clock=self._clock,
+            log_event="cluster.discovery_failed",
+        )
 
     def handle_trade_sync(self, trade: WalletTrade) -> None:
         """Sync entry called by the trade collector callback.
