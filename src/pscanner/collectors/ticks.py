@@ -48,6 +48,145 @@ class _Orderbook:
     condition_id: ConditionId | None = None
 
 
+class _BookApplier:
+    """Owns the in-memory orderbook state per asset.
+
+    The single concern: take a :class:`WsBookMessage` and mutate the
+    corresponding :class:`_Orderbook`. Concurrent-safe via its own
+    :class:`asyncio.Lock` so message-apply and snapshot reads can interleave
+    without head-of-line blocking from other ticks collaborators.
+    """
+
+    def __init__(self) -> None:
+        self._books: dict[AssetId, _Orderbook] = {}
+        self._lock = asyncio.Lock()
+
+    async def apply(self, msg: WsBookMessage) -> None:
+        """Apply one WS message to the in-memory orderbook state."""
+        async with self._lock:
+            asset_id = msg.asset_id if msg.asset_id is not None else AssetId("")
+            book = self._books.setdefault(asset_id, _Orderbook())
+            if msg.market and not book.condition_id:
+                book.condition_id = msg.market
+
+            if msg.event_type == "book":
+                self._apply_book_snapshot(book, msg)
+            elif msg.event_type == "price_change":
+                self._apply_price_changes(msg)
+            elif msg.event_type == "last_trade_price":
+                self._apply_last_trade_price(book, msg)
+            # ``tick_size_change`` is intentionally ignored.
+
+    async def snapshot(self) -> list[tuple[AssetId, _Orderbook]]:
+        """Return a list snapshot of ``(asset_id, book)`` pairs.
+
+        The list itself is built under the lock so a concurrent ``apply``
+        can't add/remove entries mid-copy. The per-book state is NOT deep-
+        copied — a concurrent ``apply`` on a book can race with the
+        caller's reads of ``book.bids`` etc. This mirrors the snapshot
+        semantics before the split (the analysis path always ran outside
+        the original collector lock).
+        """
+        async with self._lock:
+            return list(self._books.items())
+
+    def _apply_book_snapshot(self, book: _Orderbook, msg: WsBookMessage) -> None:
+        """Replace ``book``'s state from a full ``book`` snapshot payload."""
+        book.bids = self._parse_levels(msg.bids or [])
+        book.asks = self._parse_levels(msg.asks or [])
+        if msg.last_trade_price is not None:
+            try:
+                book.last_trade_price = float(msg.last_trade_price)
+            except (ValueError, TypeError):
+                _LOG.debug("ticks.book.bad_last_trade_price", value=msg.last_trade_price)
+
+    def _apply_price_changes(self, msg: WsBookMessage) -> None:
+        """Apply each per-asset price change inside a ``price_change`` payload."""
+        changes = msg.price_changes or []
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            self._apply_one_price_change(change, market=msg.market)
+
+    def _apply_one_price_change(
+        self,
+        change: dict[str, Any],
+        *,
+        market: ConditionId | None,
+    ) -> None:
+        """Apply a single entry from a ``price_changes`` array.
+
+        Note: a ``price_change`` carries a per-entry ``asset_id`` distinct
+        from the message's top-level ``asset_id``. We ``setdefault``-create
+        a book entry for that asset even if it wasn't seen in a prior
+        ``book`` snapshot and isn't in the subscription manager's
+        ``_asset_to_condition`` map — downstream ``snapshot_once`` filters
+        out books with no condition_id and no mid, so the empty entry is
+        harmless and the next ``book`` message will populate it cleanly.
+        """
+        asset_id_raw = change.get("asset_id")
+        if not isinstance(asset_id_raw, str) or not asset_id_raw:
+            return
+        asset_id = AssetId(asset_id_raw)
+        sub = self._books.setdefault(asset_id, _Orderbook())
+        if market and not sub.condition_id:
+            sub.condition_id = market
+        try:
+            price = float(change.get("price", 0))
+            size = float(change.get("size", 0))
+        except (ValueError, TypeError):
+            return
+        side = str(change.get("side", "")).upper()
+        if side == "BUY":
+            book_dict: dict[float, float] | None = sub.bids
+        elif side == "SELL":
+            book_dict = sub.asks
+        else:
+            book_dict = None
+        if book_dict is None:
+            return
+        if size == 0:
+            book_dict.pop(price, None)
+        else:
+            book_dict[price] = size
+
+    def _apply_last_trade_price(self, book: _Orderbook, msg: WsBookMessage) -> None:
+        """Apply a ``last_trade_price`` payload to ``book``."""
+        if msg.last_trade_price is None:
+            return
+        try:
+            value = float(msg.last_trade_price)
+        except (ValueError, TypeError):
+            return
+        if value:
+            book.last_trade_price = value
+
+    @staticmethod
+    def _parse_levels(items: Any) -> dict[float, float]:
+        """Convert a ``[{"price": "0.5", "size": "100"}, ...]`` list to a dict.
+
+        Args:
+            items: Raw level list from the WS payload.
+
+        Returns:
+            ``price -> size`` dict; entries with ``size <= 0`` are dropped.
+        """
+        out: dict[float, float] = {}
+        if not isinstance(items, list):
+            return out
+        for entry in items:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                price = float(entry.get("price", 0))
+                size = float(entry.get("size", 0))
+            except (ValueError, TypeError):
+                continue
+            if size > 0:
+                out[price] = size
+        return out
+
+
 class MarketTickCollector:
     """Maintains an in-memory orderbook per subscribed asset and writes ticks.
 
@@ -94,7 +233,7 @@ class MarketTickCollector:
         self._repo = ticks_repo
         self._market_cache = market_cache
         self._tick_stream = tick_stream
-        self._books: dict[AssetId, _Orderbook] = {}
+        self._applier = _BookApplier()
         self._asset_to_condition: dict[AssetId, ConditionId] = {}
         self._mid_history: dict[AssetId, list[tuple[int, float]]] = {}
         self._tick_history: dict[AssetId, collections.deque[MarketTick]] = {}
@@ -137,7 +276,7 @@ class MarketTickCollector:
                 return
 
     async def _consume_loop(self, stop_event: asyncio.Event) -> None:
-        """Consume WS messages and dispatch to the handler until stopped."""
+        """Consume WS messages and dispatch to the book applier until stopped."""
         try:
             async for msg in self._ws.messages():
                 if stop_event.is_set():
@@ -145,7 +284,7 @@ class MarketTickCollector:
                 if not isinstance(msg, WsBookMessage):
                     continue
                 try:
-                    await self._handle_message(msg)
+                    await self._applier.apply(msg)
                 except Exception:
                     _LOG.exception("ticks.handle_message_failed")
         except Exception:
@@ -284,109 +423,6 @@ class MarketTickCollector:
             except Exception:
                 _LOG.exception("ticks.subscribe_failed", batch_size=len(chunk))
 
-    async def _handle_message(self, msg: WsBookMessage) -> None:
-        """Apply one WS message to the in-memory orderbook state."""
-        async with self._lock:
-            asset_id = msg.asset_id if msg.asset_id is not None else AssetId("")
-            book = self._books.setdefault(asset_id, _Orderbook())
-            if msg.market and not book.condition_id:
-                book.condition_id = msg.market
-
-            if msg.event_type == "book":
-                self._apply_book_snapshot(book, msg)
-            elif msg.event_type == "price_change":
-                self._apply_price_changes(msg)
-            elif msg.event_type == "last_trade_price":
-                self._apply_last_trade_price(book, msg)
-            # ``tick_size_change`` is intentionally ignored.
-
-    def _apply_book_snapshot(self, book: _Orderbook, msg: WsBookMessage) -> None:
-        """Replace ``book``'s state from a full ``book`` snapshot payload."""
-        book.bids = self._parse_levels(msg.bids or [])
-        book.asks = self._parse_levels(msg.asks or [])
-        if msg.last_trade_price is not None:
-            try:
-                book.last_trade_price = float(msg.last_trade_price)
-            except (ValueError, TypeError):
-                _LOG.debug("ticks.book.bad_last_trade_price", value=msg.last_trade_price)
-
-    def _apply_price_changes(self, msg: WsBookMessage) -> None:
-        """Apply each per-asset price change inside a ``price_change`` payload."""
-        changes = msg.price_changes or []
-        for change in changes:
-            if not isinstance(change, dict):
-                continue
-            self._apply_one_price_change(change, market=msg.market)
-
-    def _apply_one_price_change(
-        self,
-        change: dict[str, Any],
-        *,
-        market: ConditionId | None,
-    ) -> None:
-        """Apply a single entry from a ``price_changes`` array."""
-        asset_id_raw = change.get("asset_id")
-        if not isinstance(asset_id_raw, str) or not asset_id_raw:
-            return
-        asset_id = AssetId(asset_id_raw)
-        sub = self._books.setdefault(asset_id, _Orderbook())
-        if market and not sub.condition_id:
-            sub.condition_id = market
-        try:
-            price = float(change.get("price", 0))
-            size = float(change.get("size", 0))
-        except (ValueError, TypeError):
-            return
-        side = str(change.get("side", "")).upper()
-        if side == "BUY":
-            book_dict: dict[float, float] | None = sub.bids
-        elif side == "SELL":
-            book_dict = sub.asks
-        else:
-            book_dict = None
-        if book_dict is None:
-            return
-        if size == 0:
-            book_dict.pop(price, None)
-        else:
-            book_dict[price] = size
-
-    def _apply_last_trade_price(self, book: _Orderbook, msg: WsBookMessage) -> None:
-        """Apply a ``last_trade_price`` payload to ``book``."""
-        if msg.last_trade_price is None:
-            return
-        try:
-            value = float(msg.last_trade_price)
-        except (ValueError, TypeError):
-            return
-        if value:
-            book.last_trade_price = value
-
-    @staticmethod
-    def _parse_levels(items: Any) -> dict[float, float]:
-        """Convert a ``[{"price": "0.5", "size": "100"}, ...]`` list to a dict.
-
-        Args:
-            items: Raw level list from the WS payload.
-
-        Returns:
-            ``price -> size`` dict; entries with ``size <= 0`` are dropped.
-        """
-        out: dict[float, float] = {}
-        if not isinstance(items, list):
-            return out
-        for entry in items:
-            if not isinstance(entry, dict):
-                continue
-            try:
-                price = float(entry.get("price", 0))
-                size = float(entry.get("size", 0))
-            except (ValueError, TypeError):
-                continue
-            if size > 0:
-                out[price] = size
-        return out
-
     async def snapshot_once(self) -> int:
         """Walk in-memory orderbook state, write one row per asset.
 
@@ -398,8 +434,8 @@ class MarketTickCollector:
             Number of rows newly inserted.
         """
         snapshot_at = int(time.time())
+        books_copy = await self._applier.snapshot()
         async with self._lock:
-            books_copy = list(self._books.items())
             condition_lookup = dict(self._asset_to_condition)
         inserted = 0
         for asset_id, book in books_copy:

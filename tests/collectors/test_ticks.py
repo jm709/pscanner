@@ -196,8 +196,8 @@ async def test_book_message_updates_orderbook(tmp_db: sqlite3.Connection) -> Non
         asks=[{"price": "0.42", "size": "50"}],
         last_trade_price="0.41",
     )
-    await collector._handle_message(msg)
-    book = collector._books[AssetId("A1")]
+    await collector._applier.apply(msg)
+    book = collector._applier._books[AssetId("A1")]
     assert book.bids == {0.40: 100.0}
     assert book.asks == {0.42: 50.0}
     assert book.last_trade_price == 0.41
@@ -213,15 +213,15 @@ async def test_price_change_delta_updates_levels(tmp_db: sqlite3.Connection) -> 
         bids=[{"price": "0.40", "size": "100"}],
         asks=[{"price": "0.42", "size": "50"}],
     )
-    await collector._handle_message(seed)
+    await collector._applier.apply(seed)
     delta = _price_change_msg(
         market="0xcond",
         changes=[
             {"asset_id": "A1", "price": "0.40", "size": "50", "side": "BUY"},
         ],
     )
-    await collector._handle_message(delta)
-    assert collector._books[AssetId("A1")].bids == {0.40: 50.0}
+    await collector._applier.apply(delta)
+    assert collector._applier._books[AssetId("A1")].bids == {0.40: 50.0}
 
 
 async def test_price_change_size_zero_deletes_level(tmp_db: sqlite3.Connection) -> None:
@@ -236,13 +236,13 @@ async def test_price_change_size_zero_deletes_level(tmp_db: sqlite3.Connection) 
         ],
         asks=[{"price": "0.42", "size": "50"}],
     )
-    await collector._handle_message(seed)
+    await collector._applier.apply(seed)
     delta = _price_change_msg(
         market="0xcond",
         changes=[{"asset_id": "A1", "price": "0.40", "size": "0", "side": "BUY"}],
     )
-    await collector._handle_message(delta)
-    assert collector._books[AssetId("A1")].bids == {0.39: 75.0}
+    await collector._applier.apply(delta)
+    assert collector._applier._books[AssetId("A1")].bids == {0.39: 75.0}
 
 
 async def test_snapshot_computes_mid_spread_depth(tmp_db: sqlite3.Connection) -> None:
@@ -264,7 +264,7 @@ async def test_snapshot_computes_mid_spread_depth(tmp_db: sqlite3.Connection) ->
         {"price": "0.56", "size": "45"},
         {"price": "0.57", "size": "55"},
     ]
-    await collector._handle_message(
+    await collector._applier.apply(
         _book_msg(asset_id="A1", market="0xcond", bids=bids, asks=asks),
     )
     inserted = await collector.snapshot_once()
@@ -289,7 +289,7 @@ async def test_snapshot_skips_assets_with_no_condition_and_no_mid(
     """An empty orderbook with no condition lookup is skipped entirely."""
     collector, repo, _, _, _, _ = _make_collector(tmp_db=tmp_db)
     # Seed an empty orderbook for X1 directly (no message ingested).
-    collector._books[AssetId("X1")] = _Orderbook()
+    collector._applier._books[AssetId("X1")] = _Orderbook()
     inserted = await collector.snapshot_once()
     assert inserted == 0
     assert "X1" not in repo.count_by_asset()
@@ -414,7 +414,7 @@ async def test_get_recent_mids_filters_by_window(
     """Only mid pairs newer than ``now - window_seconds`` are returned."""
     collector, _, _, _, _, _ = _make_collector(tmp_db=tmp_db)
     # Seed an orderbook so snapshots produce mid prices.
-    await collector._handle_message(
+    await collector._applier.apply(
         _book_msg(
             asset_id="A1",
             market="0xcond",
@@ -480,7 +480,7 @@ async def test_get_recent_ticks_returns_window(
 ) -> None:
     """``get_recent_ticks`` returns full rows within the trailing window."""
     collector, _, _, _, _, _ = _make_collector(tmp_db=tmp_db)
-    await collector._handle_message(
+    await collector._applier.apply(
         _book_msg(
             asset_id="A1",
             market="0xcond",
@@ -641,7 +641,7 @@ async def test_snapshot_publishes_event_to_stream(tmp_db: sqlite3.Connection) ->
         tick_stream=stream,
     )
     await collector._refresh_subscriptions()
-    await collector._handle_message(
+    await collector._applier.apply(
         _book_msg(
             asset_id="A1",
             market="0xCOND1",
@@ -664,7 +664,7 @@ async def test_snapshot_publishes_event_to_stream(tmp_db: sqlite3.Connection) ->
 async def test_snapshot_without_stream_does_not_publish(tmp_db: sqlite3.Connection) -> None:
     """When no stream is wired, ``snapshot_once`` writes the row and returns cleanly."""
     collector, repo, _, _, _, _ = _make_collector(tmp_db=tmp_db)
-    await collector._handle_message(
+    await collector._applier.apply(
         _book_msg(
             asset_id="A1",
             market="0xcond",
