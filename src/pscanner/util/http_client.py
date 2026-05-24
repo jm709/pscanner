@@ -1,9 +1,9 @@
 """Shared async HTTP client with token-bucket rate limit + tenacity retries.
 
 Single source of truth for the rate-limited HTTP / JSON-RPC / GraphQL
-transport plumbing previously duplicated across ``pscanner.poly.http``,
-``pscanner.poly.onchain_rpc``, ``pscanner.poly.subgraph``,
-``pscanner.kalshi.client``, and ``pscanner.manifold.client``.
+transport plumbing wrapped by ``pscanner.poly.http``,
+``pscanner.poly.subgraph``, ``pscanner.kalshi.client``, and
+``pscanner.manifold.client``.
 
 :class:`RateLimitedHttpClient` lazily opens one :class:`httpx.AsyncClient` and
 one :class:`TokenBucket` on first request. Each request acquires a token,

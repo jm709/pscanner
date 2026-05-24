@@ -1,25 +1,17 @@
 """Convert decoded `OrderFilled` events to `CorpusTrade` rows.
 
-Pure functions and the block-range paginator. The orchestration loop
-that drives state mutations on `corpus_markets` lives in
-`pscanner.corpus.onchain_backfill`.
+Pure event-to-trade conversion. Consumed today by
+`pscanner.corpus.subgraph_ingest`, which decodes GraphQL rows into
+`OrderFilledEvent` and calls `event_to_corpus_trade` to derive the
+maker-POV BUY/SELL semantics + USDC notional.
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from dataclasses import dataclass
-
 import structlog
 
 from pscanner.corpus.repos import AssetIndexRepo, CorpusTrade
-from pscanner.poly.onchain import (
-    CTF_EXCHANGE_ADDRESS,
-    ORDER_FILLED_TOPIC0,
-    OrderFilledEvent,
-    decode_order_filled,
-)
-from pscanner.poly.onchain_rpc import OnchainRpcClient
+from pscanner.poly.onchain import CTF_EXCHANGE_ADDRESS, OrderFilledEvent
 
 _LOG = structlog.get_logger(__name__)
 
@@ -120,57 +112,3 @@ def event_to_corpus_trade(
         notional_usd=notional_usd,
         ts=ts,
     )
-
-
-@dataclass(frozen=True)
-class IngestRunSummary:
-    """Per-run accumulator returned by the orchestrator."""
-
-    chunks_processed: int
-    events_decoded: int
-    trades_inserted: int
-    skipped_unsupported: int
-    skipped_unresolvable: int
-    last_block: int
-
-
-async def iter_order_filled_logs(
-    *,
-    rpc: OnchainRpcClient,
-    from_block: int,
-    to_block: int,
-    chunk_size: int = 5_000,
-) -> AsyncIterator[tuple[OrderFilledEvent, int]]:
-    """Yield decoded `OrderFilled` events from `from_block`..`to_block` inclusive.
-
-    Each yielded tuple is `(event, block_timestamp)`. Walks in fixed-size
-    chunks; pre-fetches block timestamps via the RPC client's cache.
-
-    Args:
-        rpc: Async RPC client (caller owns lifecycle).
-        from_block: Inclusive start block.
-        to_block: Inclusive end block.
-        chunk_size: Blocks per `eth_getLogs` call (default 5,000).
-
-    Yields:
-        `(OrderFilledEvent, unix_timestamp_seconds)` in `(blockNumber, logIndex)`
-        order within each chunk.
-    """
-    if from_block > to_block:
-        return
-    if chunk_size <= 0:
-        raise ValueError(f"chunk_size must be positive, got {chunk_size}")
-    cursor = from_block
-    while cursor <= to_block:
-        chunk_end = min(cursor + chunk_size - 1, to_block)
-        logs = await rpc.get_logs(
-            address=CTF_EXCHANGE_ADDRESS,
-            topics=[ORDER_FILLED_TOPIC0],
-            from_block=cursor,
-            to_block=chunk_end,
-        )
-        for log in logs:
-            event = decode_order_filled(log)
-            ts = await rpc.get_block_timestamp(event.block_number)
-            yield event, ts
-        cursor = chunk_end + 1
