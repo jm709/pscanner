@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from dataclasses import asdict, fields
 from typing import Final
 
 import structlog
@@ -89,6 +90,17 @@ def _load_market_metadata(
     return out
 
 
+# Fields shared by both dataclasses; everything else is either identity
+# state (set per-row from ``trade``) or compute-only on FeatureRow
+# (``market_categories``). The parity test in
+# ``tests/corpus/test_examples_field_parity.py`` is load-bearing: it fails
+# if a future FeatureRow field doesn't get a matching TrainingExample
+# column, which would otherwise silently default-NULL on insert.
+_FEATURE_ONLY_FIELDS: Final[frozenset[str]] = frozenset(
+    f.name for f in fields(TrainingExample)
+) & frozenset(f.name for f in fields(FeatureRow))
+
+
 def _example_from_features(
     *,
     trade: Trade,
@@ -97,7 +109,9 @@ def _example_from_features(
     now_ts: int,
     platform: str = "polymarket",
 ) -> TrainingExample:
+    feature_values = {k: v for k, v in asdict(features).items() if k in _FEATURE_ONLY_FIELDS}
     return TrainingExample(
+        **feature_values,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
         tx_hash=trade.tx_hash,
         asset_id=trade.asset_id,
         wallet_address=trade.wallet_address,
@@ -105,46 +119,6 @@ def _example_from_features(
         trade_ts=trade.ts,
         built_at=now_ts,
         platform=platform,
-        prior_trades_count=features.prior_trades_count,
-        prior_buys_count=features.prior_buys_count,
-        prior_resolved_buys=features.prior_resolved_buys,
-        prior_wins=features.prior_wins,
-        prior_losses=features.prior_losses,
-        win_rate=features.win_rate,
-        avg_implied_prob_paid=features.avg_implied_prob_paid,
-        realized_edge_pp=features.realized_edge_pp,
-        prior_realized_pnl_usd=features.prior_realized_pnl_usd,
-        avg_bet_size_usd=features.avg_bet_size_usd,
-        median_bet_size_usd=features.median_bet_size_usd,
-        wallet_age_days=features.wallet_age_days,
-        seconds_since_last_trade=features.seconds_since_last_trade,
-        prior_trades_30d=features.prior_trades_30d,
-        top_category=features.top_category,
-        category_diversity=features.category_diversity,
-        bet_size_usd=features.bet_size_usd,
-        bet_size_rel_to_avg=features.bet_size_rel_to_avg,
-        edge_confidence_weighted=features.edge_confidence_weighted,
-        win_rate_confidence_weighted=features.win_rate_confidence_weighted,
-        is_high_quality_wallet=features.is_high_quality_wallet,
-        bet_size_relative_to_history=features.bet_size_relative_to_history,
-        side=features.side,
-        implied_prob_at_buy=features.implied_prob_at_buy,
-        market_category=features.market_category,
-        market_volume_so_far_usd=features.market_volume_so_far_usd,
-        market_unique_traders_so_far=features.market_unique_traders_so_far,
-        market_age_seconds=features.market_age_seconds,
-        time_to_resolution_seconds=features.time_to_resolution_seconds,
-        last_trade_price=features.last_trade_price,
-        price_volatility_recent=features.price_volatility_recent,
-        cat_sports=features.cat_sports,
-        cat_esports=features.cat_esports,
-        cat_thesis=features.cat_thesis,
-        cat_macro=features.cat_macro,
-        cat_elections=features.cat_elections,
-        cat_crypto=features.cat_crypto,
-        cat_geopolitics=features.cat_geopolitics,
-        cat_tech=features.cat_tech,
-        cat_culture=features.cat_culture,
         label_won=label_won,
     )
 
