@@ -13,7 +13,8 @@ import os
 import re
 import sqlite3
 import time
-from contextlib import AsyncExitStack
+from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Final
 
@@ -231,34 +232,36 @@ def build_corpus_parser() -> argparse.ArgumentParser:
     return parser
 
 
-class _GammaCM:
-    """Async context manager that owns a fresh GammaClient + closes it."""
-
-    async def __aenter__(self) -> GammaClient:
-        self._client = GammaClient(rpm=50)
-        return self._client
-
-    async def __aexit__(self, *exc: object) -> None:
-        await self._client.aclose()
+_GammaOrDataClient = GammaClient | DataClient
 
 
-class _DataCM:
-    """Async context manager that owns a fresh DataClient + closes it."""
+def _build_client(client_cls: type[GammaClient | DataClient], rpm: int) -> _GammaOrDataClient:
+    """Construct a Gamma or Data client with the given rate budget.
 
-    async def __aenter__(self) -> DataClient:
-        self._client = DataClient(rpm=50)
-        return self._client
-
-    async def __aexit__(self, *exc: object) -> None:
-        await self._client.aclose()
-
-
-def _make_gamma_client() -> _GammaCM:
-    return _GammaCM()
+    Module-private seam used by :func:`_client_ctx`. Exposed at module
+    scope so tests can patch a single name to inject fakes for either
+    client class.
+    """
+    return client_cls(rpm=rpm)
 
 
-def _make_data_client() -> _DataCM:
-    return _DataCM()
+@asynccontextmanager
+async def _client_ctx(
+    client_cls: type[GammaClient | DataClient], *, rpm: int = 50
+) -> AsyncIterator[_GammaOrDataClient]:
+    """Yield a freshly-built client with ``aclose`` in a ``finally`` block.
+
+    Replaces the previous ``_GammaCM`` / ``_DataCM`` wrappers — same
+    behaviour but the ``rpm`` argument propagates so commands that need
+    operator-tunable rate budgets (e.g. ``backfill-gamma-tags``,
+    ``backfill-outcome-side``) can use the same shape instead of an
+    open-coded try/finally.
+    """
+    client = _build_client(client_cls, rpm)
+    try:
+        yield client
+    finally:
+        await client.aclose()
 
 
 async def _drain_pending(*, conn: sqlite3.Connection, data: DataClient, gamma: GammaClient) -> int:
@@ -342,8 +345,8 @@ async def _run_polymarket_backfill(args: argparse.Namespace) -> int:
     conn = init_corpus_db(Path(args.db))
     try:
         async with AsyncExitStack() as stack:
-            gamma = await stack.enter_async_context(_make_gamma_client())
-            data = await stack.enter_async_context(_make_data_client())
+            gamma = await stack.enter_async_context(_client_ctx(GammaClient))
+            data = await stack.enter_async_context(_client_ctx(DataClient))
             await enumerate_closed_markets(
                 gamma=gamma,
                 repo=CorpusMarketsRepo(conn),
@@ -422,8 +425,8 @@ async def _run_polymarket_refresh(args: argparse.Namespace) -> int:
     try:
         state = CorpusStateRepo(conn)
         async with AsyncExitStack() as stack:
-            gamma = await stack.enter_async_context(_make_gamma_client())
-            data = await stack.enter_async_context(_make_data_client())
+            gamma = await stack.enter_async_context(_client_ctx(GammaClient))
+            data = await stack.enter_async_context(_client_ctx(DataClient))
             since_ts = state.get_int("last_gamma_sweep_ts")
             await enumerate_closed_markets(
                 gamma=gamma,
@@ -693,17 +696,12 @@ async def _cmd_backfill_gamma_tags(args: argparse.Namespace) -> int:
     """Backfill gamma tags into corpus_markets."""
     conn = init_corpus_db(Path(args.db))
     try:
-        # Use a one-off GammaClient with the requested rate limit. _GammaCM
-        # hardcodes rpm=50; we instantiate directly to let the operator tune.
-        gamma = GammaClient(rpm=args.rpm)
-        try:
+        async with _client_ctx(GammaClient, rpm=args.rpm) as gamma:
             summary = await run_backfill_gamma_tags(
                 conn=conn,
                 gamma=gamma,
                 limit=args.limit,
             )
-        finally:
-            await gamma.aclose()
         _log.info(
             "gamma_tags_backfill.cli_summary",
             markets_processed=summary.markets_processed,
@@ -718,13 +716,10 @@ async def _cmd_backfill_outcome_side(args: argparse.Namespace) -> int:
     """``corpus backfill-outcome-side`` — repair NO+NO binary markets (#167)."""
     conn = init_corpus_db(Path(args.db))
     try:
-        # Instantiate directly so ``--rpm`` actually propagates. The
-        # ``_make_gamma_client`` / ``_make_data_client`` helpers hardcode
-        # rpm=50; this command needs operator tuning to coexist with the
-        # live daemon (which also uses gamma).
-        gamma = GammaClient(rpm=args.rpm)
-        data = DataClient(rpm=args.rpm)
-        try:
+        async with (
+            _client_ctx(GammaClient, rpm=args.rpm) as gamma,
+            _client_ctx(DataClient, rpm=args.rpm) as data,
+        ):
             stats = await _run_outcome_side_backfill(
                 conn,
                 data=data,
@@ -734,9 +729,6 @@ async def _cmd_backfill_outcome_side(args: argparse.Namespace) -> int:
             )
             _log.info("corpus.backfill_outcome_side.cli_done", **stats)
             return 0
-        finally:
-            await gamma.aclose()
-            await data.aclose()
     finally:
         conn.close()
 

@@ -21,6 +21,8 @@ from pscanner.corpus.cli import (
 from pscanner.corpus.db import apply_read_pragmas, init_corpus_db
 from pscanner.corpus.repos import CorpusMarket, CorpusMarketsRepo
 from pscanner.corpus.subgraph_ingest import SubgraphRunSummary
+from pscanner.poly.data import DataClient
+from pscanner.poly.gamma import GammaClient
 
 
 def test_parser_recognises_all_subcommands() -> None:
@@ -40,22 +42,30 @@ def test_parser_supports_rebuild_flag() -> None:
     assert args.rebuild is True
 
 
+def _fake_client_factory() -> object:
+    """Return a side-effect callable that builds AsyncMock clients per-class.
+
+    Patches the module-private ``_build_client`` seam so ``_client_ctx`` can
+    construct and ``await client.aclose()`` on the returned mocks without
+    further configuration.
+    """
+    fakes: dict[type, AsyncMock] = {GammaClient: AsyncMock(), DataClient: AsyncMock()}
+
+    def build(client_cls: type, _rpm: int) -> AsyncMock:
+        return fakes[client_cls]
+
+    return build
+
+
 @pytest.mark.asyncio
 async def test_backfill_command_smokes(tmp_path: Path) -> None:
     db_path = tmp_path / "corpus.sqlite3"
     fake_enumerate = AsyncMock(return_value=0)
     fake_drain = AsyncMock(return_value=0)
-    fake_data_cm = MagicMock()
-    fake_data_cm.__aenter__ = AsyncMock(return_value=AsyncMock())
-    fake_data_cm.__aexit__ = AsyncMock(return_value=None)
-    fake_gamma_cm = MagicMock()
-    fake_gamma_cm.__aenter__ = AsyncMock(return_value=AsyncMock())
-    fake_gamma_cm.__aexit__ = AsyncMock(return_value=None)
     with (
         patch("pscanner.corpus.cli.enumerate_closed_markets", fake_enumerate),
         patch("pscanner.corpus.cli._drain_pending", fake_drain),
-        patch("pscanner.corpus.cli._make_data_client", return_value=fake_data_cm),
-        patch("pscanner.corpus.cli._make_gamma_client", return_value=fake_gamma_cm),
+        patch("pscanner.corpus.cli._build_client", side_effect=_fake_client_factory()),
     ):
         rc = await run_corpus_command(["backfill", "--db", str(db_path)])
     assert rc == 0
@@ -70,12 +80,6 @@ async def test_backfill_command_registers_resolutions(tmp_path: Path) -> None:
     fake_enumerate = AsyncMock(return_value=0)
     fake_drain = AsyncMock(return_value=0)
     fake_register = AsyncMock(return_value=0)
-    fake_data_cm = MagicMock()
-    fake_data_cm.__aenter__ = AsyncMock(return_value=AsyncMock())
-    fake_data_cm.__aexit__ = AsyncMock(return_value=None)
-    fake_gamma_cm = MagicMock()
-    fake_gamma_cm.__aenter__ = AsyncMock(return_value=AsyncMock())
-    fake_gamma_cm.__aexit__ = AsyncMock(return_value=None)
     with (
         patch("pscanner.corpus.cli.enumerate_closed_markets", fake_enumerate),
         patch("pscanner.corpus.cli._drain_pending", fake_drain),
@@ -83,8 +87,7 @@ async def test_backfill_command_registers_resolutions(tmp_path: Path) -> None:
             "pscanner.corpus.cli._register_missing_polymarket_resolutions",
             fake_register,
         ),
-        patch("pscanner.corpus.cli._make_data_client", return_value=fake_data_cm),
-        patch("pscanner.corpus.cli._make_gamma_client", return_value=fake_gamma_cm),
+        patch("pscanner.corpus.cli._build_client", side_effect=_fake_client_factory()),
     ):
         rc = await run_corpus_command(["backfill", "--db", str(db_path)])
     assert rc == 0
