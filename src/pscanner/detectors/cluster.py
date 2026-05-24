@@ -96,6 +96,15 @@ class ClusterDetector:
         self._sink: AlertSink | None = None
         self._pending_tasks: set[asyncio.Task[None]] = set()
 
+    def wire_sink(self, sink: AlertSink) -> None:
+        """Pre-wire the alert sink before :meth:`run` starts.
+
+        Used by the scheduler (and tests) to seed the sink before the
+        trade-callback path fires for the first time. Mirrors the
+        ``if self._sink is None`` ratchet inside :meth:`run`.
+        """
+        self._sink = sink
+
     async def run(self, sink: AlertSink) -> None:
         """Periodic discovery loop — scans for new clusters on a fixed cadence.
 

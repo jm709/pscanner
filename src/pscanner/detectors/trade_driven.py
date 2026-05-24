@@ -42,6 +42,17 @@ class TradeDrivenDetector(ABC):
             trade: Newly-inserted ``WalletTrade`` row.
         """
 
+    def wire_sink(self, sink: AlertSink) -> None:
+        """Pre-wire the alert sink before :meth:`run` starts.
+
+        Used by the scheduler (and tests) to seed the sink before the
+        callback-driven path fires for the first time. Mirrors the
+        ``if self._sink is None: self._sink = sink`` ratcheting in
+        :meth:`run` — callers that drive ``run()`` directly without
+        pre-wiring still get the fallback assignment.
+        """
+        self._sink = sink
+
     def handle_trade_sync(self, trade: WalletTrade) -> None:
         """Sync entry for ``TradeCollector.subscribe_new_trade``.
 

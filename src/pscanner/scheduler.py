@@ -218,7 +218,7 @@ class Scanner:
             return
         for detector in self._detectors.values():
             if isinstance(detector, TradeDrivenDetector | ClusterDetector):
-                detector._sink = self._sink
+                detector.wire_sink(self._sink)
                 trade_collector.subscribe_new_trade(detector.handle_trade_sync)
                 _LOG.info("scanner.trade_driven_detector_wired", detector=detector.name)
 
@@ -230,7 +230,7 @@ class Scanner:
             return
         if not isinstance(gate_detector, GateModelDetector):
             return
-        gate_detector._sink = self._sink
+        gate_detector.wire_sink(self._sink)
         market_scoped.subscribe_new_trade(gate_detector.handle_trade_sync)
         _LOG.info("scanner.gate_model_wired", detector=gate_detector.name)
 
@@ -248,7 +248,7 @@ class Scanner:
         """
         for detector in self._detectors.values():
             if isinstance(detector, MoveAttributionDetector):
-                detector._sink = self._sink
+                detector.wire_sink(self._sink)
                 self._sink.subscribe(detector.handle_alert_sync)
                 _LOG.info("scanner.alert_driven_detector_wired", detector=detector.name)
             elif isinstance(detector, PaperTrader):

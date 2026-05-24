@@ -104,7 +104,7 @@ async def test_run_does_not_overwrite_prewired_sink() -> None:
     """When ``_sink`` was pre-wired, ``run`` keeps the original instance."""
     detector = _RecordingDetector()
     prewired = _StubSink()
-    detector._sink = prewired  # type: ignore[assignment]  # ty:ignore[invalid-assignment]
+    detector.wire_sink(prewired)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
     other = _StubSink()
 
     task = asyncio.create_task(detector.run(other))  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]

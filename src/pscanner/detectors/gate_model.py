@@ -154,6 +154,14 @@ class GateModelDetector(TradeDrivenDetector):
         """
         return trade.side == "BUY"
 
+    def wire_sink(self, sink: AlertSink) -> None:
+        """Pre-wire the alert sink before :meth:`run` starts.
+
+        Used by the scheduler (and tests) to seed the sink before the
+        queued worker fires for the first time.
+        """
+        self._sink = sink
+
     def handle_trade_sync(self, trade: WalletTrade) -> None:
         """Enqueue for scoring; drop if queue is full or trade fails pre-screen."""
         if not self._should_score(trade):

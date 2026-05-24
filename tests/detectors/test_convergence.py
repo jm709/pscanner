@@ -178,7 +178,7 @@ def _make_detector(
         smart_money_config=smart_config or SmartMoneyConfig(),
     )
     if sink is not None:
-        detector._sink = sink  # type: ignore[assignment]  # ty:ignore[invalid-assignment]
+        detector.wire_sink(sink)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
     return detector
 
 

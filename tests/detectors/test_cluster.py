@@ -276,7 +276,7 @@ def _make_detector(
         clock=clock or FakeClock(start=float(_NOW)),
     )
     if sink is not None:
-        detector._sink = sink  # type: ignore[assignment]  # ty:ignore[invalid-assignment]
+        detector.wire_sink(sink)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
     return detector
 
 

@@ -299,6 +299,14 @@ class MoveAttributionDetector:
         self._sink: AlertSink | None = None
         self._pending_tasks: set[asyncio.Task[None]] = set()
 
+    def wire_sink(self, sink: AlertSink) -> None:
+        """Pre-wire the alert sink before :meth:`run` starts.
+
+        Used by the scheduler (and tests) to seed the sink before any
+        upstream :meth:`handle_alert_sync` callback fires.
+        """
+        self._sink = sink
+
     async def run(self, sink: AlertSink) -> None:
         """Park forever — this detector is alert-driven, not periodic."""
         if self._sink is None:
