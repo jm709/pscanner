@@ -9,6 +9,7 @@ from pathlib import Path
 
 from pscanner.corpus import repos
 from pscanner.corpus.db import (
+    _PLATFORM_MIGRATIONS,
     _SCHEMA_STATEMENTS,
     TRAINING_EXAMPLES_COLUMNS,
     _apply_migrations,
@@ -585,6 +586,24 @@ def test_corpus_markets_tags_json_defaults_to_empty_list() -> None:
         assert row["categories_json"] == "[]"
     finally:
         conn.close()
+
+
+def test_platform_migrations_spec_count() -> None:
+    """Tripwire: any accidental deletion from _PLATFORM_MIGRATIONS surfaces here.
+
+    Every table affected by the PR-A platform-column migration must have a
+    spec entry. A missing entry would silently leave that table un-migrated
+    on a pre-PR-A on-disk corpus.
+    """
+    assert len(_PLATFORM_MIGRATIONS) == 5
+    tables = {spec.table for spec in _PLATFORM_MIGRATIONS}
+    assert tables == {
+        "corpus_markets",
+        "corpus_trades",
+        "market_resolutions",
+        "training_examples",
+        "asset_index",
+    }
 
 
 def test_apply_migrations_is_idempotent_for_new_columns() -> None:
