@@ -976,16 +976,16 @@ class Scanner:
 
     async def _close_owned_clients(self) -> None:
         """Close HTTP clients we own (data_client owns its lb_http internally)."""
-        with contextlib.suppress(Exception):
-            await self._clients.data_client.aclose()
-        with contextlib.suppress(Exception):
-            await self._clients.gamma_client.aclose()
-        with contextlib.suppress(Exception):
-            await self._clients.gamma_http.aclose()
-        with contextlib.suppress(Exception):
-            await self._clients.data_http.aclose()
-        with contextlib.suppress(Exception):
-            await self._clients.ticks_ws.close()
+        closers: tuple[Callable[[], Awaitable[None]], ...] = (
+            self._clients.data_client.aclose,
+            self._clients.gamma_client.aclose,
+            self._clients.gamma_http.aclose,
+            self._clients.data_http.aclose,
+            self._clients.ticks_ws.close,
+        )
+        for closer in closers:
+            with contextlib.suppress(Exception):
+                await closer()
 
 
 def _load_corpus_metadata(*, platform: str = "polymarket") -> dict[str, MarketMetadata]:
