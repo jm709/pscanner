@@ -334,7 +334,7 @@ async def test_async_context_manager_closes_client() -> None:
     )
     async with KalshiClient(rpm=600, base_url=_BASE) as client:
         await client.get_markets()
-        underlying = client._client  # type: ignore[attr-defined]
+        underlying = client._inner._client  # type: ignore[attr-defined]
     assert underlying is not None
     assert underlying.is_closed is True
 

@@ -8,7 +8,6 @@ whale-alert events (subscribed via the alert sink).
 
 from __future__ import annotations
 
-import asyncio
 import threading
 from collections.abc import Callable
 
@@ -16,6 +15,7 @@ import structlog
 
 from pscanner.alerts.models import Alert
 from pscanner.alerts.sink import AlertSink
+from pscanner.collectors.base import PollingCollector
 from pscanner.store.repo import TrackedWalletsRepo, WatchlistRepo
 
 _LOG = structlog.get_logger(__name__)
@@ -134,7 +134,7 @@ class WatchlistRegistry:
             callback(address)
 
 
-class WatchlistSyncer:
+class WatchlistSyncer(PollingCollector):
     """Mirrors smart-money + whale-alert sources into the WatchlistRegistry.
 
     Subscribes to the alert sink for whale alerts at construction, and
@@ -143,6 +143,7 @@ class WatchlistSyncer:
     """
 
     name: str = "watchlist_sync"
+    log_event_iteration_failed: str = "watchlist_sync.iteration_failed"
 
     def __init__(
         self,
@@ -160,27 +161,15 @@ class WatchlistSyncer:
             sink: Alert sink the syncer subscribes to for whale events.
             sync_interval_seconds: Cadence for mirroring smart-money entries.
         """
+        super().__init__(interval_seconds=sync_interval_seconds)
         self._registry = registry
         self._tracked_repo = tracked_repo
         self._sink = sink
-        self._sync_interval_seconds = sync_interval_seconds
         sink.subscribe(self._on_alert)
 
-    async def run(self, stop_event: asyncio.Event) -> None:
-        """Mirror loop. Returns when ``stop_event`` is set.
-
-        On each iteration the smart-money mirror runs, then the loop sleeps
-        for ``sync_interval_seconds`` (or returns early if the stop event
-        fires). Exceptions raised by the sync step are logged and swallowed
-        so a transient DB hiccup does not kill the loop.
-        """
-        while not stop_event.is_set():
-            try:
-                await self.sync_smart_money()
-            except Exception:
-                _LOG.exception("watchlist_sync.iteration_failed")
-            if await self._wait_or_stop(stop_event, self._sync_interval_seconds):
-                return
+    async def poll_once(self) -> None:
+        """One mirror cycle — delegates to :meth:`sync_smart_money`."""
+        await self.sync_smart_money()
 
     async def sync_smart_money(self) -> None:
         """Mirror every tracked wallet into the registry as ``smart_money``.
@@ -223,17 +212,3 @@ class WatchlistSyncer:
             _LOG.warning("watchlist_sync.alert_missing_wallet", alert_key=alert.alert_key)
         except Exception:
             _LOG.exception("watchlist_sync.alert_handler_failed", alert_key=alert.alert_key)
-
-    @staticmethod
-    async def _wait_or_stop(stop_event: asyncio.Event, seconds: float) -> bool:
-        """Wait up to ``seconds`` for the stop event.
-
-        Returns:
-            ``True`` if the stop event was set during the wait, ``False`` if
-            the timeout elapsed first.
-        """
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=seconds)
-        except TimeoutError:
-            return False
-        return True

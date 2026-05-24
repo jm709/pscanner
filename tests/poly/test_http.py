@@ -149,7 +149,7 @@ async def test_token_bucket_blocks_when_exhausted() -> None:
     )
     try:
         # Force-drain bucket: pre-warm by calling _ensure_ready then mutate.
-        _, bucket = await client._ensure_ready()
+        _, bucket = await client._inner._ensure_ready()
         loop = asyncio.get_running_loop()
         bucket._tokens = 0.0  # type: ignore[attr-defined]
         bucket._last_refill = loop.time()  # type: ignore[attr-defined]
@@ -191,7 +191,7 @@ async def test_async_with_closes_underlying_client() -> None:
     async with PolyHttpClient(base_url=_BASE, rpm=600) as client:
         result = await client.get("/v1/ctx")
         assert result == {"x": 1}
-        underlying = client._client
+        underlying = client._inner._client
     assert underlying is not None
     assert underlying.is_closed is True
 

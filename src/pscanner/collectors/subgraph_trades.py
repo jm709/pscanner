@@ -11,7 +11,6 @@ Lifecycle is owned by the daemon scheduler — restart-on-crash, shared
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from typing import Any, Final
@@ -20,6 +19,7 @@ import structlog
 
 from pscanner.alerts.models import Alert
 from pscanner.alerts.protocol import IAlertSink
+from pscanner.collectors.base import PollingCollector
 from pscanner.collectors.watchlist import WatchlistRegistry
 from pscanner.config import SubgraphTradeCollectorConfig
 from pscanner.corpus.repos import AssetIndexRepo
@@ -162,19 +162,11 @@ async def _fetch_events_since(
     return events, indexer_ts
 
 
-async def _wait_or_stop(stop_event: asyncio.Event, seconds: float) -> bool:
-    """Wait up to ``seconds`` for ``stop_event``. Return True if it was set."""
-    try:
-        await asyncio.wait_for(stop_event.wait(), timeout=seconds)
-    except TimeoutError:
-        return False
-    return True
-
-
-class SubgraphTradeCollector:
+class SubgraphTradeCollector(PollingCollector):
     """Polls the V2 subgraph for watchlist trades and emits ``subgraph_copy`` alerts."""
 
     name: str = "subgraph_trades"
+    log_event_iteration_failed: str = "subgraph_trades.cycle_failed"
 
     def __init__(
         self,
@@ -202,6 +194,7 @@ class SubgraphTradeCollector:
             state_repo: Watermark persistence.
             clock: Injectable clock for tests; defaults to :class:`RealClock`.
         """
+        super().__init__(interval_seconds=config.poll_interval_seconds)
         self._config = config
         self._subgraph = subgraph_client
         self._gamma = gamma_client
@@ -212,21 +205,7 @@ class SubgraphTradeCollector:
         self._state = state_repo
         self._clock = clock if clock is not None else RealClock()
 
-    async def run(self, stop_event: asyncio.Event) -> None:
-        """Run the polling loop until ``stop_event`` is set.
-
-        Per-cycle exceptions are logged and swallowed so a transient upstream
-        hiccup does not kill the loop.
-        """
-        while not stop_event.is_set():
-            try:
-                await self._poll_once()
-            except Exception:
-                _LOG.exception("subgraph_trades.cycle_failed")
-            if await _wait_or_stop(stop_event, self._config.poll_interval_seconds):
-                return
-
-    async def _poll_once(self) -> None:
+    async def poll_once(self) -> None:
         """Run a single poll cycle: fetch, emit alerts, persist watermark."""
         addrs = sorted({a.lower() for a in self._watchlist.addresses()})
         if not addrs:

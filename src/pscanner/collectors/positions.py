@@ -10,11 +10,11 @@ second collapse to one row — that is the intended idempotency behaviour.
 
 from __future__ import annotations
 
-import asyncio
 import time
 
 import structlog
 
+from pscanner.collectors.base import PollingCollector
 from pscanner.collectors.watchlist import WatchlistRegistry
 from pscanner.poly.data import DataClient
 from pscanner.poly.models import Position
@@ -23,18 +23,19 @@ from pscanner.store.repo import WalletPositionsHistoryRepo, WalletPositionsHisto
 _LOG = structlog.get_logger(__name__)
 
 
-class PositionCollector:
+class PositionCollector(PollingCollector):
     """Periodically snapshots every watched wallet's open positions.
 
     Iterates :meth:`WatchlistRegistry.addresses` each cycle, calls
     :meth:`DataClient.get_positions` for every address sequentially (rate-
     limit safety), and appends rows to :class:`WalletPositionsHistoryRepo`.
     Per-wallet exceptions are caught so a single bad poll does not break the
-    cycle, and per-iteration exceptions are caught so a transient hiccup does
-    not kill the loop.
+    cycle, and per-iteration exceptions are caught (in the base) so a
+    transient hiccup does not kill the loop.
     """
 
     name: str = "position_collector"
+    log_event_iteration_failed: str = "positions.snapshot_iteration_failed"
 
     def __init__(
         self,
@@ -52,29 +53,14 @@ class PositionCollector:
             positions_repo: Append-only repo for history rows.
             snapshot_interval_seconds: Cadence for full-watchlist snapshots.
         """
+        super().__init__(interval_seconds=snapshot_interval_seconds)
         self._registry = registry
         self._data_client = data_client
         self._positions_repo = positions_repo
-        self._snapshot_interval_seconds = snapshot_interval_seconds
 
-    async def run(self, stop_event: asyncio.Event) -> None:
-        """Run the snapshot loop until ``stop_event`` is set.
-
-        On each iteration calls :meth:`snapshot_all_wallets`, then waits up to
-        ``snapshot_interval_seconds`` for the stop event. Per-iteration
-        exceptions are logged and swallowed so a transient upstream hiccup
-        does not kill the loop.
-
-        Args:
-            stop_event: Cooperative shutdown signal set by the scheduler.
-        """
-        while not stop_event.is_set():
-            try:
-                await self.snapshot_all_wallets()
-            except Exception:
-                _LOG.exception("positions.snapshot_iteration_failed")
-            if await self._wait_or_stop(stop_event, self._snapshot_interval_seconds):
-                return
+    async def poll_once(self) -> None:
+        """One snapshot cycle — delegates to :meth:`snapshot_all_wallets`."""
+        await self.snapshot_all_wallets()
 
     async def snapshot_all_wallets(self) -> int:
         """Snapshot every watched wallet once.
@@ -131,20 +117,6 @@ class PositionCollector:
                 inserted += 1
         _LOG.debug("positions.snapshot", wallet=address, rows=inserted)
         return inserted
-
-    @staticmethod
-    async def _wait_or_stop(stop_event: asyncio.Event, seconds: float) -> bool:
-        """Wait up to ``seconds`` for the stop event.
-
-        Returns:
-            ``True`` if the stop event was set during the wait, ``False`` if
-            the timeout elapsed first.
-        """
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=seconds)
-        except TimeoutError:
-            return False
-        return True
 
 
 def _build_history_row(

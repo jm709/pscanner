@@ -13,13 +13,13 @@ collector to know every shape upfront.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from typing import Any
 
 import structlog
 
+from pscanner.collectors.base import PollingCollector
 from pscanner.collectors.watchlist import WatchlistRegistry
 from pscanner.poly.data import DataClient
 from pscanner.store.repo import WalletActivityEvent, WalletActivityEventsRepo
@@ -28,7 +28,7 @@ _LOG = structlog.get_logger(__name__)
 _SOURCE = "activity_api"
 
 
-class ActivityCollector:
+class ActivityCollector(PollingCollector):
     """Periodically polls ``/activity`` for every watched wallet.
 
     Fetches every event type for each address in the registry on a fixed
@@ -38,6 +38,7 @@ class ActivityCollector:
     """
 
     name: str = "activity_collector"
+    log_event_iteration_failed: str = "activity.poll_iteration_failed"
 
     def __init__(
         self,
@@ -62,36 +63,17 @@ class ActivityCollector:
             dup_lookback: Stop paging when this many consecutive inserts are
                 duplicates — i.e. we have caught up to the previous poll.
         """
+        super().__init__(interval_seconds=poll_interval_seconds)
         self._registry = registry
         self._data_client = data_client
         self._activity_repo = activity_repo
-        self._poll_interval_seconds = poll_interval_seconds
         self._activity_page_limit = activity_page_limit
         self._max_pages = max_pages
         self._dup_lookback = dup_lookback
 
-    async def run(self, stop_event: asyncio.Event) -> None:
-        """Loop: poll all wallets every interval until ``stop_event`` is set.
-
-        Per-iteration exceptions from :meth:`poll_all_wallets` are logged and
-        swallowed so a transient upstream hiccup does not kill the loop.
-
-        Args:
-            stop_event: Cooperative shutdown signal set by the scheduler.
-        """
-        while not stop_event.is_set():
-            try:
-                await self.poll_all_wallets()
-            except Exception:
-                _LOG.exception("activity.poll_iteration_failed")
-            try:
-                await asyncio.wait_for(
-                    stop_event.wait(),
-                    timeout=self._poll_interval_seconds,
-                )
-            except TimeoutError:
-                continue
-            return
+    async def poll_once(self) -> None:
+        """One polling cycle — delegates to :meth:`poll_all_wallets`."""
+        await self.poll_all_wallets()
 
     async def poll_all_wallets(self) -> int:
         """Poll every watched wallet once.
