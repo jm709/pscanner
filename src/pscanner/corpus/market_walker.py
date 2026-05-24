@@ -12,6 +12,7 @@ from typing import Any, Final
 
 import structlog
 
+from pscanner.corpus.outcome_resolver import resolve_binary_outcome_map
 from pscanner.corpus.repos import (
     CorpusMarketsRepo,
     CorpusTrade,
@@ -25,7 +26,6 @@ _PAGE_SIZE: Final[int] = 500
 _OFFSET_CAP: Final[int] = (
     3000  # Polymarket /trades hard cap (server: "max historical activity offset of 3000 exceeded")  # noqa: E501
 )
-_BINARY_MARKET_OUTCOME_COUNT: Final[int] = 2
 
 
 async def _resolve_outcome_side_index(
@@ -36,40 +36,15 @@ async def _resolve_outcome_side_index(
 ) -> dict[str, str]:
     """Build ``{asset_id: "YES" | "NO"}`` from the market's ``clob_token_ids``.
 
-    Polymarket convention: ``clob_token_ids[0]`` is the YES-equivalent leg,
-    ``clob_token_ids[1]`` is the NO-equivalent leg (parallel to ``outcomes``).
-    The `/trades` row's ``outcome`` field is the human-readable name
-    (e.g. ``"Cavaliers"``), which is unreliable for non-binary-Yes/No markets.
-    Deriving ``outcome_side`` from the token-id position fixes the
-    long-standing sports-collapse bug (#159).
-
-    Returns an empty mapping when the market cannot be resolved or is not
-    binary; the caller falls back to the legacy outcome-name heuristic.
+    Thin shim over :func:`pscanner.corpus.outcome_resolver.resolve_binary_outcome_map`
+    that narrows the shared `(side, index)` tuple to just the side. Returns
+    an empty mapping when the resolver yields ``None`` so the caller can
+    fall back to the legacy outcome-name heuristic.
     """
-    try:
-        slug = await data.get_market_slug_by_condition_id(condition_id)
-    except Exception:
-        _log.warning("corpus.outcome_side_index.slug_lookup_failed", condition_id=condition_id)
+    mapping = await resolve_binary_outcome_map(condition_id, data=data, gamma=gamma)
+    if mapping is None:
         return {}
-    if slug is None:
-        return {}
-    try:
-        market = await gamma.get_market_by_slug(slug)
-    except Exception:
-        _log.warning(
-            "corpus.outcome_side_index.gamma_lookup_failed",
-            condition_id=condition_id,
-            slug=slug,
-        )
-        return {}
-    if market is None:
-        return {}
-    if len(market.clob_token_ids) != _BINARY_MARKET_OUTCOME_COUNT:
-        return {}
-    return {
-        str(market.clob_token_ids[0]): "YES",
-        str(market.clob_token_ids[1]): "NO",
-    }
+    return {token_id: side for token_id, (side, _index) in mapping.items()}
 
 
 def _parse_trade(
