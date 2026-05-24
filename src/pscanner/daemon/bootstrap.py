@@ -38,6 +38,12 @@ from pscanner.corpus.features import (
     _UnresolvedBuy,
     _WalletAccumulator,
 )
+from pscanner.daemon._state_persistence import (
+    MARKET_STATE_INSERT_SQL,
+    WALLET_STATE_INSERT_SQL,
+    market_state_to_row,
+    wallet_state_to_row,
+)
 from pscanner.daemon.corpus_loader import (
     load_corpus_metadata,
     load_corpus_resolutions_into,
@@ -135,23 +141,11 @@ def _bulk_write_wallets(
     rows = [
         _wallet_row(wallet_address, accum) for wallet_address, accum in provider._wallets.items()
     ]
-    daemon_conn.executemany(
-        """
-        INSERT INTO wallet_state_live (
-          wallet_address, first_seen_ts, prior_trades_count, prior_buys_count,
-          prior_resolved_buys, prior_wins, prior_losses,
-          cumulative_buy_price_sum, cumulative_buy_count, realized_pnl_usd,
-          last_trade_ts, bet_size_sum, bet_size_count,
-          recent_30d_trades_json, category_counts_json, unresolved_buys_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        rows,
-    )
+    daemon_conn.executemany(WALLET_STATE_INSERT_SQL, rows)
     daemon_conn.commit()
 
 
 def _wallet_row(wallet_address: str, accum: _WalletAccumulator) -> tuple[object, ...]:
-    state = accum.state
     unresolved: list[_UnresolvedBuy] = list(accum.unscheduled)
     unresolved.extend(buy for _resolved_at, _seq, buy in accum.heap)
     unresolved_json = json.dumps(
@@ -168,23 +162,10 @@ def _wallet_row(wallet_address: str, accum: _WalletAccumulator) -> tuple[object,
             for buy in unresolved
         ]
     )
-    return (
+    return wallet_state_to_row(
         wallet_address,
-        state.first_seen_ts,
-        state.prior_trades_count,
-        state.prior_buys_count,
-        state.prior_resolved_buys,
-        state.prior_wins,
-        state.prior_losses,
-        state.cumulative_buy_price_sum,
-        state.cumulative_buy_count,
-        state.realized_pnl_usd,
-        state.last_trade_ts,
-        state.bet_size_sum,
-        state.bet_size_count,
-        json.dumps(list(state.recent_30d_trades)),
-        json.dumps(state.category_counts),
-        unresolved_json,
+        accum.state,
+        unresolved_buys_json=unresolved_json,
     )
 
 
@@ -192,28 +173,13 @@ def _bulk_write_markets(
     daemon_conn: sqlite3.Connection,
     provider: StreamingHistoryProvider,
 ) -> None:
-    rows: list[tuple[object, ...]] = []
-    for cond_id, market in provider._markets.items():
-        traders = sorted(provider._market_traders.get(cond_id, set()))
-        rows.append(
-            (
-                cond_id,
-                market.market_age_start_ts,
-                market.volume_so_far_usd,
-                market.unique_traders_count,
-                market.last_trade_price,
-                json.dumps(list(market.recent_prices)),
-                json.dumps(traders),
-            )
+    rows: list[tuple[object, ...]] = [
+        market_state_to_row(
+            cond_id,
+            market,
+            traders=provider._market_traders.get(cond_id, set()),
         )
-    daemon_conn.executemany(
-        """
-        INSERT INTO market_state_live (
-          condition_id, market_age_start_ts, volume_so_far_usd,
-          unique_traders_count, last_trade_price, recent_prices_json,
-          traders_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        rows,
-    )
+        for cond_id, market in provider._markets.items()
+    ]
+    daemon_conn.executemany(MARKET_STATE_INSERT_SQL, rows)
     daemon_conn.commit()

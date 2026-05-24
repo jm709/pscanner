@@ -17,12 +17,10 @@ from __future__ import annotations
 import heapq
 import json
 import sqlite3
-from collections import deque
 from collections.abc import Sequence
 from typing import Protocol, cast, runtime_checkable
 
 from pscanner.corpus.features import (
-    _RECENT_PRICES_MAX,  # intentionally imported; see MarketState docstring
     MarketMetadata,
     MarketState,
     Trade,
@@ -34,6 +32,15 @@ from pscanner.corpus.features import (
     apply_trade_to_market,
     empty_market_state,
     empty_wallet_state,
+)
+from pscanner.daemon._state_persistence import (
+    MARKET_STATE_UPSERT_SQL,
+    WALLET_STATE_UPSERT_SQL,
+    market_state_from_row,
+    market_state_to_row,
+    market_traders_from_row,
+    wallet_state_from_row,
+    wallet_state_to_row,
 )
 
 
@@ -119,22 +126,7 @@ class LiveHistoryProvider:
         ).fetchone()
         if row is None:
             return empty_wallet_state(first_seen_ts=as_of_ts)
-        state = WalletState(
-            first_seen_ts=row["first_seen_ts"],
-            prior_trades_count=row["prior_trades_count"],
-            prior_buys_count=row["prior_buys_count"],
-            prior_resolved_buys=row["prior_resolved_buys"],
-            prior_wins=row["prior_wins"],
-            prior_losses=row["prior_losses"],
-            cumulative_buy_price_sum=row["cumulative_buy_price_sum"],
-            cumulative_buy_count=row["cumulative_buy_count"],
-            realized_pnl_usd=row["realized_pnl_usd"],
-            last_trade_ts=row["last_trade_ts"],
-            recent_30d_trades=deque(json.loads(row["recent_30d_trades_json"])),
-            bet_size_sum=row["bet_size_sum"],
-            bet_size_count=row["bet_size_count"],
-            category_counts=dict(json.loads(row["category_counts_json"])),
-        )
+        state = wallet_state_from_row(row)
         unresolved = list(json.loads(row["unresolved_buys_json"]))
         new_state, remaining = self._drain_resolved_buys(state, unresolved, as_of_ts)
         if remaining is not unresolved:
@@ -198,13 +190,7 @@ class LiveHistoryProvider:
         ).fetchone()
         if row is None:
             return empty_market_state(market_age_start_ts=0)
-        return MarketState(
-            market_age_start_ts=row["market_age_start_ts"],
-            volume_so_far_usd=row["volume_so_far_usd"],
-            unique_traders_count=row["unique_traders_count"],
-            last_trade_price=row["last_trade_price"],
-            recent_prices=deque(json.loads(row["recent_prices_json"]), maxlen=_RECENT_PRICES_MAX),
-        )
+        return market_state_from_row(row)
 
     def observe(self, trade: Trade) -> None:
         """Fold a trade into running wallet + market state.
@@ -250,17 +236,8 @@ class LiveHistoryProvider:
             current = empty_market_state(market_age_start_ts=trade.ts)
             traders: set[str] = set()
         else:
-            current = MarketState(
-                market_age_start_ts=market_row["market_age_start_ts"],
-                volume_so_far_usd=market_row["volume_so_far_usd"],
-                unique_traders_count=market_row["unique_traders_count"],
-                last_trade_price=market_row["last_trade_price"],
-                recent_prices=deque(
-                    json.loads(market_row["recent_prices_json"]),
-                    maxlen=_RECENT_PRICES_MAX,
-                ),
-            )
-            traders = set(json.loads(market_row["traders_json"]))
+            current = market_state_from_row(market_row)
+            traders = market_traders_from_row(market_row)
         is_new_trader = trade.wallet_address not in traders
         if is_new_trader:
             traders.add(trade.wallet_address)
@@ -283,77 +260,19 @@ class LiveHistoryProvider:
         unresolved: list[dict[str, object]],
     ) -> None:
         self._conn.execute(
-            """
-            INSERT INTO wallet_state_live (
-              wallet_address, first_seen_ts, prior_trades_count, prior_buys_count,
-              prior_resolved_buys, prior_wins, prior_losses,
-              cumulative_buy_price_sum, cumulative_buy_count, realized_pnl_usd,
-              last_trade_ts, bet_size_sum, bet_size_count,
-              recent_30d_trades_json, category_counts_json, unresolved_buys_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(wallet_address) DO UPDATE SET
-              first_seen_ts = excluded.first_seen_ts,
-              prior_trades_count = excluded.prior_trades_count,
-              prior_buys_count = excluded.prior_buys_count,
-              prior_resolved_buys = excluded.prior_resolved_buys,
-              prior_wins = excluded.prior_wins,
-              prior_losses = excluded.prior_losses,
-              cumulative_buy_price_sum = excluded.cumulative_buy_price_sum,
-              cumulative_buy_count = excluded.cumulative_buy_count,
-              realized_pnl_usd = excluded.realized_pnl_usd,
-              last_trade_ts = excluded.last_trade_ts,
-              bet_size_sum = excluded.bet_size_sum,
-              bet_size_count = excluded.bet_size_count,
-              recent_30d_trades_json = excluded.recent_30d_trades_json,
-              category_counts_json = excluded.category_counts_json,
-              unresolved_buys_json = excluded.unresolved_buys_json
-            """,
-            (
+            WALLET_STATE_UPSERT_SQL,
+            wallet_state_to_row(
                 wallet_address,
-                state.first_seen_ts,
-                state.prior_trades_count,
-                state.prior_buys_count,
-                state.prior_resolved_buys,
-                state.prior_wins,
-                state.prior_losses,
-                state.cumulative_buy_price_sum,
-                state.cumulative_buy_count,
-                state.realized_pnl_usd,
-                state.last_trade_ts,
-                state.bet_size_sum,
-                state.bet_size_count,
-                json.dumps(list(state.recent_30d_trades)),
-                json.dumps(state.category_counts),
-                json.dumps(unresolved),
+                state,
+                unresolved_buys_json=json.dumps(unresolved),
             ),
         )
         self._conn.commit()
 
     def _persist_market(self, condition_id: str, state: MarketState, traders: set[str]) -> None:
         self._conn.execute(
-            """
-            INSERT INTO market_state_live (
-              condition_id, market_age_start_ts, volume_so_far_usd,
-              unique_traders_count, last_trade_price, recent_prices_json,
-              traders_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(condition_id) DO UPDATE SET
-              market_age_start_ts = excluded.market_age_start_ts,
-              volume_so_far_usd = excluded.volume_so_far_usd,
-              unique_traders_count = excluded.unique_traders_count,
-              last_trade_price = excluded.last_trade_price,
-              recent_prices_json = excluded.recent_prices_json,
-              traders_json = excluded.traders_json
-            """,
-            (
-                condition_id,
-                state.market_age_start_ts,
-                state.volume_so_far_usd,
-                state.unique_traders_count,
-                state.last_trade_price,
-                json.dumps(list(state.recent_prices)),
-                json.dumps(sorted(traders)),
-            ),
+            MARKET_STATE_UPSERT_SQL,
+            market_state_to_row(condition_id, state, traders=traders),
         )
         self._conn.commit()
 
