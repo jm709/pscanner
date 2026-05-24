@@ -6,7 +6,6 @@ Mirrors the ``tmp_db`` pattern in ``tests/conftest.py`` but applies
 
 from __future__ import annotations
 
-import random
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
@@ -19,6 +18,7 @@ from pscanner.corpus.features import (
     StreamingHistoryProvider,
     Trade,
 )
+from pscanner.testing.synthetic_trades import build_metadata, build_synthetic_trades
 
 
 @pytest.fixture
@@ -31,64 +31,16 @@ def tmp_corpus_db() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def _build_synthetic_trades(seed: int, n: int) -> list[Trade]:
-    """Generate a deterministic synthetic trade stream covering common shapes."""
-    rng = random.Random(seed)  # noqa: S311
-    wallets = [f"0xw{i:02d}" for i in range(6)]
-    markets = [f"0xm{i:02d}" for i in range(4)]
-    base_ts = 1_700_000_000
-    out: list[Trade] = []
-    for i in range(n):
-        wallet = rng.choice(wallets)
-        market = rng.choice(markets)
-        side = rng.choice(("YES", "NO"))
-        bs = rng.choices(("BUY", "SELL"), weights=(0.7, 0.3))[0]
-        price = round(rng.uniform(0.05, 0.95), 4)
-        size = round(rng.uniform(50.0, 500.0), 2)
-        out.append(
-            Trade(
-                tx_hash=f"tx{i:04d}",
-                asset_id=f"{market}-{side}",
-                wallet_address=wallet,
-                condition_id=market,
-                outcome_side=side,
-                bs=bs,
-                price=price,
-                size=size,
-                notional_usd=round(price * size, 4),
-                ts=base_ts + i * 60,
-                category=rng.choice(("sports", "esports", "crypto")),
-            )
-        )
-    return out
-
-
-def _build_metadata(trades: list[Trade]) -> dict[str, MarketMetadata]:
-    """Build a MarketMetadata for every market in the trade stream."""
-    by_market: dict[str, MarketMetadata] = {}
-    for t in trades:
-        if t.condition_id in by_market:
-            continue
-        by_market[t.condition_id] = MarketMetadata(
-            condition_id=t.condition_id,
-            category=t.category,
-            closed_at=t.ts + 86_400 * 7,
-            opened_at=t.ts - 60,
-            categories=(t.category,),
-        )
-    return by_market
-
-
 @pytest.fixture
 def trade_stream() -> list[Trade]:
     """Deterministic 80-trade stream for cross-feature parity tests."""
-    return _build_synthetic_trades(seed=42, n=80)
+    return build_synthetic_trades(seed=42, n=80)
 
 
 @pytest.fixture
 def metadata_for_stream(trade_stream: list[Trade]) -> dict[str, MarketMetadata]:
     """MarketMetadata covering every market in `trade_stream`."""
-    return _build_metadata(trade_stream)
+    return build_metadata(trade_stream)
 
 
 @pytest.fixture

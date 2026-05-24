@@ -11,18 +11,12 @@ from __future__ import annotations
 
 import argparse
 import statistics
-import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from tests.daemon.test_live_history_parity import (
-    _build_metadata,
-    _build_synthetic_trades,
-)  # type: ignore[import-not-found]
-
 from pscanner.daemon.live_history import LiveHistoryProvider
 from pscanner.store.db import init_db
+from pscanner.testing.synthetic_trades import build_metadata, build_synthetic_trades
 
 
 def main() -> int:
@@ -32,8 +26,8 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
-    trades = _build_synthetic_trades(seed=args.seed, n=args.n)
-    metadata = _build_metadata(trades)
+    trades = build_synthetic_trades(seed=args.seed, n=args.n, n_wallets=8, n_markets=5)
+    metadata = build_metadata(trades, with_categories=False)
     conn = init_db(Path(":memory:"))
     try:
         provider = LiveHistoryProvider(conn=conn, metadata=metadata)
