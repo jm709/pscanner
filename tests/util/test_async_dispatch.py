@@ -28,7 +28,7 @@ def test_spawn_without_running_loop_drops_silently() -> None:
     assert dispatcher.pending == set()
     assert out == []
     # The coroutine must be closed so the test process doesn't leak a warning.
-    with pytest.raises(RuntimeError, match="cannot reuse already awaited|closed"):
+    with pytest.raises(RuntimeError, match=r"cannot reuse already awaited|closed"):
         coro.send(None)
 
 
