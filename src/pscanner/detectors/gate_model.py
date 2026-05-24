@@ -38,7 +38,6 @@ from pscanner.corpus.features import (
     Trade,
     compute_features,
 )
-from pscanner.detectors.trade_driven import TradeDrivenDetector
 from pscanner.ml.preprocessing import CARRIER_COLS, LEAKAGE_COLS, OneHotEncoder
 
 if TYPE_CHECKING:
@@ -50,8 +49,15 @@ _LOG = structlog.get_logger(__name__)
 _REQUIRED_PREPROCESSOR_VERSION: Final[int] = 2
 
 
-class GateModelDetector(TradeDrivenDetector):
-    """Score trades against a loaded XGBoost gate model and emit alerts."""
+class GateModelDetector:
+    """Score trades against a loaded XGBoost gate model and emit alerts.
+
+    Standalone detector — does not inherit from :class:`TradeDrivenDetector`
+    because its callback path is queue-deferred (own ``asyncio.Queue`` plus
+    a worker drain loop in :meth:`run`), not the spawn-and-track pattern
+    the base class provides. The scheduler treats it as a sibling via an
+    explicit ``isinstance`` widening.
+    """
 
     name = "gate_model"
 
@@ -75,7 +81,7 @@ class GateModelDetector(TradeDrivenDetector):
                 outcome resolution returns ``""`` and every trade is skipped
                 — production wiring always provides one.
         """
-        super().__init__()
+        self._sink: AlertSink | None = None
         self._config = config
         self._provider = provider
         self._alerts_repo = alerts_repo

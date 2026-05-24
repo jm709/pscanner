@@ -208,16 +208,21 @@ class Scanner:
 
         Each trade-driven detector evaluates per-trade and needs its
         ``_sink`` populated before the run-loop starts so callbacks fire
-        correctly during the first poll cycle. The cluster detector has a
-        hybrid loop+callback shape and so doesn't inherit from
-        :class:`TradeDrivenDetector`; it is wired explicitly alongside the
-        TradeDrivenDetector subclasses.
+        correctly during the first poll cycle. :class:`ClusterDetector`
+        has a hybrid loop+callback shape and :class:`GateModelDetector`
+        is queue-deferred — neither inherits from
+        :class:`TradeDrivenDetector`, so both are wired explicitly via
+        ``isinstance`` widening alongside the TradeDrivenDetector
+        subclasses.
         """
         trade_collector = self._collectors.get("trade_collector")
         if not isinstance(trade_collector, TradeCollector):
             return
         for detector in self._detectors.values():
-            if isinstance(detector, TradeDrivenDetector | ClusterDetector):
+            if isinstance(
+                detector,
+                TradeDrivenDetector | ClusterDetector | GateModelDetector,
+            ):
                 detector.wire_sink(self._sink)
                 trade_collector.subscribe_new_trade(detector.handle_trade_sync)
                 _LOG.info("scanner.trade_driven_detector_wired", detector=detector.name)
