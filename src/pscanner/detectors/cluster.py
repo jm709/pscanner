@@ -455,7 +455,9 @@ class ClusterDetector:
             score += 2
         # Signals C and D inspect cluster trades on shared markets.
         cluster_trades_by_market = self._collect_cluster_trades(
-            wallets, shared, trades_by_wallet,
+            wallets,
+            shared,
+            trades_by_wallet,
         )
         if self._has_size_correlation(cluster_trades_by_market):
             score += 1
