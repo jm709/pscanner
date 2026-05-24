@@ -34,6 +34,7 @@ class KalshiMarketRow:
     expected_expiration_time: str
     yes_sub_title: str
     no_sub_title: str
+    result: str | None
     last_price_cents: int
     yes_bid_cents: int
     yes_ask_cents: int
@@ -317,6 +318,7 @@ def _market_row(row: sqlite3.Row) -> KalshiMarketRow:
         expected_expiration_time=row["expected_expiration_time"],
         yes_sub_title=row["yes_sub_title"],
         no_sub_title=row["no_sub_title"],
+        result=row["result"],
         last_price_cents=row["last_price_cents"],
         yes_bid_cents=row["yes_bid_cents"],
         yes_ask_cents=row["yes_ask_cents"],
