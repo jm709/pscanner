@@ -357,6 +357,115 @@ class _SubscriptionManager:
                 _LOG.exception("ticks.subscribe_failed", batch_size=len(chunk))
 
 
+class _SnapshotWriter:
+    """Persists one MarketTick per snapshot pass + owns the history ring buffers.
+
+    No knowledge of the publish path or per-asset market metadata — those
+    concerns stay on the orchestrator. The writer's contract is: take
+    (asset_id, book, condition_lookup, snapshot_at), build a MarketTick,
+    insert it, and on success append to the in-memory mid/tick history.
+    Returns the inserted tick (or ``None`` if the row was filtered or
+    insert rejected as a dupe).
+    """
+
+    def __init__(self, *, repo: MarketTicksRepo) -> None:
+        self._repo = repo
+        self._mid_history: dict[AssetId, list[tuple[int, float]]] = {}
+        self._tick_history: dict[AssetId, collections.deque[MarketTick]] = {}
+
+    def write(
+        self,
+        *,
+        asset_id: AssetId,
+        book: _Orderbook,
+        condition_lookup: dict[AssetId, ConditionId],
+        snapshot_at: int,
+    ) -> MarketTick | None:
+        """Build, persist, and record one tick row.
+
+        Returns the inserted MarketTick on success, or ``None`` if the row
+        was filtered (no condition + no mid) or the repo reports a dupe.
+        Per-row exceptions are logged and absorbed.
+        """
+        best_bid = max(book.bids) if book.bids else None
+        best_ask = min(book.asks) if book.asks else None
+        if best_bid is not None and best_ask is not None:
+            mid: float | None = (best_bid + best_ask) / 2
+            spread: float | None = best_ask - best_bid
+        else:
+            mid = None
+            spread = None
+        condition_id = book.condition_id or condition_lookup.get(asset_id, ConditionId(""))
+        if not condition_id and mid is None:
+            return None
+        bid_depth = _depth_top_n(book.bids, top=_DEPTH_TOP_N, descending=True)
+        ask_depth = _depth_top_n(book.asks, top=_DEPTH_TOP_N, descending=False)
+        tick = MarketTick(
+            asset_id=asset_id,
+            condition_id=condition_id,
+            snapshot_at=snapshot_at,
+            mid_price=mid,
+            best_bid=best_bid,
+            best_ask=best_ask,
+            spread=spread,
+            bid_depth_top5=bid_depth,
+            ask_depth_top5=ask_depth,
+            last_trade_price=book.last_trade_price,
+        )
+        try:
+            inserted = self._repo.insert(tick)
+        except Exception:
+            _LOG.exception("ticks.insert_failed", asset_id=asset_id)
+            return None
+        if not inserted:
+            return None
+        self._record_tick_history(asset_id, tick=tick)
+        if mid is not None:
+            self._record_mid_history(asset_id, snapshot_at=snapshot_at, mid=mid)
+        return tick
+
+    def get_recent_mids(
+        self,
+        asset_id: AssetId,
+        *,
+        window_seconds: int,
+    ) -> list[tuple[int, float]]:
+        """``(snapshot_at, mid_price)`` pairs within the trailing window."""
+        now = int(time.time())
+        cutoff = now - window_seconds
+        history = self._mid_history.get(asset_id, [])
+        return [(ts, mid) for ts, mid in history if ts > cutoff]
+
+    def get_recent_ticks(
+        self,
+        asset_id: AssetId,
+        *,
+        window_seconds: int,
+    ) -> list[MarketTick]:
+        """Full ``MarketTick`` rows for ``asset_id`` within the trailing window."""
+        now = int(time.time())
+        cutoff = now - window_seconds
+        history = self._tick_history.get(asset_id)
+        if history is None:
+            return []
+        return [tick for tick in history if tick.snapshot_at > cutoff]
+
+    def _record_mid_history(self, asset_id: AssetId, *, snapshot_at: int, mid: float) -> None:
+        """Append ``(snapshot_at, mid)`` to the asset's history ring buffer."""
+        history = self._mid_history.setdefault(asset_id, [])
+        history.append((snapshot_at, mid))
+        if len(history) > _MID_HISTORY_CAP:
+            del history[: len(history) - _MID_HISTORY_CAP]
+
+    def _record_tick_history(self, asset_id: AssetId, *, tick: MarketTick) -> None:
+        """Append a full ``MarketTick`` row to the asset's tick ring buffer."""
+        history = self._tick_history.get(asset_id)
+        if history is None:
+            history = collections.deque(maxlen=_MID_HISTORY_CAP)
+            self._tick_history[asset_id] = history
+        history.append(tick)
+
+
 class MarketTickCollector:
     """Maintains an in-memory orderbook per subscribed asset and writes ticks.
 
@@ -397,7 +506,6 @@ class MarketTickCollector:
         """
         self._config = config
         self._ws = ws
-        self._repo = ticks_repo
         self._tick_stream = tick_stream
         self._applier = _BookApplier()
         self._sub_mgr = _SubscriptionManager(
@@ -408,8 +516,7 @@ class MarketTickCollector:
             registry=registry,
             market_cache=market_cache,
         )
-        self._mid_history: dict[AssetId, list[tuple[int, float]]] = {}
-        self._tick_history: dict[AssetId, collections.deque[MarketTick]] = {}
+        self._writer = _SnapshotWriter(repo=ticks_repo)
 
     async def run(self, stop_event: asyncio.Event) -> None:
         """Connect WS, drive subscription/consume/snapshot loops until stopped.
@@ -488,7 +595,7 @@ class MarketTickCollector:
         for asset_id, book in books_copy:
             if not asset_id:
                 continue
-            tick = self._persist_tick(
+            tick = self._writer.write(
                 asset_id=asset_id,
                 book=book,
                 condition_lookup=condition_lookup,
@@ -500,52 +607,6 @@ class MarketTickCollector:
             await self._maybe_publish(asset_id=asset_id, tick=tick)
         _LOG.info("ticks.snapshot_complete", assets=len(books_copy), inserted=inserted)
         return inserted
-
-    def _persist_tick(
-        self,
-        *,
-        asset_id: AssetId,
-        book: _Orderbook,
-        condition_lookup: dict[AssetId, ConditionId],
-        snapshot_at: int,
-    ) -> MarketTick | None:
-        """Build and insert one tick row; return the row when inserted, else ``None``."""
-        best_bid = max(book.bids) if book.bids else None
-        best_ask = min(book.asks) if book.asks else None
-        if best_bid is not None and best_ask is not None:
-            mid: float | None = (best_bid + best_ask) / 2
-            spread: float | None = best_ask - best_bid
-        else:
-            mid = None
-            spread = None
-        condition_id = book.condition_id or condition_lookup.get(asset_id, ConditionId(""))
-        if not condition_id and mid is None:
-            return None
-        bid_depth = _depth_top_n(book.bids, top=_DEPTH_TOP_N, descending=True)
-        ask_depth = _depth_top_n(book.asks, top=_DEPTH_TOP_N, descending=False)
-        tick = MarketTick(
-            asset_id=asset_id,
-            condition_id=condition_id,
-            snapshot_at=snapshot_at,
-            mid_price=mid,
-            best_bid=best_bid,
-            best_ask=best_ask,
-            spread=spread,
-            bid_depth_top5=bid_depth,
-            ask_depth_top5=ask_depth,
-            last_trade_price=book.last_trade_price,
-        )
-        try:
-            inserted = self._repo.insert(tick)
-        except Exception:
-            _LOG.exception("ticks.insert_failed", asset_id=asset_id)
-            return None
-        if not inserted:
-            return None
-        self._record_tick_history(asset_id, tick=tick)
-        if mid is not None:
-            self._record_mid_history(asset_id, snapshot_at=snapshot_at, mid=mid)
-        return tick
 
     async def _maybe_publish(self, *, asset_id: AssetId, tick: MarketTick) -> None:
         """Publish a :class:`TickEvent` for ``tick`` when a stream is wired."""
@@ -569,21 +630,6 @@ class MarketTickCollector:
         )
         await self._tick_stream.publish(event)
 
-    def _record_mid_history(self, asset_id: AssetId, *, snapshot_at: int, mid: float) -> None:
-        """Append ``(snapshot_at, mid)`` to the asset's history ring buffer."""
-        history = self._mid_history.setdefault(asset_id, [])
-        history.append((snapshot_at, mid))
-        if len(history) > _MID_HISTORY_CAP:
-            del history[: len(history) - _MID_HISTORY_CAP]
-
-    def _record_tick_history(self, asset_id: AssetId, *, tick: MarketTick) -> None:
-        """Append a full ``MarketTick`` row to the asset's tick ring buffer."""
-        history = self._tick_history.get(asset_id)
-        if history is None:
-            history = collections.deque(maxlen=_MID_HISTORY_CAP)
-            self._tick_history[asset_id] = history
-        history.append(tick)
-
     def get_recent_mids(
         self,
         asset_id: AssetId,
@@ -594,20 +640,9 @@ class MarketTickCollector:
 
         Legacy helper kept for depth filters and ad-hoc queries; live
         tick-driven detectors should subscribe to the
-        :class:`~pscanner.poly.tick_stream.TickStream` instead. Reads from
-        in-memory state appended on each successful ``snapshot_once`` write.
-
-        Args:
-            asset_id: CLOB token id.
-            window_seconds: Inclusive trailing window length (seconds).
-
-        Returns:
-            Pairs ordered by ``snapshot_at`` ascending.
+        :class:`~pscanner.poly.tick_stream.TickStream` instead.
         """
-        now = int(time.time())
-        cutoff = now - window_seconds
-        history = self._mid_history.get(asset_id, [])
-        return [(ts, mid) for ts, mid in history if ts > cutoff]
+        return self._writer.get_recent_mids(asset_id, window_seconds=window_seconds)
 
     def get_recent_ticks(
         self,
@@ -619,20 +654,8 @@ class MarketTickCollector:
 
         Legacy helper kept for liquidity-aware filters that need full tick
         fields (depth, spread) outside the live tick-stream path.
-
-        Args:
-            asset_id: CLOB token id.
-            window_seconds: Inclusive trailing window length (seconds).
-
-        Returns:
-            ``MarketTick`` rows ordered by ``snapshot_at`` ascending.
         """
-        now = int(time.time())
-        cutoff = now - window_seconds
-        history = self._tick_history.get(asset_id)
-        if history is None:
-            return []
-        return [tick for tick in history if tick.snapshot_at > cutoff]
+        return self._writer.get_recent_ticks(asset_id, window_seconds=window_seconds)
 
     def get_market_for_asset(self, asset_id: AssetId) -> CachedMarket | None:
         """Return the cached market for ``asset_id`` or ``None`` if unknown.
