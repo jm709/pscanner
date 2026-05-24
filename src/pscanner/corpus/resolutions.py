@@ -7,8 +7,8 @@ neither outcome price is at or above the resolved-threshold.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import Final
+from collections.abc import Awaitable, Callable, Iterable
+from typing import Any, Final
 
 import structlog
 
@@ -88,6 +88,46 @@ async def record_resolutions(
     return written
 
 
+async def _record_resolutions_loop(
+    *,
+    targets: Iterable[tuple[str, int]],
+    fetch_market: Callable[[str], Awaitable[Any]],
+    classify: Callable[[str, Any], tuple[int, int] | None],
+    source: str,
+    platform: str,
+    repo: MarketResolutionsRepo,
+    now_ts: int,
+) -> int:
+    """Drain ``targets`` via ``fetch_market`` + ``classify``; upsert and count.
+
+    Shared loop for the Manifold and Kalshi resolution writers. The
+    ``classify`` callback returns ``(outcome_yes_won, winning_outcome_index)``
+    for a writeable row, or ``None`` to skip (in which case the callback is
+    expected to log its own reason). Polymarket's gamma path stays separate
+    (``record_resolutions``) because its target shape includes a slug.
+    """
+    written = 0
+    for ident, resolved_at in targets:
+        market = await fetch_market(ident)
+        outcome = classify(ident, market)
+        if outcome is None:
+            continue
+        outcome_yes_won, winning_outcome_index = outcome
+        repo.upsert(
+            MarketResolution(
+                condition_id=ident,
+                winning_outcome_index=winning_outcome_index,
+                outcome_yes_won=outcome_yes_won,
+                resolved_at=resolved_at,
+                source=source,
+                platform=platform,
+            ),
+            recorded_at=now_ts,
+        )
+        written += 1
+    return written
+
+
 async def record_manifold_resolutions(
     *,
     client: ManifoldClient,
@@ -111,35 +151,28 @@ async def record_manifold_resolutions(
     Returns:
         Count of resolutions actually written (excludes skipped MKT/CANCEL/null).
     """
-    written = 0
-    for market_id, resolved_at in targets:
-        market = await client.get_market(market_id)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+
+    def classify(market_id: str, market: Any) -> tuple[int, int] | None:
         if market.resolution == "YES":
-            outcome_yes_won = 1
-            winning_outcome_index = 0
-        elif market.resolution == "NO":
-            outcome_yes_won = 0
-            winning_outcome_index = 1
-        else:
-            _log.warning(
-                "corpus.manifold_resolution_skipped",
-                market_id=market_id,
-                resolution=market.resolution,
-            )
-            continue
-        repo.upsert(
-            MarketResolution(
-                condition_id=market_id,
-                winning_outcome_index=winning_outcome_index,
-                outcome_yes_won=outcome_yes_won,
-                resolved_at=resolved_at,
-                source="manifold-rest",
-                platform="manifold",
-            ),
-            recorded_at=now_ts,
+            return (1, 0)
+        if market.resolution == "NO":
+            return (0, 1)
+        _log.warning(
+            "corpus.manifold_resolution_skipped",
+            market_id=market_id,
+            resolution=market.resolution,
         )
-        written += 1
-    return written
+        return None
+
+    return await _record_resolutions_loop(
+        targets=targets,
+        fetch_market=client.get_market,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        classify=classify,
+        source="manifold-rest",
+        platform="manifold",
+        repo=repo,
+        now_ts=now_ts,
+    )
 
 
 async def record_kalshi_resolutions(
@@ -168,46 +201,39 @@ async def record_kalshi_resolutions(
     Returns:
         Count of resolutions actually written (excludes skipped markets).
     """
-    written = 0
-    for ticker, resolved_at in targets:
-        market = await client.get_market(ticker)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+
+    def classify(ticker: str, market: Any) -> tuple[int, int] | None:
         if market.status == "disputed":
             _log.warning(
                 "corpus.kalshi_resolution_disputed",
                 market_ticker=ticker,
                 result=market.result,
             )
-            continue
+            return None
         if market.result == "yes":
-            outcome_yes_won = 1
-            winning_outcome_index = 0
-        elif market.result == "no":
-            outcome_yes_won = 0
-            winning_outcome_index = 1
-        elif market.result == "scalar":
+            return (1, 0)
+        if market.result == "no":
+            return (0, 1)
+        if market.result == "scalar":
             _log.warning(
                 "corpus.kalshi_resolution_scalar",
                 market_ticker=ticker,
             )
-            continue
-        else:
-            _log.warning(
-                "corpus.kalshi_resolution_undetermined",
-                market_ticker=ticker,
-                status=market.status,
-                result=market.result,
-            )
-            continue
-        repo.upsert(
-            MarketResolution(
-                condition_id=ticker,
-                winning_outcome_index=winning_outcome_index,
-                outcome_yes_won=outcome_yes_won,
-                resolved_at=resolved_at,
-                source="kalshi-rest",
-                platform="kalshi",
-            ),
-            recorded_at=now_ts,
+            return None
+        _log.warning(
+            "corpus.kalshi_resolution_undetermined",
+            market_ticker=ticker,
+            status=market.status,
+            result=market.result,
         )
-        written += 1
-    return written
+        return None
+
+    return await _record_resolutions_loop(
+        targets=targets,
+        fetch_market=client.get_market,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        classify=classify,
+        source="kalshi-rest",
+        platform="kalshi",
+        repo=repo,
+        now_ts=now_ts,
+    )
