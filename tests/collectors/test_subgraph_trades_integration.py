@@ -142,7 +142,7 @@ async def test_full_cycle_books_paper_trade(tmp_path: Path) -> None:
             clock=FakeClock(),
         )
 
-        await collector._poll_once()
+        await collector.poll_once()
         # handle_alert_sync schedules an asyncio task via create_task; drain it.
         await paper_trader.aclose()
 

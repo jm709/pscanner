@@ -8,12 +8,12 @@ point-in-time view.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 
 import structlog
 
+from pscanner.collectors.base import PollingCollector
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.ids import EventId
 from pscanner.poly.models import Market
@@ -22,7 +22,7 @@ from pscanner.store.repo import MarketCacheRepo, MarketSnapshot, MarketSnapshots
 _LOG = structlog.get_logger(__name__)
 
 
-class MarketCollector:
+class MarketCollector(PollingCollector):
     """Periodically snapshots every active market's state.
 
     Paginates gamma ``/markets`` bounded by ``snapshot_max`` to keep one
@@ -32,6 +32,7 @@ class MarketCollector:
     """
 
     name: str = "market_collector"
+    log_event_iteration_failed: str = "markets.snapshot_iteration_failed"
 
     def __init__(
         self,
@@ -54,31 +55,15 @@ class MarketCollector:
                 omits it (the dedicated endpoint never returns ``eventId``;
                 see issue #19).
         """
+        super().__init__(interval_seconds=snapshot_interval_seconds)
         self._gamma = gamma_client
         self._repo = markets_repo
-        self._interval = snapshot_interval_seconds
         self._max = snapshot_max
         self._market_cache = market_cache
 
-    async def run(self, stop_event: asyncio.Event) -> None:
-        """Loop: snapshot all active markets every interval until stopped.
-
-        Per-iteration exceptions from :meth:`snapshot_all_markets` are logged
-        and swallowed so a transient upstream hiccup does not kill the loop.
-
-        Args:
-            stop_event: Cooperative shutdown signal set by the scheduler.
-        """
-        while not stop_event.is_set():
-            try:
-                await self.snapshot_all_markets()
-            except Exception:
-                _LOG.exception("markets.snapshot_iteration_failed")
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=self._interval)
-            except TimeoutError:
-                continue
-            return
+    async def poll_once(self) -> None:
+        """One snapshot cycle — delegates to :meth:`snapshot_all_markets`."""
+        await self.snapshot_all_markets()
 
     async def snapshot_all_markets(self) -> int:
         """Snapshot every active market once, capped by ``snapshot_max``.
