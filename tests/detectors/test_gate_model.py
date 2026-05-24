@@ -225,7 +225,7 @@ async def test_evaluate_emits_alert_when_gates_pass(tmp_path: Path) -> None:
         detector._predict_one = lambda _: 0.85  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
         detector._resolve_outcome_side = lambda _trade: "YES"  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
         sink = AlertSink(alerts_repo=alerts_repo)
-        detector._sink = sink
+        detector.wire_sink(sink)
         trade = _make_wallet_trade(condition_id="0xc1", price=0.40)
         await detector.evaluate(trade)
         recent = alerts_repo.recent(detector="gate_buy", limit=10)
@@ -260,7 +260,7 @@ async def test_evaluate_skips_when_pred_below_floor(tmp_path: Path) -> None:
         detector = GateModelDetector(config=cfg, provider=provider, alerts_repo=alerts_repo)
         detector._predict_one = lambda _: 0.30  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
         detector._resolve_outcome_side = lambda _trade: "YES"  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
-        detector._sink = AlertSink(alerts_repo=alerts_repo)
+        detector.wire_sink(AlertSink(alerts_repo=alerts_repo))
         trade = _make_wallet_trade(condition_id="0xc1", price=0.20)
         await detector.evaluate(trade)
         recent = alerts_repo.recent(detector="gate_buy", limit=10)
@@ -289,7 +289,7 @@ async def test_evaluate_skips_when_category_not_accepted(tmp_path: Path) -> None
         detector = GateModelDetector(config=cfg, provider=provider, alerts_repo=alerts_repo)
         detector._predict_one = lambda _: 0.85  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
         detector._resolve_outcome_side = lambda _trade: "YES"  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
-        detector._sink = AlertSink(alerts_repo=alerts_repo)
+        detector.wire_sink(AlertSink(alerts_repo=alerts_repo))
         trade = _make_wallet_trade(condition_id="0xc1", price=0.40)
         await detector.evaluate(trade)
         recent = alerts_repo.recent(detector="gate_buy", limit=10)
@@ -323,7 +323,7 @@ async def test_evaluate_accepts_multi_label_market_via_intersection(tmp_path: Pa
         detector = GateModelDetector(config=cfg, provider=provider, alerts_repo=alerts_repo)
         detector._predict_one = lambda _: 0.85  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
         detector._resolve_outcome_side = lambda _trade: "YES"  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
-        detector._sink = AlertSink(alerts_repo=alerts_repo)
+        detector.wire_sink(AlertSink(alerts_repo=alerts_repo))
         trade = _make_wallet_trade(condition_id="0xc1", price=0.40)
         await detector.evaluate(trade)
         recent = alerts_repo.recent(detector="gate_buy", limit=10)
@@ -361,7 +361,7 @@ async def test_evaluate_falls_back_to_primary_category_when_categories_empty(
         detector = GateModelDetector(config=cfg, provider=provider, alerts_repo=alerts_repo)
         detector._predict_one = lambda _: 0.85  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
         detector._resolve_outcome_side = lambda _trade: "YES"  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
-        detector._sink = AlertSink(alerts_repo=alerts_repo)
+        detector.wire_sink(AlertSink(alerts_repo=alerts_repo))
         trade = _make_wallet_trade(condition_id="0xc1", price=0.40)
         await detector.evaluate(trade)
         recent = alerts_repo.recent(detector="gate_buy", limit=10)
@@ -397,7 +397,7 @@ async def test_evaluate_rejects_when_no_category_set_member_accepted(
         detector = GateModelDetector(config=cfg, provider=provider, alerts_repo=alerts_repo)
         detector._predict_one = lambda _: 0.85  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
         detector._resolve_outcome_side = lambda _trade: "YES"  # type: ignore[method-assign,assignment]  # ty:ignore[invalid-assignment]
-        detector._sink = AlertSink(alerts_repo=alerts_repo)
+        detector.wire_sink(AlertSink(alerts_repo=alerts_repo))
         trade = _make_wallet_trade(condition_id="0xc1", price=0.40)
         await detector.evaluate(trade)
         recent = alerts_repo.recent(detector="gate_buy", limit=10)

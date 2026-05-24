@@ -21,7 +21,6 @@ collector via ``TradeCollector.subscribe_new_trade``.
 
 from __future__ import annotations
 
-import asyncio
 import time
 
 import structlog
@@ -41,6 +40,7 @@ from pscanner.store.repo import (
     WalletTrade,
 )
 from pscanner.util.clock import Clock, RealClock
+from pscanner.util.loops import run_periodic
 
 _LOG = structlog.get_logger(__name__)
 _WALLET_CACHE_TTL_SECONDS = 86400
@@ -98,14 +98,12 @@ class WhalesDetector(TradeDrivenDetector):
         """
         if self._sink is None:
             self._sink = sink
-        while True:
-            try:
-                await self._refresh_market_cache()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                _LOG.exception("whales.refresh_failed")
-            await self._clock.sleep(self._config.ws_resubscribe_interval_seconds)
+        await run_periodic(
+            self._refresh_market_cache,
+            interval_seconds=self._config.ws_resubscribe_interval_seconds,
+            clock=self._clock,
+            log_event="whales.refresh_failed",
+        )
 
     async def _refresh_market_cache(self) -> None:
         """Page the active markets, upsert into market_cache, rebuild condition map."""

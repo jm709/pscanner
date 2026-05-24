@@ -276,7 +276,7 @@ def _make_detector(
         clock=clock or FakeClock(start=float(_NOW)),
     )
     if sink is not None:
-        detector._sink = sink  # type: ignore[assignment]  # ty:ignore[invalid-assignment]
+        detector.wire_sink(sink)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
     return detector
 
 
@@ -672,7 +672,7 @@ def test_handle_trade_sync_no_running_loop_is_noop() -> None:
     """With no running loop, ``handle_trade_sync`` returns silently."""
     detector = _make_detector()
     detector.handle_trade_sync(_trade(wallet="0xa", condition_id="cond-1"))
-    assert detector._pending_tasks == set()
+    assert detector.pending_tasks == set()
 
 
 @pytest.mark.asyncio

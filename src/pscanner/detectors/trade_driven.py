@@ -16,12 +16,9 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 
-import structlog
-
 from pscanner.alerts.sink import AlertSink
 from pscanner.store.repo import WalletTrade
-
-_LOG = structlog.get_logger(__name__)
+from pscanner.util.async_dispatch import AsyncDispatcher
 
 
 class TradeDrivenDetector(ABC):
@@ -30,9 +27,14 @@ class TradeDrivenDetector(ABC):
     name: str = ""
 
     def __init__(self) -> None:
-        """Initialise the shared sink slot and pending-tasks tracker."""
+        """Initialise the shared sink slot and async dispatcher."""
         self._sink: AlertSink | None = None
-        self._pending_tasks: set[asyncio.Task[None]] = set()
+        self._dispatcher = AsyncDispatcher(log_event_no_loop="trade_driven.no_event_loop")
+
+    @property
+    def pending_tasks(self) -> set[asyncio.Task[None]]:
+        """Live view of in-flight ``evaluate`` tasks (test + aclose hook)."""
+        return self._dispatcher.pending
 
     @abstractmethod
     async def evaluate(self, trade: WalletTrade) -> None:
@@ -42,28 +44,32 @@ class TradeDrivenDetector(ABC):
             trade: Newly-inserted ``WalletTrade`` row.
         """
 
+    def wire_sink(self, sink: AlertSink) -> None:
+        """Pre-wire the alert sink before :meth:`run` starts.
+
+        Used by the scheduler (and tests) to seed the sink before the
+        callback-driven path fires for the first time. Mirrors the
+        ``if self._sink is None: self._sink = sink`` ratcheting in
+        :meth:`run` — callers that drive ``run()`` directly without
+        pre-wiring still get the fallback assignment.
+        """
+        self._sink = sink
+
     def handle_trade_sync(self, trade: WalletTrade) -> None:
         """Sync entry for ``TradeCollector.subscribe_new_trade``.
 
-        Spawns ``evaluate(trade)`` as an async task and tracks it so it
-        isn't garbage collected before completion. No-ops if there's no
-        running event loop (e.g., test setup that hasn't started one).
+        Spawns ``evaluate(trade)`` as a tracked task. No-ops (with a
+        ``trade_driven.no_event_loop`` debug event) when no event loop is
+        running, e.g. test setup that hasn't started one.
 
         Args:
             trade: Newly-inserted ``WalletTrade`` row.
         """
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            _LOG.debug(
-                "trade_driven.no_event_loop",
-                detector=self.name,
-                tx=trade.transaction_hash,
-            )
-            return
-        task = loop.create_task(self.evaluate(trade))
-        self._pending_tasks.add(task)
-        task.add_done_callback(self._pending_tasks.discard)
+        self._dispatcher.spawn(
+            self.evaluate(trade),
+            detector=self.name,
+            tx=trade.transaction_hash,
+        )
 
     async def run(self, sink: AlertSink) -> None:
         """Park forever — the detector is callback-driven, not loop-driven.
