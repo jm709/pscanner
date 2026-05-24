@@ -10,9 +10,9 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from pscanner.kalshi.db import KALSHI_SCHEMA_STATEMENTS
-from pscanner.kalshi.db import _apply_migrations as _apply_kalshi_migrations
+from pscanner.kalshi.db import KALSHI_MIGRATIONS, KALSHI_SCHEMA_STATEMENTS
 from pscanner.manifold.db import MANIFOLD_SCHEMA_STATEMENTS
+from pscanner.store.migrations import apply_additive_migrations
 
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -347,27 +347,6 @@ _PRAGMAS: tuple[str, ...] = (
 )
 
 
-def _apply_migrations(conn: sqlite3.Connection) -> None:
-    """Apply additive ALTER TABLE migrations. Idempotent.
-
-    SQLite has no IF NOT EXISTS for ADD COLUMN, so each ``ADD COLUMN``
-    migration is wrapped to swallow ``duplicate column name`` errors. For
-    ``RENAME COLUMN`` migrations applied a second time (or against a fresh
-    schema where the new column name already exists), SQLite reports
-    ``no such column`` on the source side; we treat that the same way.
-    Other DatabaseErrors propagate.
-    """
-    for stmt in _MIGRATIONS:
-        try:
-            conn.execute(stmt)
-        except sqlite3.OperationalError as exc:
-            msg = str(exc).lower()
-            if "duplicate column name" in msg or "no such column" in msg:
-                continue
-            raise
-    conn.commit()
-
-
 def init_db(path: Path) -> sqlite3.Connection:
     """Open the pscanner SQLite database, creating dirs/schema as needed.
 
@@ -396,8 +375,8 @@ def init_db(path: Path) -> sqlite3.Connection:
         with conn:
             for statement in _SCHEMA_STATEMENTS:
                 conn.execute(statement)
-        _apply_migrations(conn)
-        _apply_kalshi_migrations(conn)
+        apply_additive_migrations(conn, _MIGRATIONS)
+        apply_additive_migrations(conn, KALSHI_MIGRATIONS)
     except sqlite3.DatabaseError:
         conn.close()
         raise

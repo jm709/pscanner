@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import sqlite3
 
+from pscanner.store.migrations import apply_additive_migrations
+
 MANIFOLD_SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS manifold_markets (
@@ -66,22 +68,6 @@ MANIFOLD_SCHEMA_STATEMENTS: tuple[str, ...] = (
 _MIGRATIONS: tuple[str, ...] = ("ALTER TABLE manifold_markets ADD COLUMN resolution TEXT",)
 
 
-def _apply_migrations(conn: sqlite3.Connection) -> None:
-    """Apply additive ALTER TABLE migrations. Idempotent.
-
-    Each migration is wrapped to swallow ``duplicate column name`` errors
-    so repeated calls on already-migrated DBs are no-ops.
-    """
-    for stmt in _MIGRATIONS:
-        try:
-            conn.execute(stmt)
-        except sqlite3.OperationalError as exc:
-            if "duplicate column name" in str(exc).lower():
-                continue
-            raise
-    conn.commit()
-
-
 def init_manifold_tables(conn: sqlite3.Connection) -> None:
     """Apply all Manifold schema statements to ``conn``.
 
@@ -94,5 +80,5 @@ def init_manifold_tables(conn: sqlite3.Connection) -> None:
     """
     for statement in MANIFOLD_SCHEMA_STATEMENTS:
         conn.execute(statement)
-    _apply_migrations(conn)
+    apply_additive_migrations(conn, _MIGRATIONS)
     conn.commit()

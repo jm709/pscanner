@@ -363,9 +363,7 @@ def _make_data_client() -> _DataCM:
     return _DataCM()
 
 
-async def _drain_pending(
-    *, conn: sqlite3.Connection, data: DataClient, gamma: GammaClient
-) -> int:
+async def _drain_pending(*, conn: sqlite3.Connection, data: DataClient, gamma: GammaClient) -> int:
     """Drain `corpus_markets` work queue, walking each pending market once."""
     markets_repo = CorpusMarketsRepo(conn)
     trades_repo = CorpusTradesRepo(conn)

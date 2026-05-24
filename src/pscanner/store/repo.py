@@ -89,6 +89,31 @@ def _now_seconds() -> int:
     return int(time.time())
 
 
+def _count_grouped(
+    conn: sqlite3.Connection,
+    table: str,
+    col: str,
+) -> dict[str, int]:
+    """Return ``{value: count}`` for ``SELECT col, COUNT(*) GROUP BY col``.
+
+    ``table`` and ``col`` must be module-internal SQL identifiers — they are
+    interpolated directly into the query, so caller-supplied values would be a
+    SQL injection risk.
+    """
+    rows = conn.execute(
+        f"SELECT {col} AS k, COUNT(*) AS c FROM {table} GROUP BY {col}"  # noqa: S608
+    ).fetchall()
+    return {str(row["k"]): int(row["c"]) for row in rows}
+
+
+def _count_distinct(conn: sqlite3.Connection, table: str, col: str) -> int:
+    """Return ``COUNT(DISTINCT col)`` for the given table."""
+    row = conn.execute(
+        f"SELECT COUNT(DISTINCT {col}) AS c FROM {table}"  # noqa: S608
+    ).fetchone()
+    return 0 if row is None else int(row["c"])
+
+
 class TrackedWalletsRepo:
     """CRUD for the ``tracked_wallets`` table."""
 
@@ -956,10 +981,7 @@ class WalletTradesRepo:
 
     def count_by_wallet(self) -> dict[str, int]:
         """Return ``{wallet: trade_count}`` across the full table."""
-        rows = self._conn.execute(
-            "SELECT wallet, COUNT(*) AS c FROM wallet_trades GROUP BY wallet",
-        ).fetchall()
-        return {row["wallet"]: int(row["c"]) for row in rows}
+        return _count_grouped(self._conn, "wallet_trades", "wallet")
 
     def distinct_wallets_for_condition(
         self,
@@ -1099,10 +1121,7 @@ class WalletPositionsHistoryRepo:
 
     def count_by_wallet(self) -> dict[str, int]:
         """Return ``{wallet: row_count}`` across the full table."""
-        rows = self._conn.execute(
-            "SELECT wallet, COUNT(*) AS c FROM wallet_positions_history GROUP BY wallet",
-        ).fetchall()
-        return {row["wallet"]: int(row["c"]) for row in rows}
+        return _count_grouped(self._conn, "wallet_positions_history", "wallet")
 
 
 def _row_to_positions_history(row: sqlite3.Row) -> WalletPositionsHistoryRow:
@@ -1231,10 +1250,7 @@ class WalletActivityEventsRepo:
 
     def count_by_wallet(self) -> dict[str, int]:
         """Return ``{wallet: event_count}`` across the full table."""
-        rows = self._conn.execute(
-            "SELECT wallet, COUNT(*) AS c FROM wallet_activity_events GROUP BY wallet",
-        ).fetchall()
-        return {row["wallet"]: int(row["c"]) for row in rows}
+        return _count_grouped(self._conn, "wallet_activity_events", "wallet")
 
 
 def _row_to_activity_event(row: sqlite3.Row) -> WalletActivityEvent:
@@ -1338,19 +1354,11 @@ class MarketSnapshotsRepo:
 
     def distinct_snapshot_count(self) -> int:
         """Return ``COUNT(DISTINCT snapshot_at)`` — total sweeps recorded."""
-        row = self._conn.execute(
-            "SELECT COUNT(DISTINCT snapshot_at) AS c FROM market_snapshots",
-        ).fetchone()
-        if row is None:
-            return 0
-        return int(row["c"])
+        return _count_distinct(self._conn, "market_snapshots", "snapshot_at")
 
     def count_by_market(self) -> dict[str, int]:
         """Return ``{market_id: snapshot_count}`` across the full table."""
-        rows = self._conn.execute(
-            "SELECT market_id, COUNT(*) AS c FROM market_snapshots GROUP BY market_id",
-        ).fetchall()
-        return {row["market_id"]: int(row["c"]) for row in rows}
+        return _count_grouped(self._conn, "market_snapshots", "market_id")
 
 
 def _row_to_market_snapshot(row: sqlite3.Row) -> MarketSnapshot:
@@ -1455,19 +1463,11 @@ class EventSnapshotsRepo:
 
     def distinct_snapshot_count(self) -> int:
         """Return ``COUNT(DISTINCT snapshot_at)`` — total sweeps recorded."""
-        row = self._conn.execute(
-            "SELECT COUNT(DISTINCT snapshot_at) AS c FROM event_snapshots",
-        ).fetchone()
-        if row is None:
-            return 0
-        return int(row["c"])
+        return _count_distinct(self._conn, "event_snapshots", "snapshot_at")
 
     def count_by_event(self) -> dict[str, int]:
         """Return ``{event_id: snapshot_count}`` across the full table."""
-        rows = self._conn.execute(
-            "SELECT event_id, COUNT(*) AS c FROM event_snapshots GROUP BY event_id",
-        ).fetchall()
-        return {row["event_id"]: int(row["c"]) for row in rows}
+        return _count_grouped(self._conn, "event_snapshots", "event_id")
 
 
 def _row_to_event_snapshot(row: sqlite3.Row) -> EventSnapshot:
@@ -1999,19 +1999,11 @@ class MarketTicksRepo:
 
     def distinct_snapshot_count(self) -> int:
         """Return ``COUNT(DISTINCT snapshot_at)`` — total tick cycles recorded."""
-        row = self._conn.execute(
-            "SELECT COUNT(DISTINCT snapshot_at) AS c FROM market_ticks",
-        ).fetchone()
-        if row is None:
-            return 0
-        return int(row["c"])
+        return _count_distinct(self._conn, "market_ticks", "snapshot_at")
 
     def count_by_asset(self) -> dict[str, int]:
         """Return ``{asset_id: tick_count}`` across the full table."""
-        rows = self._conn.execute(
-            "SELECT asset_id, COUNT(*) AS c FROM market_ticks GROUP BY asset_id",
-        ).fetchall()
-        return {row["asset_id"]: int(row["c"]) for row in rows}
+        return _count_grouped(self._conn, "market_ticks", "asset_id")
 
 
 def _row_to_market_tick(row: sqlite3.Row) -> MarketTick:

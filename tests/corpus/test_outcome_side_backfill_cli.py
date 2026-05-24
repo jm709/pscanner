@@ -130,9 +130,7 @@ async def test_cli_backfill_outcome_side_propagates_rpm(
     conn = init_corpus_db(db_path)
     conn.close()
 
-    fake_gamma_class, fake_data_class = _install_fake_clients(
-        monkeypatch, slug=None, market=None
-    )
+    fake_gamma_class, fake_data_class = _install_fake_clients(monkeypatch, slug=None, market=None)
 
     args = argparse.Namespace(
         db=str(db_path),
