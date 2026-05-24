@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import structlog
@@ -344,19 +345,38 @@ def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
     return any(row[1] == column for row in info)
 
 
-def _migrate_corpus_markets_add_platform(conn: sqlite3.Connection) -> None:
-    if _column_exists(conn, "corpus_markets", "platform"):
-        return
-    if not conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='corpus_markets'"
-    ).fetchone():
-        return
-    start = time.monotonic()
-    row_count = conn.execute("SELECT COUNT(*) AS n FROM corpus_markets").fetchone()[0]
-    _log.info("corpus.migration_started", table="corpus_markets", rows=row_count)
-    with conn:
-        conn.execute(
-            """
+@dataclass(frozen=True)
+class _PlatformMigrationSpec:
+    """One-time PR-A platform-column migration spec for a single table.
+
+    ``new_table_ddl`` is the pre-PR-A table shape augmented with the
+    composite platform PK. It is deliberately *not* refreshed from current
+    ``_SCHEMA_STATEMENTS`` — additive columns added after PR-A layer on via
+    ``_MIGRATIONS`` (``ALTER TABLE``) once the copy completes. Refreshing
+    the DDL would break the upgrade-from-pre-PR-A path.
+
+    The ``training_examples`` spec is the one exception: its DDL is the
+    canonical :func:`training_examples_ddl` output because that function is
+    parametrized on the destination table name. The corresponding INSERT
+    projection supplies ``0`` defaults for the ``cat_*`` columns that exist
+    in the canonical DDL but not in pre-PR-A on-disk rows.
+
+    Each ``(insert_col, select_expr)`` pair in ``column_projections``
+    maps a column on the destination ``<table>__new`` table to its source
+    expression in the SELECT — typically the same column name on the legacy
+    table, or a literal like ``'polymarket'`` for the platform column.
+    """
+
+    table: str
+    new_table_ddl: str
+    column_projections: tuple[tuple[str, str], ...]
+    post_swap_index_ddl: tuple[str, ...] = ()
+
+
+_PLATFORM_MIGRATIONS: tuple[_PlatformMigrationSpec, ...] = (
+    _PlatformMigrationSpec(
+        table="corpus_markets",
+        new_table_ddl="""
             CREATE TABLE corpus_markets__new (
               platform TEXT NOT NULL DEFAULT 'polymarket'
                 CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
@@ -378,57 +398,37 @@ def _migrate_corpus_markets_add_platform(conn: sqlite3.Connection) -> None:
               onchain_processed_at INTEGER,
               PRIMARY KEY (platform, condition_id)
             )
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO corpus_markets__new (
-              platform, condition_id, event_slug, category, closed_at,
-              total_volume_usd, backfill_state, last_offset_seen,
-              trades_pulled_count, truncated_at_offset_cap, error_message,
-              enumerated_at, backfill_started_at, backfill_completed_at,
-              market_slug, onchain_trades_count, onchain_processed_at
-            )
-            SELECT
-              'polymarket', condition_id, event_slug, category, closed_at,
-              total_volume_usd, backfill_state, last_offset_seen,
-              trades_pulled_count, truncated_at_offset_cap, error_message,
-              enumerated_at, backfill_started_at, backfill_completed_at,
-              market_slug, onchain_trades_count, onchain_processed_at
-            FROM corpus_markets
-            """
-        )
-        conn.execute("DROP TABLE corpus_markets")
-        conn.execute("ALTER TABLE corpus_markets__new RENAME TO corpus_markets")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_corpus_markets_state ON corpus_markets(backfill_state)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_corpus_markets_volume "
-            "ON corpus_markets(total_volume_usd DESC)"
-        )
-    duration_s = time.monotonic() - start
-    _log.info(
-        "corpus.migration_completed",
-        table="corpus_markets",
-        rows=row_count,
-        duration_s=round(duration_s, 2),
-    )
-
-
-def _migrate_corpus_trades_add_platform(conn: sqlite3.Connection) -> None:
-    if _column_exists(conn, "corpus_trades", "platform"):
-        return
-    if not conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='corpus_trades'"
-    ).fetchone():
-        return
-    start = time.monotonic()
-    row_count = conn.execute("SELECT COUNT(*) AS n FROM corpus_trades").fetchone()[0]
-    _log.info("corpus.migration_started", table="corpus_trades", rows=row_count)
-    with conn:
-        conn.execute(
-            """
+            """,
+        column_projections=(
+            ("platform", "'polymarket'"),
+            ("condition_id", "condition_id"),
+            ("event_slug", "event_slug"),
+            ("category", "category"),
+            ("closed_at", "closed_at"),
+            ("total_volume_usd", "total_volume_usd"),
+            ("backfill_state", "backfill_state"),
+            ("last_offset_seen", "last_offset_seen"),
+            ("trades_pulled_count", "trades_pulled_count"),
+            ("truncated_at_offset_cap", "truncated_at_offset_cap"),
+            ("error_message", "error_message"),
+            ("enumerated_at", "enumerated_at"),
+            ("backfill_started_at", "backfill_started_at"),
+            ("backfill_completed_at", "backfill_completed_at"),
+            ("market_slug", "market_slug"),
+            ("onchain_trades_count", "onchain_trades_count"),
+            ("onchain_processed_at", "onchain_processed_at"),
+        ),
+        post_swap_index_ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_corpus_markets_state ON corpus_markets(backfill_state)",
+            (
+                "CREATE INDEX IF NOT EXISTS idx_corpus_markets_volume "
+                "ON corpus_markets(total_volume_usd DESC)"
+            ),
+        ),
+    ),
+    _PlatformMigrationSpec(
+        table="corpus_trades",
+        new_table_ddl="""
             CREATE TABLE corpus_trades__new (
               platform TEXT NOT NULL DEFAULT 'polymarket'
                 CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
@@ -444,60 +444,42 @@ def _migrate_corpus_trades_add_platform(conn: sqlite3.Connection) -> None:
               ts INTEGER NOT NULL,
               PRIMARY KEY (platform, tx_hash, asset_id, wallet_address)
             )
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO corpus_trades__new (
-              platform, tx_hash, asset_id, wallet_address, condition_id,
-              outcome_side, bs, price, size, notional_usd, ts
-            )
-            SELECT
-              'polymarket', tx_hash, asset_id, wallet_address, condition_id,
-              outcome_side, bs, price, size, notional_usd, ts
-            FROM corpus_trades
-            """
-        )
-        conn.execute("DROP TABLE corpus_trades")
-        conn.execute("ALTER TABLE corpus_trades__new RENAME TO corpus_trades")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_corpus_trades_market_ts "
-            "ON corpus_trades(condition_id, ts)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_corpus_trades_wallet_ts "
-            "ON corpus_trades(wallet_address, ts)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_corpus_trades_chrono_covering "
-            "ON corpus_trades("
-            "  platform, ts, tx_hash, asset_id, "
-            "  wallet_address, condition_id, outcome_side, bs, "
-            "  price, size, notional_usd"
-            ")"
-        )
-    duration_s = time.monotonic() - start
-    _log.info(
-        "corpus.migration_completed",
-        table="corpus_trades",
-        rows=row_count,
-        duration_s=round(duration_s, 2),
-    )
-
-
-def _migrate_market_resolutions_add_platform(conn: sqlite3.Connection) -> None:
-    if _column_exists(conn, "market_resolutions", "platform"):
-        return
-    if not conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='market_resolutions'"
-    ).fetchone():
-        return
-    start = time.monotonic()
-    row_count = conn.execute("SELECT COUNT(*) AS n FROM market_resolutions").fetchone()[0]
-    _log.info("corpus.migration_started", table="market_resolutions", rows=row_count)
-    with conn:
-        conn.execute(
-            """
+            """,
+        column_projections=(
+            ("platform", "'polymarket'"),
+            ("tx_hash", "tx_hash"),
+            ("asset_id", "asset_id"),
+            ("wallet_address", "wallet_address"),
+            ("condition_id", "condition_id"),
+            ("outcome_side", "outcome_side"),
+            ("bs", "bs"),
+            ("price", "price"),
+            ("size", "size"),
+            ("notional_usd", "notional_usd"),
+            ("ts", "ts"),
+        ),
+        post_swap_index_ddl=(
+            (
+                "CREATE INDEX IF NOT EXISTS idx_corpus_trades_market_ts "
+                "ON corpus_trades(condition_id, ts)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_corpus_trades_wallet_ts "
+                "ON corpus_trades(wallet_address, ts)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_corpus_trades_chrono_covering "
+                "ON corpus_trades("
+                "  platform, ts, tx_hash, asset_id, "
+                "  wallet_address, condition_id, outcome_side, bs, "
+                "  price, size, notional_usd"
+                ")"
+            ),
+        ),
+    ),
+    _PlatformMigrationSpec(
+        table="market_resolutions",
+        new_table_ddl="""
             CREATE TABLE market_resolutions__new (
               platform TEXT NOT NULL DEFAULT 'polymarket'
                 CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
@@ -509,119 +491,94 @@ def _migrate_market_resolutions_add_platform(conn: sqlite3.Connection) -> None:
               recorded_at INTEGER NOT NULL,
               PRIMARY KEY (platform, condition_id)
             )
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO market_resolutions__new (
-              platform, condition_id, winning_outcome_index, outcome_yes_won,
-              resolved_at, source, recorded_at
-            )
-            SELECT
-              'polymarket', condition_id, winning_outcome_index, outcome_yes_won,
-              resolved_at, source, recorded_at
-            FROM market_resolutions
-            """
-        )
-        conn.execute("DROP TABLE market_resolutions")
-        conn.execute("ALTER TABLE market_resolutions__new RENAME TO market_resolutions")
-    duration_s = time.monotonic() - start
-    _log.info(
-        "corpus.migration_completed",
-        table="market_resolutions",
-        rows=row_count,
-        duration_s=round(duration_s, 2),
-    )
-
-
-def _migrate_training_examples_add_platform(conn: sqlite3.Connection) -> None:
-    if _column_exists(conn, "training_examples", "platform"):
-        return
-    if not conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='training_examples'"
-    ).fetchone():
-        return
-    start = time.monotonic()
-    row_count = conn.execute("SELECT COUNT(*) AS n FROM training_examples").fetchone()[0]
-    _log.info("corpus.migration_started", table="training_examples", rows=row_count)
-    with conn:
-        conn.executescript(training_examples_ddl("training_examples__new") + ";")
-        # Preserve the legacy `id` autoincrement column — `pscanner.ml.streaming`
-        # uses it as a stable rowid for chunk-iteration ORDER BY. The composite
-        # cross-platform key is enforced via UNIQUE rather than as the PK so id
-        # stays addressable.
-        conn.execute(
-            """
-            INSERT INTO training_examples__new (
-              id, platform, tx_hash, asset_id, wallet_address, condition_id, trade_ts, built_at,
-              prior_trades_count, prior_buys_count, prior_resolved_buys,
-              prior_wins, prior_losses, win_rate, avg_implied_prob_paid,
-              realized_edge_pp, prior_realized_pnl_usd,
-              avg_bet_size_usd, median_bet_size_usd, wallet_age_days,
-              seconds_since_last_trade, prior_trades_30d, top_category,
-              category_diversity, bet_size_usd, bet_size_rel_to_avg,
-              edge_confidence_weighted, win_rate_confidence_weighted,
-              is_high_quality_wallet, bet_size_relative_to_history,
-              side, implied_prob_at_buy, market_category, market_volume_so_far_usd,
-              market_unique_traders_so_far, market_age_seconds,
-              time_to_resolution_seconds, last_trade_price, price_volatility_recent,
-              cat_sports, cat_esports, cat_thesis, cat_macro, cat_elections,
-              cat_crypto, cat_geopolitics, cat_tech, cat_culture,
-              label_won
-            )
-            SELECT
-              id, 'polymarket', tx_hash, asset_id, wallet_address, condition_id, trade_ts, built_at,
-              prior_trades_count, prior_buys_count, prior_resolved_buys,
-              prior_wins, prior_losses, win_rate, avg_implied_prob_paid,
-              realized_edge_pp, prior_realized_pnl_usd,
-              avg_bet_size_usd, median_bet_size_usd, wallet_age_days,
-              seconds_since_last_trade, prior_trades_30d, top_category,
-              category_diversity, bet_size_usd, bet_size_rel_to_avg,
-              edge_confidence_weighted, win_rate_confidence_weighted,
-              is_high_quality_wallet, bet_size_relative_to_history,
-              side, implied_prob_at_buy, market_category, market_volume_so_far_usd,
-              market_unique_traders_so_far, market_age_seconds,
-              time_to_resolution_seconds, last_trade_price, price_volatility_recent,
-              0, 0, 0, 0, 0, 0, 0, 0, 0,
-              label_won
-            FROM training_examples
-            """
-        )
-        conn.execute("DROP TABLE training_examples")
-        conn.execute("ALTER TABLE training_examples__new RENAME TO training_examples")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_training_examples_condition "
-            "ON training_examples(condition_id)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_training_examples_wallet "
-            "ON training_examples(wallet_address)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_training_examples_label ON training_examples(label_won)"
-        )
-    duration_s = time.monotonic() - start
-    _log.info(
-        "corpus.migration_completed",
+            """,
+        column_projections=(
+            ("platform", "'polymarket'"),
+            ("condition_id", "condition_id"),
+            ("winning_outcome_index", "winning_outcome_index"),
+            ("outcome_yes_won", "outcome_yes_won"),
+            ("resolved_at", "resolved_at"),
+            ("source", "source"),
+            ("recorded_at", "recorded_at"),
+        ),
+    ),
+    _PlatformMigrationSpec(
         table="training_examples",
-        rows=row_count,
-        duration_s=round(duration_s, 2),
-    )
-
-
-def _migrate_asset_index_add_platform(conn: sqlite3.Connection) -> None:
-    if _column_exists(conn, "asset_index", "platform"):
-        return
-    if not conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='asset_index'"
-    ).fetchone():
-        return
-    start = time.monotonic()
-    row_count = conn.execute("SELECT COUNT(*) AS n FROM asset_index").fetchone()[0]
-    _log.info("corpus.migration_started", table="asset_index", rows=row_count)
-    with conn:
-        conn.execute(
-            """
+        # Canonical DDL with the current shape, not a frozen pre-PR-A shape —
+        # `training_examples_ddl` is the one parametrized helper. The 9
+        # `cat_*` columns added post-PR-A are defaulted to 0 in the
+        # projection below; the legacy `id` column is preserved as a stable
+        # rowid for `pscanner.ml.streaming`'s chunk iteration.
+        new_table_ddl=training_examples_ddl("training_examples__new"),
+        column_projections=(
+            ("id", "id"),
+            ("platform", "'polymarket'"),
+            ("tx_hash", "tx_hash"),
+            ("asset_id", "asset_id"),
+            ("wallet_address", "wallet_address"),
+            ("condition_id", "condition_id"),
+            ("trade_ts", "trade_ts"),
+            ("built_at", "built_at"),
+            ("prior_trades_count", "prior_trades_count"),
+            ("prior_buys_count", "prior_buys_count"),
+            ("prior_resolved_buys", "prior_resolved_buys"),
+            ("prior_wins", "prior_wins"),
+            ("prior_losses", "prior_losses"),
+            ("win_rate", "win_rate"),
+            ("avg_implied_prob_paid", "avg_implied_prob_paid"),
+            ("realized_edge_pp", "realized_edge_pp"),
+            ("prior_realized_pnl_usd", "prior_realized_pnl_usd"),
+            ("avg_bet_size_usd", "avg_bet_size_usd"),
+            ("median_bet_size_usd", "median_bet_size_usd"),
+            ("wallet_age_days", "wallet_age_days"),
+            ("seconds_since_last_trade", "seconds_since_last_trade"),
+            ("prior_trades_30d", "prior_trades_30d"),
+            ("top_category", "top_category"),
+            ("category_diversity", "category_diversity"),
+            ("bet_size_usd", "bet_size_usd"),
+            ("bet_size_rel_to_avg", "bet_size_rel_to_avg"),
+            ("edge_confidence_weighted", "edge_confidence_weighted"),
+            ("win_rate_confidence_weighted", "win_rate_confidence_weighted"),
+            ("is_high_quality_wallet", "is_high_quality_wallet"),
+            ("bet_size_relative_to_history", "bet_size_relative_to_history"),
+            ("side", "side"),
+            ("implied_prob_at_buy", "implied_prob_at_buy"),
+            ("market_category", "market_category"),
+            ("market_volume_so_far_usd", "market_volume_so_far_usd"),
+            ("market_unique_traders_so_far", "market_unique_traders_so_far"),
+            ("market_age_seconds", "market_age_seconds"),
+            ("time_to_resolution_seconds", "time_to_resolution_seconds"),
+            ("last_trade_price", "last_trade_price"),
+            ("price_volatility_recent", "price_volatility_recent"),
+            ("cat_sports", "0"),
+            ("cat_esports", "0"),
+            ("cat_thesis", "0"),
+            ("cat_macro", "0"),
+            ("cat_elections", "0"),
+            ("cat_crypto", "0"),
+            ("cat_geopolitics", "0"),
+            ("cat_tech", "0"),
+            ("cat_culture", "0"),
+            ("label_won", "label_won"),
+        ),
+        post_swap_index_ddl=(
+            (
+                "CREATE INDEX IF NOT EXISTS idx_training_examples_condition "
+                "ON training_examples(condition_id)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_training_examples_wallet "
+                "ON training_examples(wallet_address)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_training_examples_label "
+                "ON training_examples(label_won)"
+            ),
+        ),
+    ),
+    _PlatformMigrationSpec(
+        table="asset_index",
+        new_table_ddl="""
             CREATE TABLE asset_index__new (
               platform TEXT NOT NULL DEFAULT 'polymarket'
                 CHECK (platform IN ('polymarket', 'kalshi', 'manifold')),
@@ -631,27 +588,59 @@ def _migrate_asset_index_add_platform(conn: sqlite3.Connection) -> None:
               outcome_index INTEGER NOT NULL,
               PRIMARY KEY (platform, asset_id)
             )
-            """
-        )
+            """,
+        column_projections=(
+            ("platform", "'polymarket'"),
+            ("asset_id", "asset_id"),
+            ("condition_id", "condition_id"),
+            ("outcome_side", "outcome_side"),
+            ("outcome_index", "outcome_index"),
+        ),
+        post_swap_index_ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_asset_index_condition ON asset_index(condition_id)",
+        ),
+    ),
+)
+
+
+def _apply_platform_migration(
+    conn: sqlite3.Connection,
+    spec: _PlatformMigrationSpec,
+) -> None:
+    """Apply one platform-column migration. Idempotent.
+
+    Skips silently when the target table already carries ``platform``, and
+    when the table doesn't exist yet (a fresh DB hits ``_SCHEMA_STATEMENTS``
+    directly and never enters this path).
+    """
+    if _column_exists(conn, spec.table, "platform"):
+        return
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (spec.table,),
+    ).fetchone():
+        return
+    start = time.monotonic()
+    row_count = conn.execute(
+        f"SELECT COUNT(*) AS n FROM {spec.table}"  # noqa: S608
+    ).fetchone()[0]
+    _log.info("corpus.migration_started", table=spec.table, rows=row_count)
+    insert_cols = ", ".join(col for col, _ in spec.column_projections)
+    select_exprs = ", ".join(expr for _, expr in spec.column_projections)
+    with conn:
+        conn.executescript(spec.new_table_ddl + ";")
         conn.execute(
-            """
-            INSERT INTO asset_index__new (
-              platform, asset_id, condition_id, outcome_side, outcome_index
-            )
-            SELECT
-              'polymarket', asset_id, condition_id, outcome_side, outcome_index
-            FROM asset_index
-            """
+            f"INSERT INTO {spec.table}__new ({insert_cols}) "  # noqa: S608
+            f"SELECT {select_exprs} FROM {spec.table}"
         )
-        conn.execute("DROP TABLE asset_index")
-        conn.execute("ALTER TABLE asset_index__new RENAME TO asset_index")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_asset_index_condition ON asset_index(condition_id)"
-        )
+        conn.execute(f"DROP TABLE {spec.table}")
+        conn.execute(f"ALTER TABLE {spec.table}__new RENAME TO {spec.table}")
+        for stmt in spec.post_swap_index_ddl:
+            conn.execute(stmt)
     duration_s = time.monotonic() - start
     _log.info(
         "corpus.migration_completed",
-        table="asset_index",
+        table=spec.table,
         rows=row_count,
         duration_s=round(duration_s, 2),
     )
@@ -667,11 +656,8 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     idempotent-failure error messages via
     :func:`pscanner.store.migrations.apply_additive_migrations`.
     """
-    _migrate_corpus_markets_add_platform(conn)
-    _migrate_corpus_trades_add_platform(conn)
-    _migrate_market_resolutions_add_platform(conn)
-    _migrate_training_examples_add_platform(conn)
-    _migrate_asset_index_add_platform(conn)
+    for spec in _PLATFORM_MIGRATIONS:
+        _apply_platform_migration(conn, spec)
     apply_additive_migrations(conn, _MIGRATIONS)
 
 
