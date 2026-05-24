@@ -1,13 +1,25 @@
 """Market tick collector — append-only price snapshots from the WS orderbook.
 
-Owns its own ``MarketWebSocket`` connection. Maintains an in-memory orderbook
-per subscribed asset (driven by ``book``/``price_change``/``last_trade_price``
-events) and, on each tick interval, writes one row per asset to
-``MarketTicksRepo`` with derived best_bid/best_ask/mid/spread/depth fields.
+:class:`MarketTickCollector` is a long-lived async orchestrator over three
+internal collaborators:
 
-Subscription scope = (assets held by watched wallets) U (active markets above
-``tick_volume_floor_usd``), capped at ``max_assets``. Re-evaluated on
-``subscription_refresh_seconds``.
+- :class:`_BookApplier` owns the in-memory orderbook state per asset and
+  applies ``book`` / ``price_change`` / ``last_trade_price`` WS messages.
+- :class:`_SubscriptionManager` owns the WS subscription set + the
+  ``asset → condition_id`` and ``asset → CachedMarket`` lookups, and runs
+  the periodic refresh cycle: union of (assets held by watched wallets)
+  and (active markets above ``tick_volume_floor_usd``), capped at
+  ``max_assets``.
+- :class:`_SnapshotWriter` persists one MarketTick per asset per snapshot
+  pass into ``MarketTicksRepo`` and owns the in-memory mid/tick history
+  ring buffers consumed by ``get_recent_mids`` / ``get_recent_ticks``.
+
+The orchestrator runs three concurrent loops — subscription refresh,
+WS consume, snapshot — and on each snapshot pass joins the applier's
+book snapshot with the subscription manager's condition lookup, writes
+each row via the writer, then publishes a :class:`TickEvent` (when a
+:class:`BroadcastTickStream` is wired) enriched with the subscription
+manager's cached market metadata.
 """
 
 from __future__ import annotations
@@ -48,121 +60,180 @@ class _Orderbook:
     condition_id: ConditionId | None = None
 
 
-class MarketTickCollector:
-    """Maintains an in-memory orderbook per subscribed asset and writes ticks.
+class _BookApplier:
+    """Owns the in-memory orderbook state per asset.
 
-    Owns its own ``MarketWebSocket`` connection (separate from any other WS
-    consumer). Subscription scope = (assets held by watched wallets) U (active
-    markets above ``tick_volume_floor_usd``), capped at ``max_assets``.
+    The single concern: take a :class:`WsBookMessage` and mutate the
+    corresponding :class:`_Orderbook`. Concurrent-safe via its own
+    :class:`asyncio.Lock` so message-apply and snapshot reads can interleave
+    without head-of-line blocking from other ticks collaborators.
     """
 
-    name: str = "tick_collector"
+    def __init__(self) -> None:
+        self._books: dict[AssetId, _Orderbook] = {}
+        self._lock = asyncio.Lock()
+
+    async def apply(self, msg: WsBookMessage) -> None:
+        """Apply one WS message to the in-memory orderbook state."""
+        async with self._lock:
+            asset_id = msg.asset_id if msg.asset_id is not None else AssetId("")
+            book = self._books.setdefault(asset_id, _Orderbook())
+            if msg.market and not book.condition_id:
+                book.condition_id = msg.market
+
+            if msg.event_type == "book":
+                self._apply_book_snapshot(book, msg)
+            elif msg.event_type == "price_change":
+                self._apply_price_changes(msg)
+            elif msg.event_type == "last_trade_price":
+                self._apply_last_trade_price(book, msg)
+            # ``tick_size_change`` is intentionally ignored.
+
+    async def snapshot(self) -> list[tuple[AssetId, _Orderbook]]:
+        """Return a list snapshot of ``(asset_id, book)`` pairs.
+
+        The list itself is built under the lock so a concurrent ``apply``
+        can't add/remove entries mid-copy. The per-book state is NOT deep-
+        copied — a concurrent ``apply`` on a book can race with the
+        caller's reads of ``book.bids`` etc. This mirrors the snapshot
+        semantics before the split (the analysis path always ran outside
+        the original collector lock).
+        """
+        async with self._lock:
+            return list(self._books.items())
+
+    def _apply_book_snapshot(self, book: _Orderbook, msg: WsBookMessage) -> None:
+        """Replace ``book``'s state from a full ``book`` snapshot payload."""
+        book.bids = self._parse_levels(msg.bids or [])
+        book.asks = self._parse_levels(msg.asks or [])
+        if msg.last_trade_price is not None:
+            try:
+                book.last_trade_price = float(msg.last_trade_price)
+            except (ValueError, TypeError):
+                _LOG.debug("ticks.book.bad_last_trade_price", value=msg.last_trade_price)
+
+    def _apply_price_changes(self, msg: WsBookMessage) -> None:
+        """Apply each per-asset price change inside a ``price_change`` payload."""
+        changes = msg.price_changes or []
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            self._apply_one_price_change(change, market=msg.market)
+
+    def _apply_one_price_change(
+        self,
+        change: dict[str, Any],
+        *,
+        market: ConditionId | None,
+    ) -> None:
+        """Apply a single entry from a ``price_changes`` array.
+
+        Note: a ``price_change`` carries a per-entry ``asset_id`` distinct
+        from the message's top-level ``asset_id``. We ``setdefault``-create
+        a book entry for that asset even if it wasn't seen in a prior
+        ``book`` snapshot and isn't in the subscription manager's
+        ``_asset_to_condition`` map — downstream ``snapshot_once`` filters
+        out books with no condition_id and no mid, so the empty entry is
+        harmless and the next ``book`` message will populate it cleanly.
+        """
+        asset_id_raw = change.get("asset_id")
+        if not isinstance(asset_id_raw, str) or not asset_id_raw:
+            return
+        asset_id = AssetId(asset_id_raw)
+        sub = self._books.setdefault(asset_id, _Orderbook())
+        if market and not sub.condition_id:
+            sub.condition_id = market
+        try:
+            price = float(change.get("price", 0))
+            size = float(change.get("size", 0))
+        except (ValueError, TypeError):
+            return
+        side = str(change.get("side", "")).upper()
+        if side == "BUY":
+            book_dict: dict[float, float] | None = sub.bids
+        elif side == "SELL":
+            book_dict = sub.asks
+        else:
+            book_dict = None
+        if book_dict is None:
+            return
+        if size == 0:
+            book_dict.pop(price, None)
+        else:
+            book_dict[price] = size
+
+    def _apply_last_trade_price(self, book: _Orderbook, msg: WsBookMessage) -> None:
+        """Apply a ``last_trade_price`` payload to ``book``."""
+        if msg.last_trade_price is None:
+            return
+        try:
+            value = float(msg.last_trade_price)
+        except (ValueError, TypeError):
+            return
+        if value:
+            book.last_trade_price = value
+
+    @staticmethod
+    def _parse_levels(items: Any) -> dict[float, float]:
+        """Convert a ``[{"price": "0.5", "size": "100"}, ...]`` list to a dict.
+
+        Args:
+            items: Raw level list from the WS payload.
+
+        Returns:
+            ``price -> size`` dict; entries with ``size <= 0`` are dropped.
+        """
+        out: dict[float, float] = {}
+        if not isinstance(items, list):
+            return out
+        for entry in items:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                price = float(entry.get("price", 0))
+                size = float(entry.get("size", 0))
+            except (ValueError, TypeError):
+                continue
+            if size > 0:
+                out[price] = size
+        return out
+
+
+class _SubscriptionManager:
+    """Owns the WS subscription set + the asset→condition / asset→market maps.
+
+    Refresh cycle: enumerate (assets held by watched wallets) UNION (active
+    markets above ``tick_volume_floor_usd``), cap at ``max_assets`` preferring
+    wallet assets, then send subscribe frames for any new ids.
+
+    Locking: only the ``_asset_to_condition`` updates and reads are serialized
+    via ``self._lock`` — that's the dict snapshot_once needs a consistent view
+    of. ``_asset_to_market`` and ``_subscribed`` are written by the single
+    refresh task so they don't need a lock (preserves the pre-split shape).
+    """
 
     def __init__(
         self,
         *,
         config: TicksConfig,
         ws: MarketWebSocket,
-        gamma_client: GammaClient,
-        data_client: DataClient,
+        gamma: GammaClient,
+        data: DataClient,
         registry: WatchlistRegistry,
-        ticks_repo: MarketTicksRepo,
-        market_cache: MarketCacheRepo | None = None,
-        tick_stream: BroadcastTickStream | None = None,
+        market_cache: MarketCacheRepo | None,
     ) -> None:
-        """Build the collector. See module docstring for behaviour.
-
-        Args:
-            config: Ticks-section settings (cadence, scope, caps).
-            ws: Owned ``MarketWebSocket`` connection.
-            gamma_client: Source of active markets for the volume-floor scope.
-            data_client: Source of wallet positions for the wallet scope.
-            registry: Watchlist registry naming the wallets to follow.
-            ticks_repo: Persistence for the per-asset tick rows.
-            market_cache: Optional repo used to resolve ``asset_id`` →
-                :class:`CachedMarket` for downstream detector enrichment. When
-                ``None``, ``get_market_for_asset`` always returns ``None``.
-            tick_stream: Optional :class:`BroadcastTickStream` to publish a
-                :class:`TickEvent` on every successful tick insert. When
-                ``None`` the collector runs without fan-out (legacy mode).
-        """
         self._config = config
         self._ws = ws
-        self._gamma = gamma_client
-        self._data = data_client
+        self._gamma = gamma
+        self._data = data
         self._registry = registry
-        self._repo = ticks_repo
         self._market_cache = market_cache
-        self._tick_stream = tick_stream
-        self._books: dict[AssetId, _Orderbook] = {}
-        self._asset_to_condition: dict[AssetId, ConditionId] = {}
-        self._mid_history: dict[AssetId, list[tuple[int, float]]] = {}
-        self._tick_history: dict[AssetId, collections.deque[MarketTick]] = {}
-        self._asset_to_market: dict[AssetId, CachedMarket] = {}
         self._subscribed: set[AssetId] = set()
+        self._asset_to_condition: dict[AssetId, ConditionId] = {}
+        self._asset_to_market: dict[AssetId, CachedMarket] = {}
         self._lock = asyncio.Lock()
 
-    async def run(self, stop_event: asyncio.Event) -> None:
-        """Connect WS, drive subscription/consume/snapshot loops until stopped.
-
-        Args:
-            stop_event: Cooperative shutdown signal set by the scheduler.
-        """
-        await self._ws.connect()
-        tasks: list[asyncio.Task[None]] = [
-            asyncio.create_task(self._subscription_refresh_loop(stop_event)),
-            asyncio.create_task(self._consume_loop(stop_event)),
-            asyncio.create_task(self._snapshot_loop(stop_event)),
-        ]
-        try:
-            await stop_event.wait()
-        finally:
-            with contextlib.suppress(Exception):
-                await self._ws.close()
-            for task in tasks:
-                task.cancel()
-            for task in tasks:
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await task
-
-    async def _subscription_refresh_loop(self, stop_event: asyncio.Event) -> None:
-        """Refresh the subscription set immediately, then on a cadence."""
-        interval = self._config.subscription_refresh_seconds
-        while not stop_event.is_set():
-            try:
-                await self._refresh_subscriptions()
-            except Exception:
-                _LOG.exception("ticks.subscription_refresh_failed")
-            if await _wait_or_stop(stop_event, interval):
-                return
-
-    async def _consume_loop(self, stop_event: asyncio.Event) -> None:
-        """Consume WS messages and dispatch to the handler until stopped."""
-        try:
-            async for msg in self._ws.messages():
-                if stop_event.is_set():
-                    return
-                if not isinstance(msg, WsBookMessage):
-                    continue
-                try:
-                    await self._handle_message(msg)
-                except Exception:
-                    _LOG.exception("ticks.handle_message_failed")
-        except Exception:
-            _LOG.exception("ticks.consume_loop_failed")
-
-    async def _snapshot_loop(self, stop_event: asyncio.Event) -> None:
-        """Run ``snapshot_once`` every ``tick_interval_seconds`` until stopped."""
-        interval = self._config.tick_interval_seconds
-        while not stop_event.is_set():
-            if await _wait_or_stop(stop_event, interval):
-                return
-            try:
-                await self.snapshot_once()
-            except Exception:
-                _LOG.exception("ticks.snapshot_iteration_failed")
-
-    async def _refresh_subscriptions(self) -> None:
+    async def refresh(self) -> None:
         """Recompute the asset universe and subscribe to any new ids."""
         wallet_assets, wallet_lookup = await self._collect_wallet_assets()
         volume_assets, volume_lookup = await self._collect_volume_floor_assets(
@@ -189,6 +260,19 @@ class MarketTickCollector:
             assets=len(self._subscribed),
             new=len(new_ids),
         )
+
+    async def asset_to_condition_snapshot(self) -> dict[AssetId, ConditionId]:
+        """Return a shallow copy of the asset→condition lookup (lock-protected)."""
+        async with self._lock:
+            return dict(self._asset_to_condition)
+
+    def get_market(self, asset_id: AssetId) -> CachedMarket | None:
+        """Return the cached market for ``asset_id`` or ``None`` if unknown."""
+        return self._asset_to_market.get(asset_id)
+
+    def subscribed_asset_ids(self) -> set[AssetId]:
+        """Return a copy of the currently-subscribed asset id set."""
+        return self._subscribed.copy()
 
     async def _collect_wallet_assets(
         self,
@@ -284,141 +368,24 @@ class MarketTickCollector:
             except Exception:
                 _LOG.exception("ticks.subscribe_failed", batch_size=len(chunk))
 
-    async def _handle_message(self, msg: WsBookMessage) -> None:
-        """Apply one WS message to the in-memory orderbook state."""
-        async with self._lock:
-            asset_id = msg.asset_id if msg.asset_id is not None else AssetId("")
-            book = self._books.setdefault(asset_id, _Orderbook())
-            if msg.market and not book.condition_id:
-                book.condition_id = msg.market
 
-            if msg.event_type == "book":
-                self._apply_book_snapshot(book, msg)
-            elif msg.event_type == "price_change":
-                self._apply_price_changes(msg)
-            elif msg.event_type == "last_trade_price":
-                self._apply_last_trade_price(book, msg)
-            # ``tick_size_change`` is intentionally ignored.
+class _SnapshotWriter:
+    """Persists one MarketTick per snapshot pass + owns the history ring buffers.
 
-    def _apply_book_snapshot(self, book: _Orderbook, msg: WsBookMessage) -> None:
-        """Replace ``book``'s state from a full ``book`` snapshot payload."""
-        book.bids = self._parse_levels(msg.bids or [])
-        book.asks = self._parse_levels(msg.asks or [])
-        if msg.last_trade_price is not None:
-            try:
-                book.last_trade_price = float(msg.last_trade_price)
-            except (ValueError, TypeError):
-                _LOG.debug("ticks.book.bad_last_trade_price", value=msg.last_trade_price)
+    No knowledge of the publish path or per-asset market metadata — those
+    concerns stay on the orchestrator. The writer's contract is: take
+    (asset_id, book, condition_lookup, snapshot_at), build a MarketTick,
+    insert it, and on success append to the in-memory mid/tick history.
+    Returns the inserted tick (or ``None`` if the row was filtered or
+    insert rejected as a dupe).
+    """
 
-    def _apply_price_changes(self, msg: WsBookMessage) -> None:
-        """Apply each per-asset price change inside a ``price_change`` payload."""
-        changes = msg.price_changes or []
-        for change in changes:
-            if not isinstance(change, dict):
-                continue
-            self._apply_one_price_change(change, market=msg.market)
+    def __init__(self, *, repo: MarketTicksRepo) -> None:
+        self._repo = repo
+        self._mid_history: dict[AssetId, list[tuple[int, float]]] = {}
+        self._tick_history: dict[AssetId, collections.deque[MarketTick]] = {}
 
-    def _apply_one_price_change(
-        self,
-        change: dict[str, Any],
-        *,
-        market: ConditionId | None,
-    ) -> None:
-        """Apply a single entry from a ``price_changes`` array."""
-        asset_id_raw = change.get("asset_id")
-        if not isinstance(asset_id_raw, str) or not asset_id_raw:
-            return
-        asset_id = AssetId(asset_id_raw)
-        sub = self._books.setdefault(asset_id, _Orderbook())
-        if market and not sub.condition_id:
-            sub.condition_id = market
-        try:
-            price = float(change.get("price", 0))
-            size = float(change.get("size", 0))
-        except (ValueError, TypeError):
-            return
-        side = str(change.get("side", "")).upper()
-        if side == "BUY":
-            book_dict: dict[float, float] | None = sub.bids
-        elif side == "SELL":
-            book_dict = sub.asks
-        else:
-            book_dict = None
-        if book_dict is None:
-            return
-        if size == 0:
-            book_dict.pop(price, None)
-        else:
-            book_dict[price] = size
-
-    def _apply_last_trade_price(self, book: _Orderbook, msg: WsBookMessage) -> None:
-        """Apply a ``last_trade_price`` payload to ``book``."""
-        if msg.last_trade_price is None:
-            return
-        try:
-            value = float(msg.last_trade_price)
-        except (ValueError, TypeError):
-            return
-        if value:
-            book.last_trade_price = value
-
-    @staticmethod
-    def _parse_levels(items: Any) -> dict[float, float]:
-        """Convert a ``[{"price": "0.5", "size": "100"}, ...]`` list to a dict.
-
-        Args:
-            items: Raw level list from the WS payload.
-
-        Returns:
-            ``price -> size`` dict; entries with ``size <= 0`` are dropped.
-        """
-        out: dict[float, float] = {}
-        if not isinstance(items, list):
-            return out
-        for entry in items:
-            if not isinstance(entry, dict):
-                continue
-            try:
-                price = float(entry.get("price", 0))
-                size = float(entry.get("size", 0))
-            except (ValueError, TypeError):
-                continue
-            if size > 0:
-                out[price] = size
-        return out
-
-    async def snapshot_once(self) -> int:
-        """Walk in-memory orderbook state, write one row per asset.
-
-        Each newly-inserted row is also published as a :class:`TickEvent` to
-        the configured :class:`BroadcastTickStream` (when one is wired) so
-        tick-consuming detectors can react in real time.
-
-        Returns:
-            Number of rows newly inserted.
-        """
-        snapshot_at = int(time.time())
-        async with self._lock:
-            books_copy = list(self._books.items())
-            condition_lookup = dict(self._asset_to_condition)
-        inserted = 0
-        for asset_id, book in books_copy:
-            if not asset_id:
-                continue
-            tick = self._persist_tick(
-                asset_id=asset_id,
-                book=book,
-                condition_lookup=condition_lookup,
-                snapshot_at=snapshot_at,
-            )
-            if tick is None:
-                continue
-            inserted += 1
-            await self._maybe_publish(asset_id=asset_id, tick=tick)
-        _LOG.info("ticks.snapshot_complete", assets=len(books_copy), inserted=inserted)
-        return inserted
-
-    def _persist_tick(
+    def write(
         self,
         *,
         asset_id: AssetId,
@@ -426,7 +393,12 @@ class MarketTickCollector:
         condition_lookup: dict[AssetId, ConditionId],
         snapshot_at: int,
     ) -> MarketTick | None:
-        """Build and insert one tick row; return the row when inserted, else ``None``."""
+        """Build, persist, and record one tick row.
+
+        Returns the inserted MarketTick on success, or ``None`` if the row
+        was filtered (no condition + no mid) or the repo reports a dupe.
+        Per-row exceptions are logged and absorbed.
+        """
         best_bid = max(book.bids) if book.bids else None
         best_ask = min(book.asks) if book.asks else None
         if best_bid is not None and best_ask is not None:
@@ -464,6 +436,191 @@ class MarketTickCollector:
             self._record_mid_history(asset_id, snapshot_at=snapshot_at, mid=mid)
         return tick
 
+    def get_recent_mids(
+        self,
+        asset_id: AssetId,
+        *,
+        window_seconds: int,
+    ) -> list[tuple[int, float]]:
+        """``(snapshot_at, mid_price)`` pairs within the trailing window."""
+        now = int(time.time())
+        cutoff = now - window_seconds
+        history = self._mid_history.get(asset_id, [])
+        return [(ts, mid) for ts, mid in history if ts > cutoff]
+
+    def get_recent_ticks(
+        self,
+        asset_id: AssetId,
+        *,
+        window_seconds: int,
+    ) -> list[MarketTick]:
+        """Full ``MarketTick`` rows for ``asset_id`` within the trailing window."""
+        now = int(time.time())
+        cutoff = now - window_seconds
+        history = self._tick_history.get(asset_id)
+        if history is None:
+            return []
+        return [tick for tick in history if tick.snapshot_at > cutoff]
+
+    def _record_mid_history(self, asset_id: AssetId, *, snapshot_at: int, mid: float) -> None:
+        """Append ``(snapshot_at, mid)`` to the asset's history ring buffer."""
+        history = self._mid_history.setdefault(asset_id, [])
+        history.append((snapshot_at, mid))
+        if len(history) > _MID_HISTORY_CAP:
+            del history[: len(history) - _MID_HISTORY_CAP]
+
+    def _record_tick_history(self, asset_id: AssetId, *, tick: MarketTick) -> None:
+        """Append a full ``MarketTick`` row to the asset's tick ring buffer."""
+        history = self._tick_history.get(asset_id)
+        if history is None:
+            history = collections.deque(maxlen=_MID_HISTORY_CAP)
+            self._tick_history[asset_id] = history
+        history.append(tick)
+
+
+class MarketTickCollector:
+    """Long-lived orchestrator: subscribe + ingest + snapshot, fan out via three loops.
+
+    Owns its own ``MarketWebSocket`` connection (separate from any other WS
+    consumer). Internal state lives on the three collaborators (see module
+    docstring): :class:`_BookApplier`, :class:`_SubscriptionManager`,
+    :class:`_SnapshotWriter`. This class composes them.
+    """
+
+    name: str = "tick_collector"
+
+    def __init__(
+        self,
+        *,
+        config: TicksConfig,
+        ws: MarketWebSocket,
+        gamma_client: GammaClient,
+        data_client: DataClient,
+        registry: WatchlistRegistry,
+        ticks_repo: MarketTicksRepo,
+        market_cache: MarketCacheRepo | None = None,
+        tick_stream: BroadcastTickStream | None = None,
+    ) -> None:
+        """Build the collector. See module docstring for behaviour.
+
+        Args:
+            config: Ticks-section settings (cadence, scope, caps).
+            ws: Owned ``MarketWebSocket`` connection.
+            gamma_client: Source of active markets for the volume-floor scope.
+            data_client: Source of wallet positions for the wallet scope.
+            registry: Watchlist registry naming the wallets to follow.
+            ticks_repo: Persistence for the per-asset tick rows.
+            market_cache: Optional repo used to resolve ``asset_id`` →
+                :class:`CachedMarket` for downstream detector enrichment. When
+                ``None``, ``get_market_for_asset`` always returns ``None``.
+            tick_stream: Optional :class:`BroadcastTickStream` to publish a
+                :class:`TickEvent` on every successful tick insert. When
+                ``None`` the collector runs without fan-out (legacy mode).
+        """
+        self._config = config
+        self._ws = ws
+        self._tick_stream = tick_stream
+        self._applier = _BookApplier()
+        self._sub_mgr = _SubscriptionManager(
+            config=config,
+            ws=ws,
+            gamma=gamma_client,
+            data=data_client,
+            registry=registry,
+            market_cache=market_cache,
+        )
+        self._writer = _SnapshotWriter(repo=ticks_repo)
+
+    async def run(self, stop_event: asyncio.Event) -> None:
+        """Connect WS, drive subscription/consume/snapshot loops until stopped.
+
+        Args:
+            stop_event: Cooperative shutdown signal set by the scheduler.
+        """
+        await self._ws.connect()
+        tasks: list[asyncio.Task[None]] = [
+            asyncio.create_task(self._subscription_refresh_loop(stop_event)),
+            asyncio.create_task(self._consume_loop(stop_event)),
+            asyncio.create_task(self._snapshot_loop(stop_event)),
+        ]
+        try:
+            await stop_event.wait()
+        finally:
+            with contextlib.suppress(Exception):
+                await self._ws.close()
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+
+    async def _subscription_refresh_loop(self, stop_event: asyncio.Event) -> None:
+        """Refresh the subscription set immediately, then on a cadence."""
+        interval = self._config.subscription_refresh_seconds
+        while not stop_event.is_set():
+            try:
+                await self._sub_mgr.refresh()
+            except Exception:
+                _LOG.exception("ticks.subscription_refresh_failed")
+            if await _wait_or_stop(stop_event, interval):
+                return
+
+    async def _consume_loop(self, stop_event: asyncio.Event) -> None:
+        """Consume WS messages and dispatch to the book applier until stopped."""
+        try:
+            async for msg in self._ws.messages():
+                if stop_event.is_set():
+                    return
+                if not isinstance(msg, WsBookMessage):
+                    continue
+                try:
+                    await self._applier.apply(msg)
+                except Exception:
+                    _LOG.exception("ticks.handle_message_failed")
+        except Exception:
+            _LOG.exception("ticks.consume_loop_failed")
+
+    async def _snapshot_loop(self, stop_event: asyncio.Event) -> None:
+        """Run ``snapshot_once`` every ``tick_interval_seconds`` until stopped."""
+        interval = self._config.tick_interval_seconds
+        while not stop_event.is_set():
+            if await _wait_or_stop(stop_event, interval):
+                return
+            try:
+                await self.snapshot_once()
+            except Exception:
+                _LOG.exception("ticks.snapshot_iteration_failed")
+
+    async def snapshot_once(self) -> int:
+        """Walk in-memory orderbook state, write one row per asset.
+
+        Each newly-inserted row is also published as a :class:`TickEvent` to
+        the configured :class:`BroadcastTickStream` (when one is wired) so
+        tick-consuming detectors can react in real time.
+
+        Returns:
+            Number of rows newly inserted.
+        """
+        snapshot_at = int(time.time())
+        books_copy = await self._applier.snapshot()
+        condition_lookup = await self._sub_mgr.asset_to_condition_snapshot()
+        inserted = 0
+        for asset_id, book in books_copy:
+            if not asset_id:
+                continue
+            tick = self._writer.write(
+                asset_id=asset_id,
+                book=book,
+                condition_lookup=condition_lookup,
+                snapshot_at=snapshot_at,
+            )
+            if tick is None:
+                continue
+            inserted += 1
+            await self._maybe_publish(asset_id=asset_id, tick=tick)
+        _LOG.info("ticks.snapshot_complete", assets=len(books_copy), inserted=inserted)
+        return inserted
+
     async def _maybe_publish(self, *, asset_id: AssetId, tick: MarketTick) -> None:
         """Publish a :class:`TickEvent` for ``tick`` when a stream is wired."""
         if self._tick_stream is None:
@@ -486,21 +643,6 @@ class MarketTickCollector:
         )
         await self._tick_stream.publish(event)
 
-    def _record_mid_history(self, asset_id: AssetId, *, snapshot_at: int, mid: float) -> None:
-        """Append ``(snapshot_at, mid)`` to the asset's history ring buffer."""
-        history = self._mid_history.setdefault(asset_id, [])
-        history.append((snapshot_at, mid))
-        if len(history) > _MID_HISTORY_CAP:
-            del history[: len(history) - _MID_HISTORY_CAP]
-
-    def _record_tick_history(self, asset_id: AssetId, *, tick: MarketTick) -> None:
-        """Append a full ``MarketTick`` row to the asset's tick ring buffer."""
-        history = self._tick_history.get(asset_id)
-        if history is None:
-            history = collections.deque(maxlen=_MID_HISTORY_CAP)
-            self._tick_history[asset_id] = history
-        history.append(tick)
-
     def get_recent_mids(
         self,
         asset_id: AssetId,
@@ -511,20 +653,9 @@ class MarketTickCollector:
 
         Legacy helper kept for depth filters and ad-hoc queries; live
         tick-driven detectors should subscribe to the
-        :class:`~pscanner.poly.tick_stream.TickStream` instead. Reads from
-        in-memory state appended on each successful ``snapshot_once`` write.
-
-        Args:
-            asset_id: CLOB token id.
-            window_seconds: Inclusive trailing window length (seconds).
-
-        Returns:
-            Pairs ordered by ``snapshot_at`` ascending.
+        :class:`~pscanner.poly.tick_stream.TickStream` instead.
         """
-        now = int(time.time())
-        cutoff = now - window_seconds
-        history = self._mid_history.get(asset_id, [])
-        return [(ts, mid) for ts, mid in history if ts > cutoff]
+        return self._writer.get_recent_mids(asset_id, window_seconds=window_seconds)
 
     def get_recent_ticks(
         self,
@@ -536,20 +667,8 @@ class MarketTickCollector:
 
         Legacy helper kept for liquidity-aware filters that need full tick
         fields (depth, spread) outside the live tick-stream path.
-
-        Args:
-            asset_id: CLOB token id.
-            window_seconds: Inclusive trailing window length (seconds).
-
-        Returns:
-            ``MarketTick`` rows ordered by ``snapshot_at`` ascending.
         """
-        now = int(time.time())
-        cutoff = now - window_seconds
-        history = self._tick_history.get(asset_id)
-        if history is None:
-            return []
-        return [tick for tick in history if tick.snapshot_at > cutoff]
+        return self._writer.get_recent_ticks(asset_id, window_seconds=window_seconds)
 
     def get_market_for_asset(self, asset_id: AssetId) -> CachedMarket | None:
         """Return the cached market for ``asset_id`` or ``None`` if unknown.
@@ -558,7 +677,7 @@ class MarketTickCollector:
         metadata before publishing. Also exposed for ad-hoc lookups; live
         tick-consuming detectors read the metadata directly off the
         :class:`TickEvent` rather than calling this. Populated during
-        ``_refresh_subscriptions`` from the volume-floor market iteration.
+        subscription refresh from the volume-floor market iteration.
 
         Args:
             asset_id: CLOB token id.
@@ -567,11 +686,11 @@ class MarketTickCollector:
             The mapped :class:`CachedMarket`, or ``None`` if no mapping exists
             (asset unknown, market cache not wired, or wallet-only asset).
         """
-        return self._asset_to_market.get(asset_id)
+        return self._sub_mgr.get_market(asset_id)
 
     def subscribed_asset_ids(self) -> set[AssetId]:
         """Return a copy of the currently-subscribed asset id set."""
-        return self._subscribed.copy()
+        return self._sub_mgr.subscribed_asset_ids()
 
 
 def _ingest_position(

@@ -5,8 +5,7 @@ On miss, call gamma ``/markets?clob_token_ids=<tokenId>`` exactly once, upsert b
 tables, then resolve from the just-written rows.
 
 Used by:
-  - ``scripts/watch_subgraph_copy.py`` (the subgraph copy-trader)
-  - ``pscanner.collectors.subgraph_trades.SubgraphTradeCollector`` (issue #152, pending)
+  - ``pscanner.collectors.subgraph_trades.SubgraphTradeCollector``
 
 Out of scope: negative caching for tokens gamma can't resolve. If the daemon sees
 the same unresolvable token on every poll, the log volume signals a follow-up.
