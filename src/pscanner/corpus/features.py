@@ -355,14 +355,6 @@ class HistoryProvider(Protocol):
         ...
 
 
-_SECONDS_PER_DAY = 86_400
-_MIN_PRICES_FOR_VOLATILITY = 2
-# Minimum resolved buys for full confidence in per-wallet edge estimates.
-# Below this threshold features are linearly discounted toward zero.
-_CONFIDENCE_N_MIN = 20
-_HIGH_QUALITY_WIN_RATE_THRESHOLD = 0.55
-
-
 def compute_features(trade: Trade, history: HistoryProvider) -> FeatureRow:
     """Compute the full feature row for a trade, point-in-time correct.
 
