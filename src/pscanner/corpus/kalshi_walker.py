@@ -15,8 +15,6 @@ L3-enabling social-API path is tracked separately as #95.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 import structlog
 
 from pscanner.corpus.repos import (
@@ -27,6 +25,7 @@ from pscanner.corpus.repos import (
 from pscanner.kalshi.client import KalshiClient
 from pscanner.kalshi.ids import KalshiMarketTicker
 from pscanner.kalshi.models import KalshiTrade
+from pscanner.kalshi.shared import iso_to_epoch
 
 _log = structlog.get_logger(__name__)
 
@@ -108,24 +107,6 @@ def _to_corpus_trade(trade: KalshiTrade, *, market_ticker: KalshiMarketTicker) -
         price=price,
         size=trade.count_fp,
         notional_usd=trade.count_fp * price,
-        ts=_iso_to_epoch(trade.created_time, fallback=0),
+        ts=iso_to_epoch(trade.created_time, fallback=0),
         platform="kalshi",
     )
-
-
-def _iso_to_epoch(iso: str, *, fallback: int) -> int:
-    """Parse an ISO 8601 datetime string to epoch seconds.
-
-    Returns ``fallback`` if the input is empty or unparseable. Kalshi wire
-    format is ``"2026-05-04T12:00:00Z"``; ``datetime.fromisoformat`` handles
-    the trailing ``Z`` since Python 3.11.
-    """
-    if not iso:
-        return fallback
-    try:
-        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-    except ValueError:
-        return fallback
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return int(dt.timestamp())

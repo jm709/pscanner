@@ -145,3 +145,28 @@ def test_resolution_heap_drains_in_order() -> None:
     assert state_10k.prior_resolved_buys == 3
     assert state_10k.prior_wins == 2
     assert state_10k.prior_losses == 1
+
+
+def test_iter_wallet_states_yields_all_observed_wallets() -> None:
+    """``iter_wallet_states`` mirrors per-wallet ``wallet_state`` lookups."""
+    provider = StreamingHistoryProvider(
+        metadata={"cond1": _meta("cond1"), "cond2": _meta("cond2")},
+    )
+    provider.observe(_trade(tx_hash="0xa", wallet_address="0xalice", ts=100))
+    provider.observe(_trade(tx_hash="0xb", wallet_address="0xbob", condition_id="cond2", ts=200))
+    seen = dict(provider.iter_wallet_states())
+    assert set(seen) == {"0xalice", "0xbob"}
+    # Snapshot equals the wallet_state() lookup at a ts past every event.
+    assert seen["0xalice"] == provider.wallet_state("0xalice", as_of_ts=10_000)
+
+
+def test_iter_market_states_yields_all_observed_markets() -> None:
+    """``iter_market_states`` mirrors per-market ``market_state`` lookups."""
+    provider = StreamingHistoryProvider(
+        metadata={"cond1": _meta("cond1"), "cond2": _meta("cond2")},
+    )
+    provider.observe(_trade(tx_hash="0xa", ts=100))
+    provider.observe(_trade(tx_hash="0xb", condition_id="cond2", ts=200))
+    seen = dict(provider.iter_market_states())
+    assert set(seen) == {"cond1", "cond2"}
+    assert seen["cond1"] == provider.market_state("cond1", as_of_ts=10_000)

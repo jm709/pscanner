@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import heapq
 from collections import deque
+from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from typing import Protocol
 
@@ -355,14 +356,6 @@ class HistoryProvider(Protocol):
         ...
 
 
-_SECONDS_PER_DAY = 86_400
-_MIN_PRICES_FOR_VOLATILITY = 2
-# Minimum resolved buys for full confidence in per-wallet edge estimates.
-# Below this threshold features are linearly discounted toward zero.
-_CONFIDENCE_N_MIN = 20
-_HIGH_QUALITY_WIN_RATE_THRESHOLD = 0.55
-
-
 def compute_features(trade: Trade, history: HistoryProvider) -> FeatureRow:
     """Compute the full feature row for a trade, point-in-time correct.
 
@@ -561,3 +554,26 @@ class StreamingHistoryProvider:
             condition_id,
             empty_market_state(market_age_start_ts=0),
         )
+
+    def iter_wallet_states(self) -> Iterator[tuple[str, WalletState]]:
+        """Yield ``(wallet_address, WalletState)`` for every observed wallet.
+
+        Iterates the provider's currently-resolved wallet state — does
+        NOT drain pending resolutions for any wallet. Callers that need
+        point-in-time state for a specific ts should use
+        :meth:`wallet_state` instead.
+
+        Provides a stable seam for cold-start bootstrap consumers that
+        previously reached into ``provider._wallets`` directly.
+        """
+        for wallet_address, accum in self._wallets.items():
+            yield wallet_address, accum.state
+
+    def iter_market_states(self) -> Iterator[tuple[str, MarketState]]:
+        """Yield ``(condition_id, MarketState)`` for every observed market.
+
+        Iterates the provider's currently-resolved market state.
+        Provides a stable seam for cold-start bootstrap consumers that
+        previously reached into ``provider._markets`` directly.
+        """
+        yield from self._markets.items()

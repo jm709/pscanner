@@ -32,7 +32,7 @@ import numpy as np
 import xgboost as xgb
 
 from pscanner.ml.preprocessing import OneHotEncoder
-from pscanner.ml.streaming import open_dataset
+from pscanner.ml.streaming import _temp_split_conn, open_dataset
 
 _BINARY_DECISION_THRESHOLD = 0.5
 
@@ -155,25 +155,16 @@ def _load_test_cat_columns(
     """
     if not test_markets:
         return {col: np.zeros(0, dtype=np.int8) for col in _CAT_COLUMNS}
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("DROP TABLE IF EXISTS _analyze_test")
-        conn.execute("CREATE TEMP TABLE _analyze_test (condition_id TEXT PRIMARY KEY)")
-        conn.executemany(
-            "INSERT INTO _analyze_test VALUES (?)",
-            [(cid,) for cid in test_markets],
-        )
-        cols = ", ".join(_CAT_COLUMNS)
-        rows = conn.execute(
-            f"SELECT {cols} FROM training_examples te "  # noqa: S608 -- cols literal
-            "JOIN _analyze_test sm USING (condition_id) "
-            "WHERE te.platform = ? "
-            "ORDER BY te.id",
-            (platform,),
-        ).fetchall()
-    finally:
-        conn.close()
+    cols = ", ".join(_CAT_COLUMNS)
+    sql = (
+        f"SELECT {cols} FROM training_examples te "  # noqa: S608 -- cols literal
+        "JOIN _split_markets sm USING (condition_id) "
+        "WHERE te.platform = ? "
+        "ORDER BY te.id"
+    )
+    with _temp_split_conn(db_path, test_markets) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(sql, (platform,)).fetchall()
     out: dict[str, np.ndarray] = {}
     for col in _CAT_COLUMNS:
         out[col] = np.array([row[col] for row in rows], dtype=np.int8)

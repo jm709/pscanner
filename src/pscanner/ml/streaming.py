@@ -21,6 +21,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Final
 
 import numpy as np
 import polars as pl
@@ -113,9 +114,7 @@ class StreamingDataset:
             "WHERE te.platform = ? "
             "ORDER BY te.id"
         )
-        conn = sqlite3.connect(str(self._db_path))
-        try:
-            _populate_temp_table(conn, "_split_markets", self._val_markets)
+        with _temp_split_conn(self._db_path, self._val_markets) as conn:
             cursor = conn.execute(sql, (self._platform,))
             offset = 0
             while True:
@@ -127,8 +126,6 @@ class StreamingDataset:
                     y[offset + i] = int(label)
                     implied[offset + i] = float(prob)
                 offset = end
-        finally:
-            conn.close()
 
         return y, implied
 
@@ -162,29 +159,20 @@ class StreamingDataset:
             implied[offset:end] = implied_chunk
             offset = end
 
-        # Parallel small SELECT for unencoded top_category strings.
-        # Mirrors the deleted _extract_top_category: nulls become "".
-        # Bulk fetchall + np.array is multiple orders of magnitude faster than
-        # the per-row loop pattern at corpus scale (~2M rows takes seconds vs
-        # ~10+ minutes for the row-at-a-time numpy assignment).
-        sql = (
+        # Parallel small SELECTs for unencoded top_category + total_volume_usd
+        # share one connection + one _split_markets temp table. Bulk fetchall +
+        # np.array is multiple orders of magnitude faster than the per-row loop
+        # pattern at corpus scale.
+        sql_top_category = (
             "SELECT COALESCE(te.top_category, '') "
             "FROM training_examples te "
             "JOIN _split_markets sm USING (condition_id) "
             "WHERE te.platform = ? "
             "ORDER BY te.id"
         )
-        conn = sqlite3.connect(str(self._db_path))
-        try:
-            _populate_temp_table(conn, "_split_markets", self._test_markets)
-            rows = conn.execute(sql, (self._platform,)).fetchall()
-        finally:
-            conn.close()
-        top_categories = np.array([r[0] for r in rows], dtype=object)
-
-        # Parallel small SELECT for total_volume_usd, JOINed to corpus_markets
-        # via (platform, condition_id). Used by per_volume_bucket_edge_breakdown
-        # (#109) to stratify the test edge by market lifetime volume.
+        # total_volume_usd JOINs corpus_markets via (platform, condition_id).
+        # Used by per_volume_bucket_edge_breakdown (#109) to stratify the test
+        # edge by market lifetime volume.
         sql_volume = (
             "SELECT COALESCE(cm.total_volume_usd, 0.0) "
             "FROM training_examples te "
@@ -195,12 +183,10 @@ class StreamingDataset:
             "WHERE te.platform = ? "
             "ORDER BY te.id"
         )
-        conn = sqlite3.connect(str(self._db_path))
-        try:
-            _populate_temp_table(conn, "_split_markets", self._test_markets)
+        with _temp_split_conn(self._db_path, self._test_markets) as conn:
+            top_rows = conn.execute(sql_top_category, (self._platform,)).fetchall()
             volume_rows = conn.execute(sql_volume, (self._platform,)).fetchall()
-        finally:
-            conn.close()
+        top_categories = np.array([r[0] for r in top_rows], dtype=object)
         total_volume_usd = np.array([r[0] for r in volume_rows], dtype=np.float32)
 
         return TestSplit(
@@ -261,6 +247,9 @@ def _partition_markets(
     return train, val, test
 
 
+_SPLIT_TABLE: Final[str] = "_split_markets"
+
+
 def _populate_temp_table(
     conn: sqlite3.Connection,
     table_name: str,
@@ -284,6 +273,29 @@ def _populate_temp_table(
         f"INSERT INTO {table_name} VALUES (?)",  # noqa: S608 -- table_name is a module-internal literal
         [(cid,) for cid in condition_ids],
     )
+
+
+@contextmanager
+def _temp_split_conn(
+    db_path: Path,
+    condition_ids: frozenset[str],
+    *,
+    table_name: str = _SPLIT_TABLE,
+) -> Iterator[sqlite3.Connection]:
+    """Yield an open sqlite3 connection seeded with the split temp table.
+
+    Bundles the "open / populate / close" pattern that ``val_aux``,
+    ``materialize_test``, ``_SplitIter.__iter__``, and
+    ``scripts/analyze_model.py:_load_test_cat_columns`` all use against
+    the same ``condition_ids`` frozenset. The temp table lifetime is
+    scoped to the yielded connection.
+    """
+    conn = sqlite3.connect(str(db_path))
+    try:
+        _populate_temp_table(conn, table_name, condition_ids)
+        yield conn
+    finally:
+        conn.close()
 
 
 def _fit_encoder_on_train(
@@ -410,17 +422,13 @@ class _SplitIter:
             "ORDER BY te.id"
         )
         col_names = (*self.kept_cols, "resolved_at")
-        conn = sqlite3.connect(str(self.db_path))
-        try:
-            _populate_temp_table(conn, "_split_markets", self.condition_ids)
+        with _temp_split_conn(self.db_path, self.condition_ids) as conn:
             cursor = conn.execute(sql, (self.platform,))
             while True:
                 rows = cursor.fetchmany(self.chunk_size)
                 if not rows:
                     return
                 yield self._encode_chunk(rows, col_names)
-        finally:
-            conn.close()
 
     def _encode_chunk(
         self,
