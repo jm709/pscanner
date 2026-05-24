@@ -1,9 +1,10 @@
-"""Subgraph-driven backfill of `corpus_trades` (Phase 3).
+"""Subgraph-driven backfill of `corpus_trades`.
 
-Adapter, paginator, and orchestrator that replace the eth_getLogs path
-in ``pscanner.corpus.onchain_targeted``. Reuses the Phase 2 decoder
-output type (``OrderFilledEvent``) and ``event_to_corpus_trade`` so the
-maker-POV BUY/SELL semantics stay identical.
+Adapter, paginator, and orchestrator that walk Polymarket's Orderbook
+subgraph for `OrderFilledEvent` rows and write to `corpus_trades`. Reuses
+the ``OrderFilledEvent`` dataclass and ``event_to_corpus_trade`` helper
+from ``pscanner.poly.onchain_ingest`` so the maker-POV BUY/SELL semantics
+match the eth_getLogs decoder that this module replaced.
 """
 
 from __future__ import annotations
@@ -16,7 +17,6 @@ from typing import Any, cast
 
 import structlog
 
-from pscanner.corpus.onchain_backfill import clear_truncation_flags
 from pscanner.corpus.repos import AssetIndexRepo, CorpusTrade, CorpusTradesRepo
 from pscanner.poly.onchain import OrderFilledEvent
 from pscanner.poly.onchain_ingest import (
@@ -27,6 +27,53 @@ from pscanner.poly.onchain_ingest import (
 from pscanner.poly.subgraph import SubgraphClient
 
 _LOG = structlog.get_logger(__name__)
+
+
+def _clear_truncation_flags(conn: sqlite3.Connection, *, threshold: int = 3000) -> int:
+    """Refresh `corpus_markets.onchain_trades_count` and clear truncation flags.
+
+    For every market where `truncated_at_offset_cap = 1`, count its rows in
+    `corpus_trades`, persist that as `onchain_trades_count`, and clear the
+    truncation flag iff the count is at or above `threshold` (default
+    3000 = the REST `/trades` offset cap).
+
+    Inlined from the deleted ``pscanner.corpus.onchain_backfill`` module;
+    ``run_subgraph_backfill`` is the only remaining caller.
+    """
+    rows = conn.execute(
+        """
+        SELECT m.condition_id, COUNT(t.tx_hash) AS row_count
+        FROM corpus_markets m
+        LEFT JOIN corpus_trades t USING (condition_id)
+        WHERE m.truncated_at_offset_cap = 1
+        GROUP BY m.condition_id
+        """
+    ).fetchall()
+    cleared = 0
+    for row in rows:
+        cid = row["condition_id"]
+        count = int(row["row_count"])
+        new_flag = 0 if count >= threshold else 1
+        conn.execute(
+            """
+            UPDATE corpus_markets
+            SET onchain_trades_count = ?,
+                truncated_at_offset_cap = ?
+            WHERE condition_id = ?
+            """,
+            (count, new_flag, cid),
+        )
+        if new_flag == 0:
+            cleared += 1
+    conn.commit()
+    _LOG.info(
+        "subgraph.truncation_clearance_done",
+        markets_examined=len(rows),
+        cleared=cleared,
+        threshold=threshold,
+    )
+    return cleared
+
 
 _REQUIRED_KEYS = (
     "id",  # consumed by _paginate_side cursor logic, not by the adapter
@@ -406,7 +453,7 @@ async def run_subgraph_backfill(
         limit: Process at most ``N`` markets in this run.
         truncation_threshold: Trade count at or above which
             ``truncated_at_offset_cap`` is cleared for a market. Mirrors
-            ``clear_truncation_flags``'s default of 3000.
+            ``_clear_truncation_flags``'s default of 3000.
     """
     pending = _load_pending_markets(conn, limit=limit)
     _LOG.info("subgraph.start", markets=len(pending))
@@ -457,7 +504,7 @@ async def run_subgraph_backfill(
                 error=str(exc),
             )
 
-    cleared = clear_truncation_flags(conn=conn) if processed > 0 else 0
+    cleared = _clear_truncation_flags(conn) if processed > 0 else 0
 
     summary = SubgraphRunSummary(
         markets_processed=processed,
