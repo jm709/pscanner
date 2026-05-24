@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import heapq
 from collections import deque
+from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from typing import Protocol
 
@@ -553,3 +554,26 @@ class StreamingHistoryProvider:
             condition_id,
             empty_market_state(market_age_start_ts=0),
         )
+
+    def iter_wallet_states(self) -> Iterator[tuple[str, WalletState]]:
+        """Yield ``(wallet_address, WalletState)`` for every observed wallet.
+
+        Iterates the provider's currently-resolved wallet state — does
+        NOT drain pending resolutions for any wallet. Callers that need
+        point-in-time state for a specific ts should use
+        :meth:`wallet_state` instead.
+
+        Provides a stable seam for cold-start bootstrap consumers that
+        previously reached into ``provider._wallets`` directly.
+        """
+        for wallet_address, accum in self._wallets.items():
+            yield wallet_address, accum.state
+
+    def iter_market_states(self) -> Iterator[tuple[str, MarketState]]:
+        """Yield ``(condition_id, MarketState)`` for every observed market.
+
+        Iterates the provider's currently-resolved market state.
+        Provides a stable seam for cold-start bootstrap consumers that
+        previously reached into ``provider._markets`` directly.
+        """
+        yield from self._markets.items()
