@@ -315,13 +315,13 @@ async def test_subscription_refresh_wallet_positions(
         data_client=data_client,
         gamma_client=gamma,
     )
-    await collector._refresh_subscriptions()
+    await collector._sub_mgr.refresh()
     assert ws.subscribe.await_count == 1
     subscribed_arg = ws.subscribe.await_args.args[0]
     assert sorted(subscribed_arg) == ["A1", "A2"]
     assert collector.subscribed_asset_ids() == {"A1", "A2"}
-    assert collector._asset_to_condition[AssetId("A1")] == "0xcond1"
-    assert collector._asset_to_condition[AssetId("A2")] == "0xcond1"
+    assert collector._sub_mgr._asset_to_condition[AssetId("A1")] == "0xcond1"
+    assert collector._sub_mgr._asset_to_condition[AssetId("A2")] == "0xcond1"
 
 
 async def test_subscription_refresh_volume_floor(
@@ -355,7 +355,7 @@ async def test_subscription_refresh_volume_floor(
         gamma_client=gamma,
         config=TicksConfig(tick_volume_floor_usd=10_000.0),
     )
-    await collector._refresh_subscriptions()
+    await collector._sub_mgr.refresh()
     assert ws.subscribe.await_count == 1
     subscribed = ws.subscribe.await_args.args[0]
     assert sorted(subscribed) == ["A1", "A2", "C1", "C2"]
@@ -377,7 +377,7 @@ async def test_max_assets_cap(tmp_db: sqlite3.Connection) -> None:
         gamma_client=gamma,
         config=TicksConfig(max_assets=3),
     )
-    await collector._refresh_subscriptions()
+    await collector._sub_mgr.refresh()
     assert ws.subscribe.await_count == 1
     subscribed = ws.subscribe.await_args.args[0]
     assert len(subscribed) == 3
@@ -402,8 +402,8 @@ async def test_subscription_is_incremental(tmp_db: sqlite3.Connection) -> None:
         data_client=data_client,
         gamma_client=gamma,
     )
-    await collector._refresh_subscriptions()
-    await collector._refresh_subscriptions()
+    await collector._sub_mgr.refresh()
+    await collector._sub_mgr.refresh()
     assert ws.subscribe.await_count == 1
 
 
@@ -469,7 +469,7 @@ async def test_volume_floor_skips_markets_with_orderbook_disabled(
         tmp_db=tmp_db,
         gamma_client=gamma,
     )
-    await collector._refresh_subscriptions()
+    await collector._sub_mgr.refresh()
     subscribed = ws.subscribe.await_args.args[0]
     assert sorted(subscribed) == ["B1"]
 
@@ -542,7 +542,7 @@ async def test_get_market_for_asset_populated_on_refresh(
         gamma_client=gamma,
         market_cache=market_cache,
     )
-    await collector._refresh_subscriptions()
+    await collector._sub_mgr.refresh()
     assert collector.get_market_for_asset(AssetId("A1")) is cached
     assert collector.get_market_for_asset(AssetId("A2")) is cached
     market_cache.get.assert_called_with("m1")
@@ -574,7 +574,7 @@ async def test_get_market_for_asset_without_market_cache_returns_none(
         tmp_db=tmp_db,
         gamma_client=gamma,
     )
-    await collector._refresh_subscriptions()
+    await collector._sub_mgr.refresh()
     assert collector.get_market_for_asset(AssetId("A1")) is None
 
 
@@ -640,7 +640,7 @@ async def test_snapshot_publishes_event_to_stream(tmp_db: sqlite3.Connection) ->
         market_cache=market_cache,
         tick_stream=stream,
     )
-    await collector._refresh_subscriptions()
+    await collector._sub_mgr.refresh()
     await collector._applier.apply(
         _book_msg(
             asset_id="A1",

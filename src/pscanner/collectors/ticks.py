@@ -187,121 +187,41 @@ class _BookApplier:
         return out
 
 
-class MarketTickCollector:
-    """Maintains an in-memory orderbook per subscribed asset and writes ticks.
+class _SubscriptionManager:
+    """Owns the WS subscription set + the asset→condition / asset→market maps.
 
-    Owns its own ``MarketWebSocket`` connection (separate from any other WS
-    consumer). Subscription scope = (assets held by watched wallets) U (active
-    markets above ``tick_volume_floor_usd``), capped at ``max_assets``.
+    Refresh cycle: enumerate (assets held by watched wallets) UNION (active
+    markets above ``tick_volume_floor_usd``), cap at ``max_assets`` preferring
+    wallet assets, then send subscribe frames for any new ids.
+
+    Locking: only the ``_asset_to_condition`` updates and reads are serialized
+    via ``self._lock`` — that's the dict snapshot_once needs a consistent view
+    of. ``_asset_to_market`` and ``_subscribed`` are written by the single
+    refresh task so they don't need a lock (preserves the pre-split shape).
     """
-
-    name: str = "tick_collector"
 
     def __init__(
         self,
         *,
         config: TicksConfig,
         ws: MarketWebSocket,
-        gamma_client: GammaClient,
-        data_client: DataClient,
+        gamma: GammaClient,
+        data: DataClient,
         registry: WatchlistRegistry,
-        ticks_repo: MarketTicksRepo,
-        market_cache: MarketCacheRepo | None = None,
-        tick_stream: BroadcastTickStream | None = None,
+        market_cache: MarketCacheRepo | None,
     ) -> None:
-        """Build the collector. See module docstring for behaviour.
-
-        Args:
-            config: Ticks-section settings (cadence, scope, caps).
-            ws: Owned ``MarketWebSocket`` connection.
-            gamma_client: Source of active markets for the volume-floor scope.
-            data_client: Source of wallet positions for the wallet scope.
-            registry: Watchlist registry naming the wallets to follow.
-            ticks_repo: Persistence for the per-asset tick rows.
-            market_cache: Optional repo used to resolve ``asset_id`` →
-                :class:`CachedMarket` for downstream detector enrichment. When
-                ``None``, ``get_market_for_asset`` always returns ``None``.
-            tick_stream: Optional :class:`BroadcastTickStream` to publish a
-                :class:`TickEvent` on every successful tick insert. When
-                ``None`` the collector runs without fan-out (legacy mode).
-        """
         self._config = config
         self._ws = ws
-        self._gamma = gamma_client
-        self._data = data_client
+        self._gamma = gamma
+        self._data = data
         self._registry = registry
-        self._repo = ticks_repo
         self._market_cache = market_cache
-        self._tick_stream = tick_stream
-        self._applier = _BookApplier()
-        self._asset_to_condition: dict[AssetId, ConditionId] = {}
-        self._mid_history: dict[AssetId, list[tuple[int, float]]] = {}
-        self._tick_history: dict[AssetId, collections.deque[MarketTick]] = {}
-        self._asset_to_market: dict[AssetId, CachedMarket] = {}
         self._subscribed: set[AssetId] = set()
+        self._asset_to_condition: dict[AssetId, ConditionId] = {}
+        self._asset_to_market: dict[AssetId, CachedMarket] = {}
         self._lock = asyncio.Lock()
 
-    async def run(self, stop_event: asyncio.Event) -> None:
-        """Connect WS, drive subscription/consume/snapshot loops until stopped.
-
-        Args:
-            stop_event: Cooperative shutdown signal set by the scheduler.
-        """
-        await self._ws.connect()
-        tasks: list[asyncio.Task[None]] = [
-            asyncio.create_task(self._subscription_refresh_loop(stop_event)),
-            asyncio.create_task(self._consume_loop(stop_event)),
-            asyncio.create_task(self._snapshot_loop(stop_event)),
-        ]
-        try:
-            await stop_event.wait()
-        finally:
-            with contextlib.suppress(Exception):
-                await self._ws.close()
-            for task in tasks:
-                task.cancel()
-            for task in tasks:
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await task
-
-    async def _subscription_refresh_loop(self, stop_event: asyncio.Event) -> None:
-        """Refresh the subscription set immediately, then on a cadence."""
-        interval = self._config.subscription_refresh_seconds
-        while not stop_event.is_set():
-            try:
-                await self._refresh_subscriptions()
-            except Exception:
-                _LOG.exception("ticks.subscription_refresh_failed")
-            if await _wait_or_stop(stop_event, interval):
-                return
-
-    async def _consume_loop(self, stop_event: asyncio.Event) -> None:
-        """Consume WS messages and dispatch to the book applier until stopped."""
-        try:
-            async for msg in self._ws.messages():
-                if stop_event.is_set():
-                    return
-                if not isinstance(msg, WsBookMessage):
-                    continue
-                try:
-                    await self._applier.apply(msg)
-                except Exception:
-                    _LOG.exception("ticks.handle_message_failed")
-        except Exception:
-            _LOG.exception("ticks.consume_loop_failed")
-
-    async def _snapshot_loop(self, stop_event: asyncio.Event) -> None:
-        """Run ``snapshot_once`` every ``tick_interval_seconds`` until stopped."""
-        interval = self._config.tick_interval_seconds
-        while not stop_event.is_set():
-            if await _wait_or_stop(stop_event, interval):
-                return
-            try:
-                await self.snapshot_once()
-            except Exception:
-                _LOG.exception("ticks.snapshot_iteration_failed")
-
-    async def _refresh_subscriptions(self) -> None:
+    async def refresh(self) -> None:
         """Recompute the asset universe and subscribe to any new ids."""
         wallet_assets, wallet_lookup = await self._collect_wallet_assets()
         volume_assets, volume_lookup = await self._collect_volume_floor_assets(
@@ -328,6 +248,19 @@ class MarketTickCollector:
             assets=len(self._subscribed),
             new=len(new_ids),
         )
+
+    async def asset_to_condition_snapshot(self) -> dict[AssetId, ConditionId]:
+        """Return a shallow copy of the asset→condition lookup (lock-protected)."""
+        async with self._lock:
+            return dict(self._asset_to_condition)
+
+    def get_market(self, asset_id: AssetId) -> CachedMarket | None:
+        """Return the cached market for ``asset_id`` or ``None`` if unknown."""
+        return self._asset_to_market.get(asset_id)
+
+    def subscribed_asset_ids(self) -> set[AssetId]:
+        """Return a copy of the currently-subscribed asset id set."""
+        return self._subscribed.copy()
 
     async def _collect_wallet_assets(
         self,
@@ -423,6 +356,121 @@ class MarketTickCollector:
             except Exception:
                 _LOG.exception("ticks.subscribe_failed", batch_size=len(chunk))
 
+
+class MarketTickCollector:
+    """Maintains an in-memory orderbook per subscribed asset and writes ticks.
+
+    Owns its own ``MarketWebSocket`` connection (separate from any other WS
+    consumer). Subscription scope = (assets held by watched wallets) U (active
+    markets above ``tick_volume_floor_usd``), capped at ``max_assets``.
+    """
+
+    name: str = "tick_collector"
+
+    def __init__(
+        self,
+        *,
+        config: TicksConfig,
+        ws: MarketWebSocket,
+        gamma_client: GammaClient,
+        data_client: DataClient,
+        registry: WatchlistRegistry,
+        ticks_repo: MarketTicksRepo,
+        market_cache: MarketCacheRepo | None = None,
+        tick_stream: BroadcastTickStream | None = None,
+    ) -> None:
+        """Build the collector. See module docstring for behaviour.
+
+        Args:
+            config: Ticks-section settings (cadence, scope, caps).
+            ws: Owned ``MarketWebSocket`` connection.
+            gamma_client: Source of active markets for the volume-floor scope.
+            data_client: Source of wallet positions for the wallet scope.
+            registry: Watchlist registry naming the wallets to follow.
+            ticks_repo: Persistence for the per-asset tick rows.
+            market_cache: Optional repo used to resolve ``asset_id`` →
+                :class:`CachedMarket` for downstream detector enrichment. When
+                ``None``, ``get_market_for_asset`` always returns ``None``.
+            tick_stream: Optional :class:`BroadcastTickStream` to publish a
+                :class:`TickEvent` on every successful tick insert. When
+                ``None`` the collector runs without fan-out (legacy mode).
+        """
+        self._config = config
+        self._ws = ws
+        self._repo = ticks_repo
+        self._tick_stream = tick_stream
+        self._applier = _BookApplier()
+        self._sub_mgr = _SubscriptionManager(
+            config=config,
+            ws=ws,
+            gamma=gamma_client,
+            data=data_client,
+            registry=registry,
+            market_cache=market_cache,
+        )
+        self._mid_history: dict[AssetId, list[tuple[int, float]]] = {}
+        self._tick_history: dict[AssetId, collections.deque[MarketTick]] = {}
+
+    async def run(self, stop_event: asyncio.Event) -> None:
+        """Connect WS, drive subscription/consume/snapshot loops until stopped.
+
+        Args:
+            stop_event: Cooperative shutdown signal set by the scheduler.
+        """
+        await self._ws.connect()
+        tasks: list[asyncio.Task[None]] = [
+            asyncio.create_task(self._subscription_refresh_loop(stop_event)),
+            asyncio.create_task(self._consume_loop(stop_event)),
+            asyncio.create_task(self._snapshot_loop(stop_event)),
+        ]
+        try:
+            await stop_event.wait()
+        finally:
+            with contextlib.suppress(Exception):
+                await self._ws.close()
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+
+    async def _subscription_refresh_loop(self, stop_event: asyncio.Event) -> None:
+        """Refresh the subscription set immediately, then on a cadence."""
+        interval = self._config.subscription_refresh_seconds
+        while not stop_event.is_set():
+            try:
+                await self._sub_mgr.refresh()
+            except Exception:
+                _LOG.exception("ticks.subscription_refresh_failed")
+            if await _wait_or_stop(stop_event, interval):
+                return
+
+    async def _consume_loop(self, stop_event: asyncio.Event) -> None:
+        """Consume WS messages and dispatch to the book applier until stopped."""
+        try:
+            async for msg in self._ws.messages():
+                if stop_event.is_set():
+                    return
+                if not isinstance(msg, WsBookMessage):
+                    continue
+                try:
+                    await self._applier.apply(msg)
+                except Exception:
+                    _LOG.exception("ticks.handle_message_failed")
+        except Exception:
+            _LOG.exception("ticks.consume_loop_failed")
+
+    async def _snapshot_loop(self, stop_event: asyncio.Event) -> None:
+        """Run ``snapshot_once`` every ``tick_interval_seconds`` until stopped."""
+        interval = self._config.tick_interval_seconds
+        while not stop_event.is_set():
+            if await _wait_or_stop(stop_event, interval):
+                return
+            try:
+                await self.snapshot_once()
+            except Exception:
+                _LOG.exception("ticks.snapshot_iteration_failed")
+
     async def snapshot_once(self) -> int:
         """Walk in-memory orderbook state, write one row per asset.
 
@@ -435,8 +483,7 @@ class MarketTickCollector:
         """
         snapshot_at = int(time.time())
         books_copy = await self._applier.snapshot()
-        async with self._lock:
-            condition_lookup = dict(self._asset_to_condition)
+        condition_lookup = await self._sub_mgr.asset_to_condition_snapshot()
         inserted = 0
         for asset_id, book in books_copy:
             if not asset_id:
@@ -594,7 +641,7 @@ class MarketTickCollector:
         metadata before publishing. Also exposed for ad-hoc lookups; live
         tick-consuming detectors read the metadata directly off the
         :class:`TickEvent` rather than calling this. Populated during
-        ``_refresh_subscriptions`` from the volume-floor market iteration.
+        subscription refresh from the volume-floor market iteration.
 
         Args:
             asset_id: CLOB token id.
@@ -603,11 +650,11 @@ class MarketTickCollector:
             The mapped :class:`CachedMarket`, or ``None`` if no mapping exists
             (asset unknown, market cache not wired, or wallet-only asset).
         """
-        return self._asset_to_market.get(asset_id)
+        return self._sub_mgr.get_market(asset_id)
 
     def subscribed_asset_ids(self) -> set[AssetId]:
         """Return a copy of the currently-subscribed asset id set."""
-        return self._subscribed.copy()
+        return self._sub_mgr.subscribed_asset_ids()
 
 
 def _ingest_position(
