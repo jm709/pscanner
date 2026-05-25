@@ -35,6 +35,7 @@ from pscanner.alerts.terminal import TerminalRenderer
 from pscanner.collectors.base import Collector
 from pscanner.collectors.events import EventCollector
 from pscanner.collectors.markets import MarketCollector
+from pscanner.collectors.paper_trades_metadata import PaperTradesMetadataCollector
 from pscanner.collectors.subgraph_trades import SubgraphTradeCollector
 from pscanner.collectors.watchlist import WatchlistRegistry, WatchlistSyncer
 from pscanner.config import Config
@@ -208,6 +209,14 @@ class Scanner:
                 snapshot_max=self._config.events.snapshot_max,
             )
         self._maybe_attach_subgraph_trade_collector(collectors)
+        if self._config.paper_trading.enabled:
+            collectors["paper_trades_metadata"] = PaperTradesMetadataCollector(
+                db=self._db,
+                market_cache=self._market_cache_repo,
+                event_tag_cache=self._event_tag_cache_repo,
+                data_client=self._clients.data_client,
+                gamma_client=self._clients.gamma_client,
+            )
         return collectors
 
     def _maybe_attach_subgraph_trade_collector(
