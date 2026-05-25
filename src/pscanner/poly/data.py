@@ -1,10 +1,10 @@
 """Async client for Polymarket's data and leaderboard REST hosts.
 
 The data API (``https://data-api.polymarket.com``) covers a wallet's open
-positions, closed positions, and activity stream. The leaderboard lives on a
-separate host (``https://lb-api.polymarket.com``). This client multiplexes a
-single :class:`DataClient` over both, owning a second :class:`PolyHttpClient`
-internally for the leaderboard host.
+positions, activity stream, and per-market trade history. The leaderboard
+lives on a separate host (``https://lb-api.polymarket.com``). This client
+multiplexes a single :class:`DataClient` over both, owning a second
+:class:`PolyHttpClient` internally for the leaderboard host.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import httpx
 import structlog
 
 from pscanner.poly.http import PolyHttpClient
-from pscanner.poly.models import ClosedPosition, LeaderboardEntry, Position
+from pscanner.poly.models import LeaderboardEntry, Position
 
 _DATA_API_BASE_URL: Final[str] = "https://data-api.polymarket.com"
 _LB_API_BASE_URL: Final[str] = "https://lb-api.polymarket.com"
@@ -109,56 +109,6 @@ class DataClient:
         payload = await self._data_http.get("/positions", params=params)
         items = _ensure_list(payload, endpoint="/positions")
         return [Position.model_validate(item) for item in items]
-
-    async def get_closed_positions(
-        self,
-        address: str,
-        *,
-        limit: int = 500,
-    ) -> list[ClosedPosition]:
-        """Return a wallet's resolved (closed) positions for winrate computation.
-
-        Hits ``/v1/closed-positions`` on the data API. The legacy
-        ``/closed-positions`` path still works but is marked deprecated by the
-        server (``Deprecation: true``), so we use the v1 path directly.
-
-        Args:
-            address: 0x-prefixed proxy wallet address.
-            limit: Max number of positions to fetch.
-
-        Returns:
-            A list of ``ClosedPosition`` models, newest-first.
-        """
-        params: dict[str, Any] = {"user": address, "limit": limit}
-        payload = await self._data_http.get("/v1/closed-positions", params=params)
-        items = _ensure_list(payload, endpoint="/v1/closed-positions")
-        return [ClosedPosition.model_validate(item) for item in items]
-
-    async def get_settled_positions(
-        self,
-        address: str,
-        *,
-        limit: int = 500,
-    ) -> list[ClosedPosition]:
-        """Return ALL of a wallet's settled positions (wins + losses).
-
-        Hits ``GET /positions?user={address}&closed=true&limit={limit}`` on the
-        data API. Returns ALL settled positions (wins + losses), unlike the
-        legacy ``/v1/closed-positions`` which only returns redeemed winners
-        (and is hard-capped at 50 rows server-side regardless of ``limit``).
-
-        Args:
-            address: 0x-prefixed proxy wallet address.
-            limit: Max number of positions to fetch.
-
-        Returns:
-            A list of ``ClosedPosition`` models. The response shape matches the
-            standard ``/positions`` payload, so the existing model parses it.
-        """
-        params: dict[str, Any] = {"user": address, "closed": "true", "limit": limit}
-        payload = await self._data_http.get("/positions", params=params)
-        items = _ensure_list(payload, endpoint="/positions?closed=true")
-        return [ClosedPosition.model_validate(item) for item in items]
 
     async def get_activity(
         self,

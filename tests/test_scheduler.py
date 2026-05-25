@@ -122,7 +122,6 @@ def _make_clients(
     data_client = MagicMock()
     data_client.get_leaderboard = AsyncMock(return_value=[])
     data_client.get_positions = AsyncMock(return_value=[])
-    data_client.get_closed_positions = AsyncMock(return_value=[])
     data_client.get_activity = AsyncMock(return_value=[])
     data_client.get_market_trades = AsyncMock(return_value=[])
     data_client.aclose = AsyncMock()
