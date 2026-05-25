@@ -30,20 +30,18 @@ def _set_sentinel(db_path: Path, ts: int = 1_700_000_000) -> None:
         conn.close()
 
 
-def test_build_features_parser_accepts_engine_flag() -> None:
+def test_build_features_parser_accepts_force_flag() -> None:
     parser = build_corpus_parser()
-    args = parser.parse_args(
-        ["build-features", "--engine", "duckdb", "--force", "--db", "x.sqlite3"]
-    )
-    assert args.engine == "duckdb"
+    args = parser.parse_args(["build-features", "--force", "--db", "x.sqlite3"])
     assert args.force is True
 
 
-def test_build_features_parser_defaults_to_python_engine() -> None:
+def test_build_features_parser_defaults() -> None:
     parser = build_corpus_parser()
     args = parser.parse_args(["build-features", "--db", "x.sqlite3"])
-    assert args.engine == "python"
     assert args.force is False
+    assert args.reset_scratch is False
+    assert args.platform == "polymarket"
 
 
 @pytest.mark.asyncio
@@ -62,8 +60,8 @@ async def test_build_features_refuses_with_existing_sentinel(tmp_path: Path) -> 
         db=str(db),
         platform="polymarket",
         rebuild=True,
-        engine="python",
         force=False,
+        reset_scratch=False,
         duckdb_memory="1GB",
         duckdb_threads=2,
     )
@@ -80,7 +78,7 @@ async def test_build_features_refuses_with_stale_sentinel_and_no_force(tmp_path:
     _set_sentinel(db_path)
 
     with pytest.raises(SentinelAlreadySetError):
-        await run_corpus_command(["build-features", "--db", str(db_path), "--engine", "duckdb"])
+        await run_corpus_command(["build-features", "--db", str(db_path)])
 
 
 @pytest.mark.asyncio
@@ -108,16 +106,7 @@ async def test_build_features_reset_scratch_overrides_sentinel(
         lambda **_: 0,
     )
 
-    rc = await run_corpus_command(
-        [
-            "build-features",
-            "--db",
-            str(db_path),
-            "--engine",
-            "duckdb",
-            "--reset-scratch",
-        ]
-    )
+    rc = await run_corpus_command(["build-features", "--db", str(db_path), "--reset-scratch"])
     assert rc == 0
     assert not stale.exists()
 
