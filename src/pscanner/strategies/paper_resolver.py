@@ -7,6 +7,8 @@ outcome split, insert an exit row that books realized PnL.
 
 from __future__ import annotations
 
+from typing import TypeGuard
+
 import structlog
 
 from pscanner.alerts.sink import AlertSink
@@ -16,6 +18,7 @@ from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.ids import AssetId, ConditionId
 from pscanner.store.repo import (
+    CachedMarket,
     MarketCacheRepo,
     OpenPaperPosition,
     PaperTradesRepo,
@@ -29,23 +32,41 @@ _DEFINITIVE = 1.0
 _ZERO = 0.0
 
 
+def _is_resolved(cached: CachedMarket | None) -> TypeGuard[CachedMarket]:
+    """Return True iff ``cached``'s prices are a definitive ``[1, 0]`` split.
+
+    The ``cached.active`` flag is deliberately ignored: gamma reports
+    resolved markets as ``active=True closed=True`` with the definitive
+    price split, so ``active`` is unreliable as a resolution signal.
+    Polymarket prices clamp to the open ``(0, 1)`` interval on tradeable
+    markets — only resolved markets ever hit the ``0.0`` / ``1.0``
+    boundary — so the price-split check is sufficient on its own.
+    """
+    if cached is None:
+        return False
+    prices = cached.outcome_prices
+    if len(prices) != len(cached.asset_ids):
+        return False
+    if sum(prices) != _DEFINITIVE:
+        return False
+    return _DEFINITIVE in prices and _ZERO in prices
+
+
 def _check_resolution(
     market_cache: MarketCacheRepo,
     condition_id: ConditionId,
 ) -> AssetId | None:
     """Return the winning ``AssetId`` if the market has resolved, else None.
 
-    A market is considered resolved when ``active=False`` AND its
-    ``outcome_prices`` is a clean ``[1.0, 0.0]`` or ``[0.0, 1.0]`` split.
+    A market is considered resolved iff its ``outcome_prices`` is a clean
+    ``[1.0, 0.0]`` or ``[0.0, 1.0]`` split — see :func:`_is_resolved` for
+    why the ``active`` flag is not consulted.
     """
     cached = market_cache.get_by_condition_id(condition_id)
-    if cached is None or cached.active:
+    if not _is_resolved(cached):
         return None
-    prices = cached.outcome_prices
-    if len(prices) != len(cached.asset_ids):
-        return None
-    for price, asset_id in zip(prices, cached.asset_ids, strict=True):
-        if price == _DEFINITIVE and sum(prices) == _DEFINITIVE:
+    for price, asset_id in zip(cached.outcome_prices, cached.asset_ids, strict=True):
+        if price == _DEFINITIVE:
             return asset_id
     return None
 
@@ -119,9 +140,11 @@ class PaperResolver(PollingDetector):
         self,
         open_positions: list[OpenPaperPosition],
     ) -> None:
-        """Refresh stale-active entries in ``market_cache`` for open positions.
+        """Refresh ``market_cache`` rows for open positions that aren't yet resolved.
 
-        Covers any market still cached as ``active=True`` (or missing entirely).
+        Skips markets whose cache already shows the definitive
+        ``[1, 0]`` / ``[0, 1]`` resolution split — those don't need a
+        gamma round-trip because we already know the winner.
         Deduplicates by ``condition_id`` so twin positions on the same
         market only trigger one gamma call per scan. Sequential awaits —
         no ``gather`` — to keep gamma traffic predictable under the
@@ -135,7 +158,7 @@ class PaperResolver(PollingDetector):
                 continue
             seen.add(pos.condition_id)
             cached = self._market_cache.get_by_condition_id(pos.condition_id)
-            if cached is not None and not cached.active:
+            if _is_resolved(cached):
                 continue
             ok = await refresh_market_cache_row(
                 data_client=self._data_client,
