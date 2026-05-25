@@ -103,4 +103,7 @@ async def test_exception_logged_and_swallowed(tmp_db) -> None:
         )
 
     assert ok is False
-    assert any(entry["event"] == "market_cache.refresh.failed" for entry in logs)
+    assert any(
+        entry["event"] == "market_cache.refresh.failed" and entry.get("log_level") == "warning"
+        for entry in logs
+    )
