@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from pscanner.corpus.db import init_corpus_db
-from pscanner.corpus.features import (
+from pscanner.corpus.feature_projection import (
     MarketMetadata,
     StreamingHistoryProvider,
     Trade,

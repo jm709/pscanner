@@ -28,10 +28,9 @@ VOLUME_GATE_BY_CATEGORY_USD: Final[Mapping[Category, float]] = {
 }
 """Per-category lifetime-volume floors.
 
-Esports drops to ``$100K`` to match the live daemon's
-``gate_model_market_filter.min_volume_24h_usd = 100_000`` floor — the
-previous $1M corpus floor put the live polling target out of distribution
-relative to the training set (issue #109).
+Esports drops to ``$100K`` because the live volume gate that this floor
+was originally tuned to mirror was set there too; the previous $1M
+corpus floor excluded a meaningful chunk of esports volume (issue #109).
 
 Categories not listed fall through to :data:`_DEFAULT_VOLUME_GATE_USD`.
 """

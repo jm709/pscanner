@@ -34,19 +34,12 @@ from pscanner.alerts.sink import AlertSink
 from pscanner.alerts.terminal import TerminalRenderer
 from pscanner.collectors.base import Collector
 from pscanner.collectors.events import EventCollector
-from pscanner.collectors.market_scoped_trades import MarketScopedTradeCollector
 from pscanner.collectors.markets import MarketCollector
 from pscanner.collectors.subgraph_trades import SubgraphTradeCollector
 from pscanner.collectors.watchlist import WatchlistRegistry, WatchlistSyncer
 from pscanner.config import Config
 from pscanner.corpus.db import init_corpus_db
 from pscanner.corpus.repos import AssetIndexRepo
-from pscanner.daemon.corpus_loader import (
-    DEFAULT_CORPUS_DB,
-    load_corpus_metadata,
-    load_corpus_resolutions_into,
-)
-from pscanner.daemon.live_history import LiveHistoryProvider
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.http import PolyHttpClient
@@ -81,6 +74,8 @@ _LOG = structlog.get_logger(__name__)
 
 _GAMMA_BASE_URL = "https://gamma-api.polymarket.com"
 _DATA_BASE_URL = "https://data-api.polymarket.com"
+
+_DEFAULT_CORPUS_DB = Path("data/corpus.sqlite3")
 
 _MAX_RESTARTS = 3
 _RESTART_WINDOW_SECONDS = 300.0
@@ -130,7 +125,7 @@ class Scanner:
         self._corpus_conn: sqlite3.Connection | None = None
         self._subgraph_client: SubgraphClient | None = None
         if self._config.subgraph_trades.enabled:
-            self._corpus_conn = init_corpus_db(DEFAULT_CORPUS_DB)
+            self._corpus_conn = init_corpus_db(_DEFAULT_CORPUS_DB)
         self._tracked_repo = TrackedWalletsRepo(self._db)
         self._snapshots_repo = PositionSnapshotsRepo(self._db)
         self._market_cache_repo = MarketCacheRepo(self._db)
@@ -144,16 +139,6 @@ class Scanner:
         self._ticks_repo = MarketTicksRepo(self._db)
         self._clusters_repo = WalletClustersRepo(self._db)
         self._cluster_members_repo = WalletClusterMembersRepo(self._db)
-        self._live_history_provider: LiveHistoryProvider | None = None
-        if self._config.gate_model.enabled:
-            self._live_history_provider = LiveHistoryProvider(
-                conn=self._db,
-                metadata=load_corpus_metadata(platform=self._config.gate_model.platform),
-            )
-            load_corpus_resolutions_into(
-                self._live_history_provider,
-                platform=self._config.gate_model.platform,
-            )
         self._owns_clients = clients is None
         self._clients = clients or self._build_default_clients()
         self._renderer = TerminalRenderer()
@@ -221,14 +206,6 @@ class Scanner:
                 event_tag_cache=self._event_tag_cache_repo,
                 snapshot_interval_seconds=self._config.events.snapshot_interval_seconds,
                 snapshot_max=self._config.events.snapshot_max,
-            )
-        if self._config.gate_model_market_filter.enabled:
-            collectors["market_scoped_trades"] = MarketScopedTradeCollector(
-                config=self._config.gate_model_market_filter,
-                gamma=self._clients.gamma_client,
-                data_client=self._clients.data_client,
-                provider=self._live_history_provider,
-                market_cache=self._market_cache_repo,
             )
         self._maybe_attach_subgraph_trade_collector(collectors)
         return collectors
@@ -323,34 +300,10 @@ class Scanner:
     def preflight(self) -> None:
         """Run startup checks before entering the run loop.
 
-        When ``gate_model`` is enabled, refuses to start unless:
-        - ``wallet_state_live`` has been populated via
-          ``pscanner daemon bootstrap-features``.
-        - ``markets.enabled`` is true (the markets collector populates the
-          ``MarketCacheRepo`` that the gate-model live path depends on to
-          map ``asset_id`` to YES/NO; without it, every trade silently
-          drops — see issue #101).
-
         When ``subgraph_trades`` is enabled, refuses to start unless
         ``GRAPH_API_KEY`` is set in the environment — the SubgraphClient
         needs it to construct the gateway URL.
         """
-        if self._config.gate_model.enabled:
-            row = self._db.execute("SELECT 1 FROM wallet_state_live LIMIT 1").fetchone()
-            if row is None:
-                msg = (
-                    "gate_model.enabled=true but wallet_state_live is empty. "
-                    "Run `pscanner daemon bootstrap-features` first."
-                )
-                raise RuntimeError(msg)
-            if not self._config.markets.enabled:
-                msg = (
-                    "gate_model.enabled=true but markets.enabled=false. "
-                    "The gate-model detector requires the markets collector to "
-                    "populate MarketCacheRepo (used to map asset_id -> YES/NO). "
-                    "Set [markets] enabled = true in your config."
-                )
-                raise RuntimeError(msg)
         if self._config.subgraph_trades.enabled and not os.environ.get("GRAPH_API_KEY"):
             msg = (
                 "subgraph_trades.enabled=true but GRAPH_API_KEY is not set. "

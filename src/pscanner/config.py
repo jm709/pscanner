@@ -54,63 +54,6 @@ class EventsConfig(_Section):
     snapshot_max: int = 2000
 
 
-class GateModelConfig(_Section):
-    """Tunables for the gate-model detector (#79).
-
-    Loads ``model.json`` + ``preprocessor.json`` from ``artifact_dir`` once at
-    startup. Daemon must be restarted to pick up a new model artifact (hot
-    reload is a v2 follow-up per RFC #77).
-    """
-
-    enabled: bool = False
-    artifact_dir: Path = Field(default=Path("models/current"))
-    min_pred: float = 0.5
-    """Sanity floor — never bet on outcomes the model thinks are <50% likely
-    to win. The previous default ``0.7`` dominated the edge gate and
-    systematically excluded the long-shot mispricing signal (high edge,
-    low pred). See issue #106 for the realized-edge analysis behind this.
-    """
-    min_edge_pct: float = 0.05
-    """Meaningful edge floor (5pp). Pairs with the lowered ``min_pred=0.5``
-    so the gate does economic work instead of being a 1pp formality. See
-    issue #106.
-    """
-    accepted_categories: tuple[str, ...] | None = None
-    queue_max_size: int = 1024
-    platform: str = "polymarket"
-    """Platform whose corpus rows feed the live history tables.
-
-    Scopes ``LiveHistoryProvider`` metadata loading + ``bootstrap-features``
-    so the model is only fed rows from the platform it was trained on.
-    Default ``"polymarket"`` matches every shipped artifact today; bump
-    to ``"manifold"`` / ``"kalshi"`` once a per-platform model trains.
-    """
-
-
-class GateModelMarketFilterConfig(_Section):
-    """Tunables for the market-scoped trade collector (#79).
-
-    Enumerates open markets matching ``accepted_categories`` AND
-    ``volume_24h_usd >= min_volume_24h_usd``, then polls each on a cadence.
-    v1.0 ships esports-only; v1.1 flips the categories tuple.
-    """
-
-    enabled: bool = False
-    accepted_categories: tuple[str, ...] = ("esports",)
-    min_volume_24h_usd: float = 100_000
-    max_markets: int = 50
-    poll_interval_seconds: int = 60
-    min_outcome_price: float = 0.1
-    """Lower bound on every outcome's last-known price. Markets where any
-    outcome trades below this are skipped — they are typically post-decision
-    coin-flip-tail markets where ``implied_prob_at_buy`` is already at the
-    ceiling and ``pred - implied`` can never clear ``min_edge_pct``.
-    """
-    max_outcome_price: float = 0.9
-    """Upper bound on every outcome's last-known price (symmetric to
-    ``min_outcome_price``)."""
-
-
 class SubgraphTradeCollectorConfig(_Section):
     """Tunables for the live SubgraphTradeCollector (#152).
 
@@ -192,10 +135,6 @@ class Config(BaseModel):
     ratelimit: RatelimitConfig = Field(default_factory=RatelimitConfig)
     markets: MarketsConfig = Field(default_factory=MarketsConfig)
     events: EventsConfig = Field(default_factory=EventsConfig)
-    gate_model: GateModelConfig = Field(default_factory=GateModelConfig)
-    gate_model_market_filter: GateModelMarketFilterConfig = Field(
-        default_factory=GateModelMarketFilterConfig,
-    )
     subgraph_trades: SubgraphTradeCollectorConfig = Field(
         default_factory=SubgraphTradeCollectorConfig,
     )

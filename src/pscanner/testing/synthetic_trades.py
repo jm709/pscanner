@@ -1,25 +1,16 @@
 """Deterministic synthetic ``Trade`` + ``MarketMetadata`` streams for tests.
 
-These helpers used to be open-coded under module-private ``_`` names in
-``tests/corpus/conftest.py``, ``tests/daemon/test_live_history_parity.py``,
-and (via a ``sys.path`` hack) ``scripts/profile_live_history.py``. Lifted
-here so all three consumers share a single source of truth and the
-profile script doesn't need to reach into ``tests/``.
-
-The defaults match the shape ``tests/corpus/conftest.py`` used originally
-(6 wallets x4 markets, ``MarketMetadata.categories`` populated from the
-trade's primary category). Callers that need the daemon-parity-test
-shape (8 wallets x5 markets, empty ``categories``) pass the keyword
-overrides.
-
-See ``refactor-plan-corpus-ml.md`` T3.26.
+Used by ``tests/corpus/conftest.py``. The defaults match the shape that
+conftest used originally (6 wallets x4 markets, ``MarketMetadata.categories``
+populated from the trade's primary category). Callers that need a different
+shape pass keyword overrides.
 """
 
 from __future__ import annotations
 
 import random
 
-from pscanner.corpus.features import MarketMetadata, Trade
+from pscanner.corpus.feature_projection import MarketMetadata, Trade
 
 
 def build_synthetic_trades(

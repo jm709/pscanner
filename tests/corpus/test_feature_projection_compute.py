@@ -7,7 +7,7 @@ from dataclasses import dataclass, fields
 
 import pytest
 
-from pscanner.corpus.features import (
+from pscanner.corpus.feature_projection import (
     FeatureRow,
     HistoryProvider,
     MarketMetadata,
