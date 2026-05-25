@@ -19,21 +19,16 @@ import pytest
 import pscanner.scheduler as scheduler_mod
 from pscanner.alerts.models import Alert
 from pscanner.alerts.sink import AlertSink
-from pscanner.collectors.activity import ActivityCollector
 from pscanner.collectors.events import EventCollector
 from pscanner.collectors.markets import MarketCollector
-from pscanner.collectors.positions import PositionCollector
 from pscanner.collectors.subgraph_trades import SubgraphTradeCollector
-from pscanner.collectors.trades import TradeCollector
 from pscanner.collectors.watchlist import WatchlistSyncer
 from pscanner.config import (
-    ActivityConfig,
     Config,
     EvaluatorsConfig,
     EventsConfig,
     MarketsConfig,
     PaperTradingConfig,
-    PositionsConfig,
     RatelimitConfig,
     ScannerConfig,
     SubgraphCopyEvaluatorConfig,
@@ -78,8 +73,6 @@ def _make_market(*, market_id: str, yes_price: float) -> Market:
 
 def _make_config(
     *,
-    enable_positions: bool = True,
-    enable_activity: bool = True,
     enable_markets: bool = True,
     enable_events: bool = True,
     enable_paper_trading: bool = False,
@@ -87,8 +80,6 @@ def _make_config(
     return Config(
         scanner=ScannerConfig(),
         ratelimit=RatelimitConfig(),
-        positions=PositionsConfig(enabled=enable_positions),
-        activity=ActivityConfig(enabled=enable_activity),
         markets=MarketsConfig(enabled=enable_markets),
         events=EventsConfig(enabled=enable_events),
         paper_trading=PaperTradingConfig(enabled=enable_paper_trading),
@@ -175,9 +166,6 @@ async def test_run_once_with_no_data_returns_zero_counts(db_path: Path) -> None:
         "tracked_wallets": 0,
         "markets_cached": 0,
         "watched_wallets": 0,
-        "trades_recorded": 0,
-        "position_snapshots": 0,
-        "activity_events": 0,
         "market_snapshots": 0,
         "event_snapshots": 0,
     }
@@ -289,26 +277,23 @@ async def test_run_with_supervisor_cancellation(db_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_scanner_wires_collectors_and_repos(db_path: Path) -> None:
-    """Construction wires watchlist + wallet-trades repos and both collectors."""
+async def test_scanner_wires_watchlist_registry_and_syncer(db_path: Path) -> None:
+    """Construction wires the watchlist registry + syncer collector."""
     config = _make_config()
     clients = _make_clients()
     scanner = Scanner(config=config, db_path=db_path, clients=clients)
     try:
         assert "watchlist_sync" in scanner._collectors
-        assert "trade_collector" in scanner._collectors
         assert isinstance(scanner._collectors["watchlist_sync"], WatchlistSyncer)
-        assert isinstance(scanner._collectors["trade_collector"], TradeCollector)
         assert scanner._watchlist_repo is not None
-        assert scanner._wallet_trades_repo is not None
         assert scanner._watchlist_registry is not None
     finally:
         await scanner.aclose()
 
 
 @pytest.mark.asyncio
-async def test_run_once_reports_collector_metrics(db_path: Path) -> None:
-    """``run_once`` includes ``watched_wallets`` and ``trades_recorded`` keys."""
+async def test_run_once_reports_watched_wallets_key(db_path: Path) -> None:
+    """``run_once`` reports ``watched_wallets`` count from the registry."""
     config = _make_config()
     clients = _make_clients()
     scanner = Scanner(config=config, db_path=db_path, clients=clients)
@@ -317,42 +302,6 @@ async def test_run_once_reports_collector_metrics(db_path: Path) -> None:
     finally:
         await scanner.aclose()
     assert result["watched_wallets"] == 0
-    assert result["trades_recorded"] == 0
-
-
-@pytest.mark.asyncio
-async def test_run_once_drives_collectors_with_active_watchlist(db_path: Path) -> None:
-    """Pre-seeded watchlist drives ``poll_all_wallets`` to fetch /activity."""
-    config = _make_config()
-    activity = [
-        {
-            "type": "TRADE",
-            "transactionHash": "0xtxa",
-            "asset": "asset-1",
-            "side": "BUY",
-            "size": 100.0,
-            "price": 0.4,
-            "conditionId": "cond-1",
-            "timestamp": 1_700_000_000,
-            "usdcSize": 40.0,
-        },
-    ]
-    clients = _make_clients()
-    cast("AsyncMock", clients.data_client.get_activity).return_value = activity
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    scanner._watchlist_repo.upsert(address="0xabc", source="manual", reason="test")
-    scanner._watchlist_registry.reload()
-    try:
-        result = await scanner.run_once()
-    finally:
-        await scanner.aclose()
-    assert result["watched_wallets"] == 1
-    assert result["trades_recorded"] == 1
-    cast("AsyncMock", clients.data_client.get_activity).assert_any_await(
-        "0xabc",
-        type="TRADE",
-        limit=200,
-    )
 
 
 @pytest.mark.asyncio
@@ -388,62 +337,9 @@ async def test_aclose_sets_collectors_stop_event(db_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_scanner_skips_no_callback_trade_collector_subscribers(
-    db_path: Path,
-) -> None:
-    """No detector wires itself to the trade-collector callback fan-out
-    anymore — the trade collector still runs (it populates wallet_trades +
-    wallet_first_seen) but no per-trade subscribers exist."""
-    config = _make_config()
-    clients = _make_clients()
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    try:
-        trades = scanner._collectors["trade_collector"]
-        assert isinstance(trades, TradeCollector)
-        assert trades._new_trade_callbacks == []
-    finally:
-        await scanner.aclose()
-
-
-@pytest.mark.asyncio
-async def test_scanner_constructs_dc2_collectors_when_enabled(db_path: Path) -> None:
-    """DC-2 Wave 1: position + activity collectors live in ``_collectors``."""
-    config = _make_config(enable_positions=True, enable_activity=True)
-    clients = _make_clients()
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    try:
-        assert "position_collector" in scanner._collectors
-        assert "activity_collector" in scanner._collectors
-        assert isinstance(scanner._collectors["position_collector"], PositionCollector)
-        assert isinstance(scanner._collectors["activity_collector"], ActivityCollector)
-        assert scanner._positions_repo is not None
-        assert scanner._activity_repo is not None
-    finally:
-        await scanner.aclose()
-
-
-@pytest.mark.asyncio
-async def test_scanner_skips_dc2_collectors_when_disabled(db_path: Path) -> None:
-    """When ``positions``/``activity`` are disabled, neither collector is wired."""
-    config = _make_config(enable_positions=False, enable_activity=False)
-    clients = _make_clients()
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    try:
-        assert "position_collector" not in scanner._collectors
-        assert "activity_collector" not in scanner._collectors
-    finally:
-        await scanner.aclose()
-
-
-@pytest.mark.asyncio
 async def test_scanner_constructs_dc3_collectors_when_enabled(db_path: Path) -> None:
     """DC-3 Wave 1: market + event collectors live in ``_collectors``."""
-    config = _make_config(
-        enable_positions=False,
-        enable_activity=False,
-        enable_markets=True,
-        enable_events=True,
-    )
+    config = _make_config(enable_markets=True, enable_events=True)
     clients = _make_clients()
     scanner = Scanner(config=config, db_path=db_path, clients=clients)
     try:
@@ -460,12 +356,7 @@ async def test_scanner_constructs_dc3_collectors_when_enabled(db_path: Path) -> 
 @pytest.mark.asyncio
 async def test_scanner_skips_dc3_collectors_when_disabled(db_path: Path) -> None:
     """When ``markets``/``events`` are disabled, neither collector is wired."""
-    config = _make_config(
-        enable_positions=False,
-        enable_activity=False,
-        enable_markets=False,
-        enable_events=False,
-    )
+    config = _make_config(enable_markets=False, enable_events=False)
     clients = _make_clients()
     scanner = Scanner(config=config, db_path=db_path, clients=clients)
     try:

@@ -1,9 +1,9 @@
 """Watchlist registry and syncer — DC-1 Wave B implementation.
 
 The registry is the in-memory source of truth for which wallet addresses are
-recorded by :mod:`pscanner.collectors.trades`. The syncer keeps the registry
-aligned with smart-money entries (mirrored from ``tracked_wallets``) and
-whale-alert events (subscribed via the alert sink).
+recorded by :mod:`pscanner.collectors.subgraph_trades`. The syncer keeps the
+registry aligned with smart-money entries (mirrored from ``tracked_wallets``)
+and whale-alert events (subscribed via the alert sink).
 """
 
 from __future__ import annotations
