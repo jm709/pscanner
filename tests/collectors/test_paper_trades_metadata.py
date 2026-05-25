@@ -188,7 +188,7 @@ async def test_null_event_slug_triggers_asset_id_refresh(tmp_db) -> None:
 
     # Token-id path, not slug path.
     data.get_market_slug_by_condition_id.assert_not_awaited()
-    gamma.list_markets.assert_awaited_once_with(clob_token_ids="asset-0xcond-2", limit=5)
+    gamma.list_markets.assert_awaited_once_with(clob_token_ids="asset-0xcond-2", limit=5)  # noqa: S106
     cached = cache.get_by_condition_id(ConditionId("0xcond-2"))
     assert cached is not None
     assert str(cached.event_slug) == "evt-recurring"

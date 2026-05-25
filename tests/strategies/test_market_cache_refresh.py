@@ -141,7 +141,7 @@ async def test_by_asset_id_happy_path(tmp_db) -> None:
     )
 
     assert ok is True
-    gamma_client.list_markets.assert_awaited_once_with(clob_token_ids="asset-y", limit=5)
+    gamma_client.list_markets.assert_awaited_once_with(clob_token_ids="asset-y", limit=5)  # noqa: S106
     cached = cache.get_by_condition_id(ConditionId("0xcond-rec"))
     assert cached is not None
     # The validator hoisted event_slug from events[0].slug.

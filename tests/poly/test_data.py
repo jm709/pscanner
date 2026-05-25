@@ -138,6 +138,87 @@ async def test_get_positions_rejects_non_list_response(
         await client.get_positions("0xabc")
 
 
+def _settled_position_payload(condition_id: str, *, redeemable: bool = True) -> dict[str, Any]:
+    """Build a minimal ClosedPosition-compatible payload for the paginated tests."""
+    return {
+        "proxyWallet": "0xabc",
+        "asset": "asset-1",
+        "conditionId": condition_id,
+        "outcome": "Yes",
+        "outcomeIndex": 0,
+        "size": 10.0,
+        "avgPrice": 0.5,
+        "currentValue": 5.0,
+        "cashPnl": 1.23,
+        "percentPnl": 0.1,
+        "realizedPnl": 1.23,
+        "redeemable": redeemable,
+    }
+
+
+async def test_get_settled_positions_single_page_short(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    """A first short page (< 50 rows) ends the walk after one call."""
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    data_http.get.return_value = [_settled_position_payload(f"0xcond-{i}") for i in range(7)]
+
+    out = await client.get_settled_positions("0xabc")
+
+    assert len(out) == 7
+    data_http.get.assert_awaited_once_with(
+        "/v1/closed-positions",
+        params={"user": "0xabc", "limit": 50},
+    )
+
+
+async def test_get_settled_positions_paginates_until_short_page(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    """Walk continues page-by-page (offset += 50) until the first short page."""
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    full_page = [_settled_position_payload(f"0xcond-{i}") for i in range(50)]
+    short_page = [_settled_position_payload(f"0xcond-tail-{i}") for i in range(8)]
+    data_http.get.side_effect = [full_page, short_page]
+
+    out = await client.get_settled_positions("0xabc")
+
+    assert len(out) == 58
+    assert data_http.get.await_count == 2
+    second_call_params = data_http.get.await_args_list[1].kwargs["params"]
+    assert second_call_params == {"user": "0xabc", "limit": 50, "offset": 50}
+
+
+async def test_get_settled_positions_respects_max_pages_cap(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    """max_pages caps the walk even when the server keeps returning full pages."""
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    data_http.get.return_value = [_settled_position_payload(f"0xcond-{i}") for i in range(50)]
+
+    out = await client.get_settled_positions("0xabc", max_pages=3)
+
+    assert len(out) == 150
+    assert data_http.get.await_count == 3
+
+
+async def test_get_settled_positions_empty_first_page(
+    fake_http_factory: list[_FakePolyHttpClient],
+) -> None:
+    """A wallet with no settled positions returns an empty list after one call."""
+    client = DataClient()
+    data_http = _client_for_host(fake_http_factory, "data-api")
+    data_http.get.return_value = []
+
+    out = await client.get_settled_positions("0xabc")
+
+    assert out == []
+    data_http.get.assert_awaited_once()
+
+
 async def test_get_activity_parses_fixture(
     fake_http_factory: list[_FakePolyHttpClient],
     sample_activity_json: list[dict[str, Any]],
