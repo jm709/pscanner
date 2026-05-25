@@ -30,6 +30,7 @@ from pscanner.store.repo import (
     PaperTradesRepo,
 )
 from pscanner.strategies.evaluators import ParsedSignal, SignalEvaluator
+from pscanner.strategies.market_cache_refresh import refresh_market_cache_row
 
 _LOG = structlog.get_logger(__name__)
 
@@ -359,10 +360,12 @@ class PaperTrader:
     async def _backfill_market_cache(self, condition_id: ConditionId) -> bool:
         """Fetch a market's metadata via gamma and write it to ``market_cache``.
 
-        Two-step sequence: the data-api ``/trades`` endpoint exposes a
-        market's slug per trade row, gamma's ``/markets?slug=`` returns the
-        full ``Market``. Returns ``True`` on success, ``False`` if either
-        step fails or raises.
+        Thin wrapper around
+        :func:`pscanner.strategies.market_cache_refresh.refresh_market_cache_row`.
+        Preserves the legacy ``paper_trader.market_cache_backfilled`` /
+        ``paper_trader.backfill_failed`` events for operator dashboards;
+        the helper emits granular ``market_cache.refresh.*`` events with
+        the same payload alongside.
 
         Args:
             condition_id: The market's on-chain condition id.
@@ -370,33 +373,20 @@ class PaperTrader:
         Returns:
             ``True`` when the cache was successfully populated.
         """
-        try:
-            slug = await self._data_client.get_market_slug_by_condition_id(
-                condition_id,
-            )
-            if slug is None:
-                _LOG.debug("paper_trader.no_slug", condition_id=condition_id)
-                return False
-            market = await self._gamma_client.get_market_by_slug(slug)
-            if market is None:
-                _LOG.debug(
-                    "paper_trader.no_gamma_market",
-                    condition_id=condition_id,
-                    slug=slug,
-                )
-                return False
-        except Exception:
-            _LOG.warning(
-                "paper_trader.backfill_failed",
-                condition_id=condition_id,
-                exc_info=True,
-            )
+        ok = await refresh_market_cache_row(
+            data_client=self._data_client,
+            gamma_client=self._gamma_client,
+            market_cache=self._market_cache,
+            condition_id=condition_id,
+        )
+        if not ok:
+            _LOG.debug("paper_trader.backfill_failed", condition_id=condition_id)
             return False
-        self._market_cache.upsert(market)
+        cached = self._market_cache.get_by_condition_id(condition_id)
         _LOG.info(
             "paper_trader.market_cache_backfilled",
             condition_id=condition_id,
-            slug=market.slug,
+            slug=cached.event_slug if cached is not None else None,
         )
         return True
 
