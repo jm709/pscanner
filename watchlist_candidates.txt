@@ -1,0 +1,630 @@
+# Wallet edge leaderboard candidates - validated subset
+# Generated: 2026-05-25
+# Source: scripts/regen_watchlist_candidates.py (DuckDB wallet_edge_leaderboard)
+#
+# Drop criteria (automated subset of 2026-05-20 cut, lt_edge < -0.3):
+#   * lt_edge <= -0.30      (extreme historical loss anomaly)
+# NOT auto-applied (requires /activity spot-check):
+#   * SELL ratio >= 70%      (true market-makers)
+#   * top_event >= 85%       (single-event one-shots)
+# Run a per-wallet /activity audit to apply the SELL/top_event filters.
+#
+# Add via: pscanner watch <address> --reason wallet-edge-leaderboard-2026-05
+#
+# ====== ESPORTS (5 wallets) ======
+#
+0xd758339e70b390f236f0724cf6ac8b6af6df7af8  # n= 23 edge=+0.3022 win=0.565 $     3,259 lt=+0.2903
+0x77923aee7ea227996c603a2e2e319993eb13d10d  # n= 24 edge=+0.2934 win=0.708 $     1,171 lt=+0.3018
+0x901f92d8944092bd857b3748d173a8975ba274e9  # n= 27 edge=+0.2852 win=0.852 $    52,142 lt=+0.2925
+0x8bf3435554d05de9a0b6a10915d644fbecc66300  # n= 28 edge=+0.2756 win=0.536 $     3,348 lt=+0.2823
+0x5c0ecd812d9c58b5bcc0b1fa2f66d07b8407c9b3  # n= 31 edge=+0.2745 win=0.871 $     2,642 lt=+0.2739
+#
+# ====== SPORTS ranks 1-100 (99 wallets) ======
+# Dropped (1): #88
+#
+0xb71e6248aab14b21ab06ee8dcafdb26a0966641a  # rank=  1 n= 37 edge=+0.6514 win=1.000 $     1,036 lt=+0.6686
+0x236bb64bdd1785e7e26cec617c2c8922982b26b7  # rank=  2 n= 20 edge=+0.6505 win=0.950 $     1,058 lt=+0.6402
+0xa25c6a3a28c922f6fc8322a76d209f943b026430  # rank=  3 n= 27 edge=+0.6251 win=0.926 $    29,608 lt=-0.1004
+0xe2e10f790c159bfbd5d74ba0d38fcc19dcf8c20a  # rank=  4 n= 53 edge=+0.5874 win=1.000 $     2,481 lt=+0.3937
+0x198fa74120438fb7cabccb61aa824c6720dfc419  # rank=  5 n=130 edge=+0.5798 win=0.900 $    42,269 lt=+0.5682
+0x2529c68db36ce8aa64c64affe620267744a3548a  # rank=  6 n= 22 edge=+0.5790 win=1.000 $     7,741 lt=+0.5590
+0x5e5152a9cddd077d884e0fa36404d1264efdba30  # rank=  7 n= 99 edge=+0.5637 win=0.990 $    46,878 lt=    -   
+0x335d6aeb73c03fa6e92686eccc67f303c3bece5f  # rank=  8 n= 64 edge=+0.5630 win=0.984 $       778 lt=+0.5641
+0x9976874011b081e1e408444c579f48aa5b5967da  # rank=  9 n= 39 edge=+0.5587 win=0.949 $   337,957 lt=+0.3574
+0x7332e12a12759c3e9a35aa76e5baefdbe16be031  # rank= 10 n= 69 edge=+0.5580 win=1.000 $     3,050 lt=+0.5469
+0x1bc0d88ca86b9049cf05d642e634836d5ddf4429  # rank= 11 n=433 edge=+0.5508 win=0.887 $   387,942 lt=+0.5548
+0x27753c9c8dcdec6f35e30c3dc64fcd0797d93652  # rank= 12 n= 27 edge=+0.5451 win=0.963 $     5,175 lt=+0.5363
+0xf03044eb7a85a04e826adc893ded416e116812e2  # rank= 13 n= 27 edge=+0.5418 win=1.000 $    27,369 lt=    -   
+0x61efd00829dbf08e4e80578aab589cb41bf05a75  # rank= 14 n= 20 edge=+0.5300 win=1.000 $   222,682 lt=    -   
+0x47c627f1cb12fb9218f8f86cf46eddd658607356  # rank= 15 n= 22 edge=+0.5187 win=1.000 $    84,775 lt=    -   
+0xe6dde73456b7f7c44801a6559c358d26bdfcedaf  # rank= 16 n= 39 edge=+0.5075 win=1.000 $     6,139 lt=+0.4993
+0xb65d1020398210bc172d1c4859bbae821dea616d  # rank= 17 n= 22 edge=+0.5004 win=0.955 $     1,452 lt=+0.4510
+0x72bc12c70ec009aba641a45db06364276df5c332  # rank= 18 n= 20 edge=+0.4983 win=0.800 $     1,645 lt=+0.5300
+0xa5ea13a81d2b7e8e424b182bdc1db08e756bd96a  # rank= 19 n=172 edge=+0.4941 win=0.895 $ 1,241,488 lt=+0.4939
+0x74d0ed8b7127c89eee169e02dfb0a136b06bde45  # rank= 20 n= 27 edge=+0.4914 win=1.000 $    39,436 lt=    -   
+0xf2d5513630b999ad9b3259999fd7502ff9322c0e  # rank= 21 n= 25 edge=+0.4886 win=1.000 $     3,388 lt=+0.2981
+0x44d5a6a4a27eecacfc37735231ec90b4f3531a5b  # rank= 22 n= 31 edge=+0.4872 win=0.774 $       830 lt=+0.5470
+0x86c8487a1bdaa1576beda2bffd3a63c9f17afc02  # rank= 23 n= 36 edge=+0.4806 win=1.000 $     1,149 lt=+0.4824
+0x954e8bec4509e3a0b791fe4dc3fb50895567927f  # rank= 24 n= 47 edge=+0.4685 win=0.936 $    12,751 lt=+0.4651
+0x5234c8687fbc415e8c255b3a90afa8cf47de4c4f  # rank= 25 n= 30 edge=+0.4666 win=0.933 $    47,237 lt=+0.4712
+0x93aff99fac3d3a4070a7658f9dc7c936a81732ab  # rank= 26 n= 83 edge=+0.4615 win=0.988 $     2,449 lt=-0.0239
+0xc51af46d1f0ad1441cdcf5c5815b9c1b6fa3a0d9  # rank= 27 n= 25 edge=+0.4572 win=0.880 $    24,069 lt=+0.4551
+0x201cbc10410f6900090edf68515f62190e8158bf  # rank= 28 n=210 edge=+0.4446 win=0.919 $    88,701 lt=+0.4264
+0x8510ff47665870ccc0b41e3632ff077add5057e6  # rank= 29 n=380 edge=+0.4425 win=0.655 $    14,779 lt=+0.4426
+0xd7501646d1551a70e8729d5bc3c3632bd92ce32c  # rank= 30 n= 46 edge=+0.4401 win=1.000 $    18,577 lt=+0.4086
+0xe2a5fc53cbed2bf7567aa9df0184e0a0551b326f  # rank= 31 n= 27 edge=+0.4260 win=1.000 $     1,240 lt=+0.4464
+0x93abbc022ce98d6f45d4444b594791cc4b7a9723  # rank= 32 n= 73 edge=+0.4198 win=0.740 $    38,245 lt=+0.3515
+0xe8e1b119302ae410e77b2af7d7456809007549dd  # rank= 33 n= 35 edge=+0.4181 win=0.914 $    11,111 lt=+0.4684
+0xeb3734fdd24f5083082e1b04ced7592ddcb91708  # rank= 34 n= 20 edge=+0.4174 win=1.000 $     9,047 lt=+0.3964
+0xcdb805bedd8f1f0403e6190bd3ad43d93027abbe  # rank= 35 n= 55 edge=+0.4151 win=0.727 $     3,051 lt=+0.3409
+0x777d9f00c2b4f7b829c9de0049ca3e707db05143  # rank= 36 n=163 edge=+0.4138 win=0.951 $   896,107 lt=+0.4091
+0x8654be535c15a438a24c87080d8b928cae766d92  # rank= 37 n= 29 edge=+0.4086 win=0.931 $     2,692 lt=-0.2728
+0x1c6b226a45aae9337fdf428b48151a04a9dc340b  # rank= 38 n= 26 edge=+0.4067 win=0.808 $       805 lt=+0.6169
+0x6d04bfd2f0d6a7fd04ba4309c28f908d5e2d7a5f  # rank= 39 n=115 edge=+0.4053 win=0.991 $    79,471 lt=+0.4044
+0xfbb57eba8402b3e0c167c22d3ba1266539622b6a  # rank= 40 n= 29 edge=+0.3977 win=0.586 $     1,044 lt=+0.3375
+0x25d8c73a5ebeb6db934d8da68592ba3d4f1ca71f  # rank= 41 n= 20 edge=+0.3871 win=0.900 $     4,757 lt=+0.0281
+0x8bb6dfe57ac7d27c0735213cdc92634486f1cb97  # rank= 42 n= 24 edge=+0.3863 win=0.833 $    45,338 lt=+0.3292
+0xf0264f1e5ccd4eeec473b1acd0198bd7601d8df7  # rank= 43 n= 62 edge=+0.3824 win=0.903 $     1,843 lt=+0.3085
+0xc97485a44146b5db0b8b121358f57cf297cdb33b  # rank= 44 n= 32 edge=+0.3747 win=0.844 $   118,989 lt=+0.3741
+0x71200ff742dde7f1ada753d2e9b0a8b50c717c4e  # rank= 45 n= 23 edge=+0.3718 win=0.696 $     2,120 lt=+0.4845
+0x56fc3e76a7a50f824a795f52619a05fb4276affb  # rank= 46 n= 52 edge=+0.3687 win=0.885 $     5,810 lt=+0.3399
+0x38fee3d5c38c821a6184c770915ea5e4450ba923  # rank= 47 n= 30 edge=+0.3664 win=0.833 $    17,687 lt=+0.4104
+0xfb681e23db8d1cca8a6b7e2a70a29e000ddfa240  # rank= 48 n= 81 edge=+0.3629 win=0.753 $    89,016 lt=+0.3550
+0x3379771162eab022187928c706dae466b691f0b4  # rank= 49 n= 23 edge=+0.3619 win=0.609 $    10,099 lt=+0.6897
+0x3f1e03e3c0c8a3e9dbf43e961dfaff5ccfdbf21e  # rank= 50 n= 30 edge=+0.3603 win=0.867 $     1,081 lt=+0.4781
+0x67e65bd160df9306af70f0f4d211b2308e6686ed  # rank= 51 n= 74 edge=+0.3531 win=0.811 $     1,611 lt=+0.2996
+0x8cb3ce3776745a66a57fac5db2647b96bb4b8ed1  # rank= 52 n= 62 edge=+0.3495 win=0.694 $    50,983 lt=+0.3642
+0xe86d226142bbb59e0c786a82c53b802a852247c2  # rank= 53 n= 75 edge=+0.3489 win=1.000 $     3,510 lt=+0.2830
+0xd63beb9f11b937c2798e039f42fc2877fc9e21c0  # rank= 54 n= 48 edge=+0.3476 win=1.000 $     1,868 lt=+0.2854
+0x5a708d15e1d980fedab673a060d3303b34395882  # rank= 55 n= 30 edge=+0.3441 win=0.533 $     2,645 lt=+0.3820
+0xfbde01f1c9bb2c0083cb7a6487b5af984f16a758  # rank= 56 n= 98 edge=+0.3436 win=0.684 $    12,908 lt=+0.3332
+0x87165c4f708a46c60595b0eeddb946412e55bd57  # rank= 57 n= 20 edge=+0.3425 win=0.700 $    19,602 lt=+0.2872
+0x77f3e79c009e9efb998752c42bbca2ed53b7800c  # rank= 58 n= 43 edge=+0.3420 win=1.000 $     1,888 lt=+0.2950
+0x12ec6d71325afac2b4d25b3de94185e2c48d41ae  # rank= 59 n= 35 edge=+0.3403 win=0.771 $    99,673 lt=+0.3338
+0x0efc14febe38bad4593906ac643a3af2e2bc4cde  # rank= 60 n= 47 edge=+0.3388 win=0.936 $     5,683 lt=+0.3662
+0xcb511a62cd64f8ba9071d4b5bafa985f6729d2f5  # rank= 61 n= 32 edge=+0.3359 win=0.969 $     3,440 lt=+0.3367
+0xef185339944167fa992958c53bc371464a8b4d70  # rank= 62 n= 20 edge=+0.3352 win=0.900 $       398 lt=+0.3200
+0x61f621ed129a8b64f0d2abbef50d23cd52d1e497  # rank= 63 n= 87 edge=+0.3349 win=0.851 $     9,295 lt=+0.3202
+0x90bf2dbb1ab3b3c1bdd76d73848afcb19b5799eb  # rank= 64 n= 90 edge=+0.3330 win=0.767 $    13,502 lt=+0.1394
+0xa578b91dc07afb421d156151925b55f871856702  # rank= 65 n= 37 edge=+0.3319 win=0.757 $     4,471 lt=+0.3780
+0x87909a89ee551c8616e5bff9089c81545bfd010b  # rank= 66 n= 35 edge=+0.3312 win=0.800 $    22,888 lt=+0.2843
+0xfd30ddd9bd9a98048001720c9bb4b78d584c8cd0  # rank= 67 n= 30 edge=+0.3280 win=1.000 $     1,275 lt=+0.2573
+0x64d4c540211c48ce4cb7b853ffcb0df2b438f056  # rank= 68 n= 24 edge=+0.3271 win=0.875 $     1,156 lt=+0.2972
+0xa71093cafc0c099b4ccab24c3cb8018d817923c4  # rank= 69 n= 24 edge=+0.3251 win=0.875 $   570,425 lt=+0.3018
+0x3491a0c5edbb601b64e61cbe05ec8bde45775909  # rank= 70 n= 35 edge=+0.3240 win=0.857 $    12,254 lt=+0.0618
+0x0099c55dd67b59b4979670a961f1707b7d7db070  # rank= 71 n= 37 edge=+0.3227 win=0.676 $     4,815 lt=+0.3455
+0x164fed62f54dc6ea4b06608156fa534f1bb1deb3  # rank= 72 n= 42 edge=+0.3226 win=0.762 $    38,367 lt=+0.3220
+0x60011f7d069daafbdd1518d4d42804a63ec10457  # rank= 73 n= 27 edge=+0.3207 win=0.815 $     1,535 lt=+0.3543
+0xc56b88b804ebb510e3eceaff9a4fc03954db3afd  # rank= 74 n= 36 edge=+0.3203 win=0.889 $       534 lt=+0.3632
+0xba8179e81c9ced0c5cec89a6df6b63a907e7dc35  # rank= 75 n= 24 edge=+0.3193 win=0.708 $    22,417 lt=+0.4003
+0x692e411de5f7ba4d859c6b33038a81224c12ee58  # rank= 76 n= 27 edge=+0.3145 win=0.556 $     3,449 lt=+0.2519
+0xcae693bcf9696a2ebf0a62de767719b45f354f85  # rank= 77 n= 21 edge=+0.3134 win=1.000 $    15,564 lt=+0.3113
+0x1783c98d6d692c4c4dba3d1856e433c7d39635a6  # rank= 78 n= 23 edge=+0.3103 win=0.826 $     5,799 lt=+0.3341
+0x76aa4f5406c0502dc5196581604fbaefab6eeff9  # rank= 79 n= 31 edge=+0.3098 win=0.742 $     4,658 lt=+0.2313
+0x9b97ef5bf77ceaf86d0284a8e571c018222e6084  # rank= 80 n= 33 edge=+0.3089 win=0.667 $     3,983 lt=+0.3235
+0x5e84887115ddfa2faffbba9ac365ecf97e0c4b92  # rank= 81 n= 21 edge=+0.3064 win=0.762 $     6,825 lt=+0.1416
+0x49206705d0683488a601652b00e5ac57864e2ef4  # rank= 82 n= 43 edge=+0.3059 win=0.907 $    32,789 lt=+0.2200
+0xfb64650bccbf4804c9db00b10abb7fb205db5e23  # rank= 83 n= 71 edge=+0.3028 win=0.732 $    14,744 lt=+0.3020
+0xba99c867de7a3f60c15d3cd912c4dfa1b23e26bb  # rank= 84 n= 20 edge=+0.2999 win=0.900 $     1,896 lt=+0.3834
+0x990197cf7fb51138833793b41b531400460b6adb  # rank= 85 n= 20 edge=+0.2990 win=0.750 $     2,117 lt=+0.1442
+0xe16030785602fcc97b450ba57c93861a6515b6b9  # rank= 86 n= 24 edge=+0.2961 win=0.750 $       578 lt=+0.2756
+0x5a616cb7a3c591ecc6547f12046f8fc7fb525781  # rank= 87 n=124 edge=+0.2950 win=0.831 $   241,005 lt=+0.2910
+0xc49fe658479db29e1a2fefebf0735f657dca9e05  # rank= 89 n= 70 edge=+0.2925 win=0.771 $    34,974 lt=+0.2929
+0x7a90581e9b30eaac23e85f44c4845951ca312827  # rank= 90 n= 28 edge=+0.2898 win=0.393 $     5,986 lt=+0.3212
+0xb33711e54a840ea7cbab3862ad2d2cfbb7225589  # rank= 91 n= 43 edge=+0.2892 win=0.721 $     2,958 lt=+0.2747
+0x9ef15ddea59609626811802627620b628dc6cea5  # rank= 92 n= 29 edge=+0.2874 win=0.931 $     1,294 lt=+0.1997
+0xdc7cfcbc46ed3670f53f55c8973772ac3143958e  # rank= 93 n= 33 edge=+0.2857 win=0.697 $     3,997 lt=+0.3206
+0xe5b49b3b107cbf33f4e0644a9ee405596bf41e3e  # rank= 94 n=214 edge=+0.2842 win=0.888 $    29,042 lt=+0.3283
+0xfdc0bd67fbd71aa8edd00121eb2a7fcbddc34b85  # rank= 95 n= 31 edge=+0.2839 win=0.645 $     9,572 lt=+0.5363
+0x39d6941edf628e8c09d625c1e765389cd40eb696  # rank= 96 n= 26 edge=+0.2831 win=0.885 $     1,154 lt=+0.2310
+0xd9c4f7323b02bcb3e476291e9203239667006f95  # rank= 97 n= 49 edge=+0.2828 win=0.816 $   426,066 lt=+0.2723
+0x7e1e0ad07c4c3b9975d84dbd6453229d1f4e49d9  # rank= 98 n= 36 edge=+0.2798 win=0.806 $     5,875 lt=+0.1301
+0xcec745c1d1db0ae21569144e4fabb63f24cf83fb  # rank= 99 n= 23 edge=+0.2790 win=0.870 $     3,791 lt=+0.3467
+0xbc01b399d8cfdb39e7d2c2b51193b5d66ebbd914  # rank=100 n= 37 edge=+0.2787 win=0.676 $     1,313 lt=+0.3351
+#
+# ====== SPORTS ranks 101-260 (159 wallets) ======
+# Dropped (1): #110
+#
+0x472a962ba8f178f14f979315b9f19a0baba6512e  # rank=101 n= 28 edge=+0.2775 win=0.714 $     6,237 lt=+0.2063
+0xd866b0ac7b156973943cdff2e5b63cdd3ad955e0  # rank=102 n=187 edge=+0.2753 win=0.861 $     2,608 lt=+0.2826
+0x6a978eb858bf81f494c46911b3fa5a11e4fb72eb  # rank=103 n= 21 edge=+0.2748 win=0.857 $     2,381 lt=+0.3597
+0x1ea77a5e8191db9f2c0a18f2692feccd0c47bcd9  # rank=104 n= 86 edge=+0.2743 win=0.558 $    37,747 lt=+0.1674
+0x49fad5626c25b2ce82c8a57d52f49134c363f904  # rank=105 n= 49 edge=+0.2740 win=0.612 $    72,614 lt=+0.2332
+0xd35e664f0ada7d8cc66cb551edf5e9f5c9d8a1e8  # rank=106 n= 22 edge=+0.2727 win=0.864 $       353 lt=+0.1197
+0x3a1326c3afb4a5727f29e218e85a2b031976db82  # rank=107 n= 79 edge=+0.2718 win=0.810 $    11,142 lt=+0.2731
+0xebc275eb8cdca3ca404883feefa86b5658d8c742  # rank=108 n= 77 edge=+0.2717 win=0.792 $    61,231 lt=+0.1686
+0x3cd63e65f3df4aaf8ebe9de56fe5f8f633b218e4  # rank=109 n= 24 edge=+0.2702 win=0.625 $     1,841 lt=    -   
+0x794f0ef2bcf3eeef3e236504397f48934f353906  # rank=111 n= 25 edge=+0.2682 win=0.600 $     5,931 lt=+0.2276
+0xc0a40a708d0715c260d049761a5301874dae72ad  # rank=112 n= 26 edge=+0.2680 win=0.846 $     2,682 lt=+0.2430
+0xf658c7860763abde250bfe9793b10110430b655e  # rank=113 n= 20 edge=+0.2663 win=0.800 $    16,851 lt=+0.2496
+0xb8706282d06360023f943759f20f121dc73c5a8a  # rank=114 n= 23 edge=+0.2636 win=0.652 $     1,394 lt=+0.3315
+0x88c7299196990d2404f4fe4427fb20645a529012  # rank=115 n= 21 edge=+0.2625 win=0.714 $    13,255 lt=+0.2559
+0xc0eeaa237f21de3e95d859f604989428a46f1686  # rank=116 n= 25 edge=+0.2618 win=0.440 $     6,885 lt=+0.1932
+0x03ce1e71a98d0926a25ada512ff7e2c19ae5fa72  # rank=117 n= 43 edge=+0.2617 win=0.767 $     8,869 lt=+0.2704
+0xbfaf59de1a649e58333e26a5ea740d1f60637aff  # rank=118 n=188 edge=+0.2614 win=0.559 $    35,719 lt=+0.1435
+0xa7c00ff2f91ed5a18432376d5a97363648acdada  # rank=119 n= 39 edge=+0.2606 win=0.615 $     1,864 lt=+0.2857
+0xb3cfe7615d64db8dfa743a1b1a2b976911460ebd  # rank=120 n=100 edge=+0.2599 win=0.600 $   100,937 lt=+0.2481
+0x9b35b2301e122b83a587bebba4c66888b9a15da2  # rank=121 n= 49 edge=+0.2593 win=0.592 $    13,330 lt=+0.2646
+0x033af694b9419168d1c8171457d9538ab778fc42  # rank=122 n= 55 edge=+0.2587 win=0.727 $     7,621 lt=+0.2504
+0x5b5c359036406fd3987d522ef424700bbbb8308e  # rank=123 n= 27 edge=+0.2581 win=0.852 $     3,435 lt=+0.2407
+0x1ba2b1137313b248b03a9be40093b23d7e96d212  # rank=124 n=193 edge=+0.2546 win=0.824 $     8,410 lt=+0.2226
+0x2c57db9e442ef5ffb2651f03afd551171738c94d  # rank=125 n=727 edge=+0.2546 win=0.840 $ 1,985,835 lt=+0.2541
+0xe725dc1717b0998ba360995cfa5dfbf5c8ac2b00  # rank=126 n= 20 edge=+0.2540 win=1.000 $       300 lt=+0.2595
+0x0676a8d9bc547fec9ff5daedd3bfb91f36bf3b27  # rank=127 n= 33 edge=+0.2533 win=0.697 $     1,166 lt=+0.1886
+0xd4e20ddeb493400ccf41702421578e9a9af90f82  # rank=128 n= 57 edge=+0.2485 win=0.702 $    15,835 lt=+0.2208
+0x940114aae4833f5a823bb321342ad7005b2938cb  # rank=129 n= 25 edge=+0.2468 win=0.720 $       671 lt=+0.2395
+0xab9fd3d22809132d0bcdc8cd7413a32ac35175f1  # rank=130 n= 20 edge=+0.2463 win=0.800 $       796 lt=+0.2238
+0xef23cbe21335189da1847ce4bb7b6115039a5b60  # rank=131 n= 24 edge=+0.2454 win=0.667 $    33,447 lt=+0.2029
+0x017024dc0de696448aef2fc22f073209cea8a17c  # rank=132 n= 58 edge=+0.2450 win=1.000 $    31,370 lt=+0.2394
+0x832bce13fa76d504c2b747587c274c996b423ae1  # rank=133 n= 67 edge=+0.2430 win=0.761 $     9,488 lt=+0.0531
+0xc29a02c2d0683d9cc1e5ef810cdf48a9e2c67816  # rank=134 n= 20 edge=+0.2429 win=0.750 $    79,062 lt=+0.3069
+0x5cec2dbd26762bcdecd73c84deb5fd7fe7ce7c61  # rank=135 n= 29 edge=+0.2420 win=0.586 $       820 lt=+0.2393
+0x66585ec64d34e854b8957f601e26107dad898afd  # rank=136 n= 31 edge=+0.2393 win=0.903 $     4,624 lt=+0.0574
+0x120187b6fdfbd49dbe4d35c828ea625807e3a74d  # rank=137 n= 31 edge=+0.2390 win=0.806 $     3,619 lt=+0.1963
+0x9c95df82fe2f55f522cee739cefb08f528dded41  # rank=138 n=278 edge=+0.2373 win=0.583 $   124,890 lt=+0.2020
+0xdc40bed433ca678b07083bd93537b66cb8d04ce9  # rank=139 n= 37 edge=+0.2364 win=0.622 $     1,582 lt=+0.2711
+0x6601b97ec1ef4196178b35adb173c8f8cc3d72cc  # rank=140 n= 24 edge=+0.2362 win=0.875 $     1,717 lt=+0.2737
+0x05e17fb524aa6896de92dec88db2f0e4dd5285a2  # rank=141 n= 25 edge=+0.2361 win=0.600 $    16,034 lt=+0.0020
+0xd5386df17edb2b5dd8e11076ebf35e06858f317c  # rank=142 n= 47 edge=+0.2357 win=0.617 $    11,893 lt=+0.1205
+0x88d56af3807592eb5cdc8c671b5696e1ac284bcb  # rank=143 n= 21 edge=+0.2346 win=0.762 $       601 lt=+0.1400
+0x6bb8b17ef118473b390e686ba32615eba2184e12  # rank=144 n= 20 edge=+0.2343 win=0.650 $     1,561 lt=+0.0984
+0x7cb0e39c3bac926f558100b629264fabfe5d51d5  # rank=145 n= 20 edge=+0.2342 win=0.900 $     9,043 lt=+0.2158
+0x52482d38a41eff48e1bdb46233373caa99cbaabb  # rank=146 n= 27 edge=+0.2338 win=0.667 $    21,488 lt=-0.1235
+0x0b4fe27155f54a061b58d28b3f3447a75f11267e  # rank=147 n= 27 edge=+0.2316 win=0.667 $     4,584 lt=+0.1729
+0x3188d16d3046e28a282ab16744160f80c0b0870b  # rank=148 n= 34 edge=+0.2312 win=0.735 $     3,097 lt=+0.2122
+0x2f05e8236a04a785517655f88253737170db43e7  # rank=149 n= 25 edge=+0.2309 win=0.680 $     1,841 lt=+0.2661
+0xd5bf2e7a0871eccfecf7dc315deca1326d54f0cc  # rank=150 n= 25 edge=+0.2293 win=0.880 $     1,160 lt=+0.2534
+0x943875ece784dc0d7c5bd136d363275616bbad81  # rank=151 n= 80 edge=+0.2288 win=0.550 $    42,052 lt=+0.1356
+0x3f18a8af814ceff3ce4434847161e7db6af02080  # rank=152 n= 34 edge=+0.2279 win=0.971 $    16,473 lt=+0.2352
+0x53d3e5320bfd5fd42629c0c0d0de160bcf19ba87  # rank=153 n= 26 edge=+0.2270 win=0.808 $     2,693 lt=+0.1781
+0xc9b7a5e0e3fe4c72475d5345e90a3280851a7984  # rank=154 n= 24 edge=+0.2265 win=0.583 $    10,368 lt=+0.2009
+0x739d1e72481dafd777bf4e57f7b89a6a73abd2ff  # rank=155 n= 21 edge=+0.2263 win=0.476 $       478 lt=+0.2297
+0x2cad53bb58c266ea91eea0d7ca54303a10bceb66  # rank=156 n=124 edge=+0.2261 win=0.806 $    29,712 lt=+0.2733
+0x00ffb912f1bf01c0123869ddb92d4b6a6ad3f7ad  # rank=157 n=234 edge=+0.2250 win=0.808 $    91,469 lt=+0.1624
+0xf975c19db5d1da14029109a4df52ee87d0a64354  # rank=158 n=200 edge=+0.2218 win=0.835 $   221,981 lt=+0.2374
+0x079aad3374ad11966c43c25524a4c1fd16b73ef8  # rank=159 n=117 edge=+0.2210 win=0.752 $    15,272 lt=+0.2250
+0x7b1036b62136cad4ac4b86668c3dcb9e84e2acab  # rank=160 n= 25 edge=+0.2205 win=0.720 $    15,246 lt=+0.1808
+0xb2622e24b2098fa64c65264b9c1bb0484c9f4277  # rank=161 n= 31 edge=+0.2201 win=0.710 $     5,835 lt=+0.1608
+0x326536f013652e6f841c35eec755ac8e1617d5b8  # rank=162 n= 30 edge=+0.2197 win=0.533 $     5,037 lt=+0.2061
+0x8d10b39465225d7a881b56b4af8354997f0c940a  # rank=163 n= 22 edge=+0.2182 win=0.773 $     1,458 lt=+0.1944
+0x5a7b3328e8756579bfd364ba92c5c589c7bae9eb  # rank=164 n=124 edge=+0.2180 win=0.968 $   195,646 lt=+0.2434
+0x85b8b010ac6e24a23625621724a15513c80d6b6a  # rank=165 n=441 edge=+0.2169 win=0.857 $   205,225 lt=+0.0623
+0x337d2ea77c8a507d14be6b24558897f6063b2e8a  # rank=166 n= 25 edge=+0.2166 win=0.880 $     1,595 lt=+0.2028
+0xb866e020d08a3257efd7ea991e56a8bcb8d7977f  # rank=167 n= 99 edge=+0.2163 win=1.000 $    35,308 lt=+0.1933
+0x82dca3851445e005b8f21a2814db1439189f5700  # rank=168 n= 24 edge=+0.2151 win=0.708 $     8,036 lt=+0.5126
+0xb45a797faa52b0fd8adc56d30382022b7b12192c  # rank=169 n=221 edge=+0.2150 win=0.665 $ 1,334,734 lt=+0.2308
+0x09ee4ea96db7f44332a421f1ee27a8860b4590a4  # rank=170 n= 57 edge=+0.2149 win=0.789 $     1,846 lt=+0.2729
+0xf368db8513c4eabf5d6ea515ac21fe52605b6499  # rank=171 n= 40 edge=+0.2145 win=1.000 $    14,972 lt=+0.2033
+0x489d3df3601288940f89d56b5642b0951129f6e3  # rank=172 n= 31 edge=+0.2142 win=0.774 $    25,188 lt=+0.2013
+0x141ef9052a46984e9d403100dc9c611d48388c87  # rank=173 n= 26 edge=+0.2140 win=0.808 $    11,192 lt=+0.0580
+0x837070b379ce22be8310b305469554b74b1f033b  # rank=174 n= 21 edge=+0.2138 win=0.524 $    19,478 lt=+0.1550
+0xb90e2149c74080c4ff8f205eb88d983f34565794  # rank=175 n= 36 edge=+0.2130 win=0.889 $    21,814 lt=+0.2199
+0x5f6c5da946ffbc05f9394e8a62678b264e1dded8  # rank=176 n= 22 edge=+0.2129 win=0.909 $     3,866 lt=+0.2025
+0x1b5e20a28d7115f10ce6190a5ae9a91169be83f8  # rank=177 n= 30 edge=+0.2128 win=0.733 $   110,322 lt=+0.1668
+0x076e5a5ec198a512c6b4dc839eb5fc9f1b7ba6a4  # rank=178 n= 31 edge=+0.2118 win=0.871 $     1,988 lt=+0.2112
+0x7a3051610fed486c6f21e04a89bddaf22dfc8abd  # rank=179 n= 25 edge=+0.2101 win=0.640 $    11,170 lt=+0.2203
+0x02039f5fc3eac5f5c6cf3369da25c1f72976270d  # rank=180 n= 35 edge=+0.2096 win=0.571 $     5,909 lt=+0.1922
+0x6b13746e4a301750bb4639f79998a4a85e2913ed  # rank=181 n= 49 edge=+0.2093 win=0.490 $     2,878 lt=+0.1548
+0x581887dc5d78f0b6513e4e744ab0526043e739e2  # rank=182 n= 20 edge=+0.2084 win=0.450 $     1,144 lt=+0.1137
+0x0e4508530a6fb1ffb6f6607063d34e628e8339da  # rank=183 n= 27 edge=+0.2078 win=0.667 $       561 lt=+0.2307
+0x8633c1c6844c5928b284a71e211584739474a08d  # rank=184 n= 73 edge=+0.2073 win=0.932 $    60,389 lt=+0.0983
+0x722b71d7c54f514624c5ff9ee3185e87182aad6f  # rank=185 n= 23 edge=+0.2072 win=0.783 $     5,936 lt=+0.1947
+0xd51b227ad3f57bf8b9579e6ee9a2aff05c5c90a8  # rank=186 n= 20 edge=+0.2062 win=0.600 $     1,167 lt=+0.2274
+0xd64d420fb7716389b00d81d37cee9bbe68ae28a6  # rank=187 n= 43 edge=+0.2048 win=0.767 $     3,078 lt=+0.1822
+0xce2e43c9569432a8ee808e8da88da0cabd474257  # rank=188 n= 21 edge=+0.2046 win=0.952 $     5,857 lt=+0.0759
+0x08f5165fc4daf68a49bf6d84e5e05c981b4828e0  # rank=189 n= 20 edge=+0.2043 win=0.850 $     7,988 lt=+0.0207
+0x7a6cf78bfcc031c6ceef67fab02c4ff35de6dcdf  # rank=190 n= 31 edge=+0.2040 win=0.935 $    19,128 lt=-0.0700
+0x436e3791b564575d076baf7a9dc05cfd68e47f64  # rank=191 n= 21 edge=+0.2031 win=0.810 $     4,443 lt=+0.2095
+0xd11aa98ee93315dfd0dcbb2429b7a359cea909ee  # rank=192 n= 81 edge=+0.2027 win=0.802 $     1,259 lt=+0.2251
+0x53515c8447275edfac486e6d70a6e3bf49c19b3c  # rank=193 n= 84 edge=+0.2022 win=0.702 $    47,805 lt=+0.2103
+0xe394fd07cfceaceffcfab62afa3969afe8ec289c  # rank=194 n= 95 edge=+0.2019 win=0.726 $    31,094 lt=+0.1632
+0x91f0599017e46c0ef47cfabf0152d23e1e20c57a  # rank=195 n= 27 edge=+0.2019 win=0.778 $       462 lt=+0.0930
+0x9a81f13da76383d127e3a965f904155d81d49070  # rank=196 n= 30 edge=+0.2015 win=0.767 $       544 lt=+0.1480
+0x764773c7e216724b885b5652496d4babce5d9f44  # rank=197 n= 52 edge=+0.2006 win=0.788 $     6,136 lt=+0.1883
+0xb3a5c86d62185e87da083d7deae53f1ad5be3249  # rank=198 n= 21 edge=+0.2005 win=0.714 $     2,353 lt=+0.1688
+0x74a83b5a9593a95f73d4cf4a638e65fabe9cdf59  # rank=199 n= 26 edge=+0.2004 win=0.692 $     9,045 lt=+0.2269
+0x03e8a544e97eeff5753bc1e90d46e5ef22af1697  # rank=200 n=1465 edge=+0.2002 win=0.603 $ 2,419,572 lt=+0.2001
+0xf284ad6d607f777f34bc643cea587c33a886b9f9  # rank=201 n= 47 edge=+0.2000 win=0.894 $   106,081 lt=+0.1845
+0xcbaa865629d11c5359ca6bfffac9ff43ae3e59b8  # rank=202 n= 28 edge=+0.1994 win=0.750 $     6,053 lt=+0.1919
+0x6cbe3faba6d174ffbdbe9f5483f0cca0b94bc2f3  # rank=203 n= 30 edge=+0.1987 win=0.867 $     3,374 lt=-0.1513
+0x461e52912dd13fec2b418aa3d96f50af01bec18e  # rank=204 n= 28 edge=+0.1986 win=0.500 $     1,372 lt=+0.1939
+0xe95218883f377c5661d164c89283933a3415bde4  # rank=205 n= 66 edge=+0.1986 win=0.667 $    24,404 lt=+0.1583
+0xfb289ed3469b8e1ec31925b021b8c3d6d1e202bb  # rank=206 n= 35 edge=+0.1985 win=0.600 $       912 lt=+0.2213
+0x7cee68b992731e3d331e0545bdd7c5b9926fb72a  # rank=207 n= 43 edge=+0.1977 win=0.767 $    21,298 lt=+0.2153
+0x574125fd65fc6a5605e37285fbd4ba02c3b7fb99  # rank=208 n= 23 edge=+0.1975 win=0.739 $     5,750 lt=+0.1213
+0x0df758f3a438f88d9b98da42ab76cd585a101ec1  # rank=209 n= 38 edge=+0.1970 win=0.711 $     2,897 lt=+0.2060
+0xeface9902242b0399856f981600b907dcc9bc9a1  # rank=210 n=179 edge=+0.1958 win=0.754 $    31,104 lt=+0.0305
+0x0efb0caeb0726754be3e5decb857c21e6a91016c  # rank=211 n= 50 edge=+0.1946 win=0.820 $     2,629 lt=+0.2086
+0x9f9fd3cdd442c431a5fc73c85540c0d1ca362a51  # rank=212 n= 46 edge=+0.1939 win=0.826 $    14,025 lt=+0.2178
+0x2d7350fe1b5410d7101b6e945f7417cc64fe044b  # rank=213 n= 34 edge=+0.1938 win=0.412 $     2,859 lt=+0.0400
+0x17337525541b55342d739089568f72f48feddc80  # rank=214 n= 23 edge=+0.1927 win=0.522 $     2,831 lt=+0.1584
+0xe040ffe586e21cb49449e8daf19b1cdff87a824f  # rank=215 n= 22 edge=+0.1919 win=1.000 $       463 lt=    -   
+0xff723990c9e3d48c69b551de8033d865ee4b512b  # rank=216 n=161 edge=+0.1912 win=0.478 $    10,001 lt=+0.1754
+0x8a924f330c0d15d6295c4cbb89b93eef5d5c6941  # rank=217 n= 43 edge=+0.1911 win=0.791 $    24,348 lt=+0.2255
+0x62b4ffe56c6745310aeaf936b9ca33e2bafcbc6c  # rank=218 n= 26 edge=+0.1906 win=1.000 $     9,007 lt=+0.1745
+0xcf119e969f31de9653a58cb3dc213b485cd48399  # rank=219 n=494 edge=+0.1904 win=0.492 $   364,619 lt=+0.1853
+0xee11507ed80f1f68169e316c680c41e0fe0e19a9  # rank=220 n= 29 edge=+0.1901 win=0.690 $       623 lt=+0.2162
+0x1f6d6622c9e335cffb8d7232d04f51da0bd53070  # rank=221 n= 21 edge=+0.1900 win=0.810 $     1,990 lt=+0.2629
+0x204e13b041444dedbc5af1074e6395cda3a6dded  # rank=222 n= 27 edge=+0.1897 win=0.741 $     5,520 lt=+0.1844
+0x079fc4417ba733847205bfb551a40c248a03a9d1  # rank=223 n= 33 edge=+0.1885 win=0.909 $       740 lt=-0.0516
+0xc37e45b04525711081b6c53de27c30c71e1d9e64  # rank=224 n=104 edge=+0.1881 win=0.654 $     3,333 lt=+0.1097
+0x24931826927f35a2bc756fb81fb1a8d5e8777f8d  # rank=225 n= 23 edge=+0.1878 win=0.565 $       336 lt=+0.1058
+0x25a99e994a8cb81be5cdefa77eccfbbc80a2f991  # rank=226 n= 24 edge=+0.1878 win=0.417 $     2,288 lt=+0.1501
+0x18c465b7c1682655231a535faa692a8f7321f6dc  # rank=227 n= 58 edge=+0.1873 win=1.000 $    12,421 lt=-0.2876
+0x121fbdc5733ce7eda7d7519eb0000e8344184765  # rank=228 n= 23 edge=+0.1865 win=0.435 $       698 lt=+0.1445
+0xb3f32eb604d65ee6bf09e5302c0e1b3dcc603426  # rank=229 n= 20 edge=+0.1863 win=0.450 $     2,380 lt=+0.2273
+0x20a874c49f45b656710f4cd0080b04b73b6af004  # rank=230 n= 55 edge=+0.1851 win=0.618 $    21,560 lt=+0.1707
+0x44c58184f89a5c2f699dc8943009cb3d75a08d45  # rank=231 n= 71 edge=+0.1848 win=0.423 $    87,144 lt=+0.2030
+0xfd39b573bc2aa618c9bc226624e985133c1d109d  # rank=232 n= 85 edge=+0.1843 win=0.976 $    56,112 lt=+0.0180
+0x34c5f49bd9c6766cb50a026f17dd67f3e088cf83  # rank=233 n= 20 edge=+0.1836 win=0.650 $       715 lt=+0.2636
+0x025807dee7a8b792bb40ca8500bc2655e0a606d0  # rank=234 n= 55 edge=+0.1833 win=0.509 $     5,422 lt=+0.2387
+0xe740dfdf5ff0728b43f4e3d02835e55dd12f5bba  # rank=235 n= 27 edge=+0.1831 win=1.000 $     6,492 lt=+0.1887
+0xb6ce456ed1e314f29654ea3c9a158ffe91daa992  # rank=236 n= 33 edge=+0.1825 win=0.515 $     7,642 lt=+0.1745
+0x160db9bb5bf012f21251a74737093bcdc36f5295  # rank=237 n=156 edge=+0.1820 win=0.840 $   719,718 lt=+0.1791
+0x7ba5354929bf388707f397c8b21b8322dc954252  # rank=238 n=1190 edge=+0.1807 win=0.882 $ 1,234,259 lt=+0.1043
+0x36f9d57c26e2ad37f2e07e4d8b724be9f12c5445  # rank=239 n= 23 edge=+0.1806 win=0.609 $     1,164 lt=+0.1828
+0x469f8560d47c8eaaaec3d003e7a1fac2bd0e3d4f  # rank=240 n= 35 edge=+0.1805 win=0.600 $     3,364 lt=+0.1284
+0x9c13525767cf5dd8a05f33ea7b2c8e1a494499b7  # rank=241 n= 48 edge=+0.1801 win=0.479 $     1,472 lt=+0.1547
+0x46d3b59ae36787b2d563267129066f69a7822c20  # rank=242 n= 31 edge=+0.1800 win=0.774 $     1,068 lt=+0.2100
+0x52e3c7928ed51ad6990b89f519f539606fd73337  # rank=243 n= 45 edge=+0.1798 win=0.711 $     7,652 lt=+0.1367
+0x9cf76ff4b0435ee1031e68d211eb704e65dce5a5  # rank=244 n= 38 edge=+0.1790 win=0.605 $     4,126 lt=+0.1382
+0x2c335066fe58fe9237c3d3dc7b275c2a034a0563  # rank=245 n=1762 edge=+0.1787 win=0.824 $ 5,661,456 lt=+0.1788
+0xc949b287f5f6b616034ffeafa286d17aa936fa93  # rank=246 n= 25 edge=+0.1785 win=0.760 $    31,899 lt=+0.2165
+0x39d3c773be30fcc73161fc6768f46d563a779ef0  # rank=247 n= 74 edge=+0.1778 win=0.595 $   186,863 lt=+0.1455
+0x795173772d871733c3110a5695d9638e4b50bb41  # rank=248 n= 20 edge=+0.1774 win=0.600 $     2,264 lt=+0.1572
+0x94f1bad8886f5bfb11a9021ec54e58545588b9e7  # rank=249 n=140 edge=+0.1770 win=0.714 $    26,614 lt=+0.1893
+0x27345a76c9f81b87cd0296b7ce8301f3ec006d9e  # rank=250 n= 22 edge=+0.1770 win=0.682 $   138,923 lt=+0.2215
+0x4b5faccc9a9704b5c10ceb20cbdd6b4da27d1ae6  # rank=251 n=151 edge=+0.1769 win=0.556 $    33,116 lt=+0.1515
+0xcf4bf26d4df45edb7382a3534d87a9ca75bb0c72  # rank=252 n= 69 edge=+0.1766 win=0.696 $    14,775 lt=+0.1614
+0xccb7a896e6e383c6438a560e2f139a5744030477  # rank=253 n= 22 edge=+0.1765 win=0.682 $     1,330 lt=+0.2374
+0x5ef3110dd3bd1cf738c56e94bdd48b9271c2c555  # rank=254 n=107 edge=+0.1761 win=0.738 $    30,983 lt=+0.1519
+0xdd8184551f4b3fca3fc780d4d1c6342d7c2d9640  # rank=255 n=553 edge=+0.1753 win=0.843 $   911,994 lt=+0.1755
+0xb76ffa3b33357fd315a352d8935f0e74e2f5aa79  # rank=256 n= 42 edge=+0.1741 win=0.619 $     1,596 lt=+0.1856
+0xa0b872e59bbba67a0635b7738e164499d0d3b4d4  # rank=257 n= 30 edge=+0.1740 win=0.633 $     3,749 lt=+0.2267
+0x4d8fc3a84455a39de27063ad793e685eddedf631  # rank=258 n= 31 edge=+0.1730 win=0.968 $     1,750 lt=+0.2117
+0xa24feccf8bec90aa2f72df874b63ea2185587c58  # rank=259 n= 23 edge=+0.1730 win=0.522 $       435 lt=+0.1469
+0x69a10d0d31824cc8c39f94e30893cda03142379a  # rank=260 n= 65 edge=+0.1729 win=0.831 $     2,176 lt=+0.1617
+#
+# ====== CRYPTO (123 wallets) ======
+# Dropped (1): #81
+#
+0x22292decebf2e9146b27fe59404d162447ea6bf8  # rank=  1 n= 21 edge=+0.5327 win=0.905 $    10,689 lt=+0.5164
+0x2aa13994496b2c84268afff01687122de4abc691  # rank=  2 n= 54 edge=+0.5165 win=0.981 $    17,205 lt=+0.4874
+0xf97eaefa3f884d713d86e0a071127997cd970034  # rank=  3 n= 85 edge=+0.5150 win=1.000 $    74,195 lt=+0.5188
+0x4204c79fc6e936ddabaef4f3c93da2e0f769d02b  # rank=  4 n= 73 edge=+0.4673 win=0.918 $    65,741 lt=+0.4595
+0xb619ed5b378053f8309c307d2f7adf9c13665068  # rank=  5 n= 82 edge=+0.4518 win=0.768 $    12,547 lt=+0.4261
+0x001eaff14619e0697a068596f9f0d9ad79bcb3af  # rank=  6 n= 23 edge=+0.4107 win=0.870 $     9,393 lt=+0.3358
+0xc9f9a7610efa67b8614c3152f50af2bd9db6c5e8  # rank=  7 n= 84 edge=+0.4004 win=0.798 $    17,166 lt=+0.2749
+0x92622f40a1f8cd57fd81688b361260b3d7fdbcb8  # rank=  8 n= 28 edge=+0.3829 win=0.929 $    21,904 lt=+0.1167
+0xbcf7ac7442cf88f859593a565aa87c6730cab2bd  # rank=  9 n= 84 edge=+0.3654 win=0.857 $    17,347 lt=+0.3928
+0xcfdceaac4912b9a56ce2d837269270c0bff85a2e  # rank= 10 n= 50 edge=+0.3449 win=0.900 $     1,999 lt=+0.1368
+0xce53dae44814b1cca721156ffb27ff1cb4f5834b  # rank= 11 n= 66 edge=+0.3358 win=0.924 $     3,528 lt=+0.3300
+0xd3d0edd7aa93b7fb3419083f93eee1ca6b293df9  # rank= 12 n= 22 edge=+0.3354 win=0.818 $     9,788 lt=+0.1892
+0x4e8d4fee47896bf5bc136e77959a43c1b6af6d9c  # rank= 13 n= 22 edge=+0.3332 win=0.955 $     1,365 lt=+0.1761
+0x0d0c8e170201078d4275acdfe13176ef04e36b78  # rank= 14 n= 41 edge=+0.3323 win=0.585 $     8,188 lt=+0.3863
+0x8ac6eee9a229da8e0feff3a434143d9d582d66b2  # rank= 15 n= 29 edge=+0.3293 win=0.793 $     1,744 lt=+0.3359
+0xdbcc73b57c33f8ef3ba9a56116e0c07e96a3fbc2  # rank= 16 n= 42 edge=+0.3267 win=1.000 $     9,726 lt=+0.3169
+0x1fe4068b8aeb84eeaeeea728dd6eddb45eefafbb  # rank= 17 n= 22 edge=+0.3000 win=0.545 $     1,622 lt=+0.4669
+0x9f9ceb0a88a198562d1aec9aa7d3ba727fef34d9  # rank= 18 n=236 edge=+0.2902 win=0.826 $   412,394 lt=+0.2650
+0x98fbafc00de1b8ba747047835fce1b4c0f5eb06d  # rank= 19 n= 43 edge=+0.2872 win=0.977 $    99,525 lt=+0.2643
+0xeb6789ca6b1425ff908a69a2a5469c38532cd696  # rank= 20 n= 98 edge=+0.2858 win=0.684 $    76,771 lt=+0.1078
+0x3a49e031c6b772c3d2241b835e96f2292a117d21  # rank= 21 n= 91 edge=+0.2838 win=0.967 $     7,424 lt=+0.2469
+0xf0e82336b981bca37cae04002a3e6398236f904c  # rank= 22 n= 28 edge=+0.2835 win=0.821 $    14,826 lt=+0.2532
+0x008382acb70e2002063b3caae40088637a3c80fd  # rank= 23 n= 23 edge=+0.2804 win=0.826 $     2,417 lt=+0.3659
+0x40e6637ae9a24cbd7cc9967953db36836c1fb3fd  # rank= 24 n= 80 edge=+0.2740 win=0.762 $     3,941 lt=+0.2209
+0xdba1005626480dfd67bfc36258c84aa8b72017ad  # rank= 25 n= 23 edge=+0.2683 win=0.739 $     4,045 lt=+0.2240
+0x7e6e3620156f1888e6b14b0cd2c8020bdf6b98d2  # rank= 26 n= 51 edge=+0.2663 win=0.863 $    11,134 lt=+0.2121
+0x2a339415b6385b34379ddddbe68d9bdbb6c8c087  # rank= 27 n= 72 edge=+0.2489 win=0.833 $    94,089 lt=+0.1652
+0x34026514e0bda25f0f9fbb053fe3070cdc8c9446  # rank= 28 n=130 edge=+0.2354 win=0.838 $   751,494 lt=+0.1414
+0xf5c49ad254b1d53ea0b86fb285dd3f11dc800926  # rank= 29 n=121 edge=+0.2346 win=0.777 $   235,488 lt=+0.0969
+0x64b4cc660c2a0d784f4ba9c44b086adcbe3cba8f  # rank= 30 n=108 edge=+0.2287 win=0.944 $   285,553 lt=+0.2587
+0xc4ce47603637766c336b1d630ce6c980ce40d70e  # rank= 31 n= 63 edge=+0.2211 win=1.000 $    22,730 lt=+0.2237
+0x6a681a1e83a5f1b49837c7a02ba1bbfd72a56679  # rank= 32 n=562 edge=+0.2131 win=0.802 $    45,853 lt=+0.1908
+0x014c49e3c93bbe48e826115234c285845943099a  # rank= 33 n= 20 edge=+0.2130 win=1.000 $     2,440 lt=+0.2316
+0xee98137db547ad5c51f4b95356d3839a0600113d  # rank= 34 n= 28 edge=+0.2102 win=0.821 $     6,290 lt=+0.2107
+0x73c84fc0d66e240d3985c0964926e35553c98cd8  # rank= 35 n= 35 edge=+0.2088 win=0.714 $     5,259 lt=+0.3349
+0x7bfa096b7c6b5408d8e4486987a1555d1393de14  # rank= 36 n= 32 edge=+0.2087 win=0.688 $    11,733 lt=+0.2561
+0x969c3aeb8e1a54052df6527f8b89dd7e8a8a5266  # rank= 37 n= 65 edge=+0.2050 win=0.738 $    13,214 lt=+0.3954
+0x47b74509a229f4d373156d5a4e60f57219887d88  # rank= 38 n= 33 edge=+0.2015 win=0.939 $    20,308 lt=+0.2248
+0x0f51d65d00338645dacf1ac76006faf2efb6da36  # rank= 39 n= 23 edge=+0.2005 win=1.000 $     2,783 lt=+0.1373
+0x35311b9be6525a71ff4bdf3a0b5a5944f9a24fb3  # rank= 40 n=199 edge=+0.1937 win=0.794 $   232,305 lt=+0.2212
+0xff64d87d5b2c30147937f97018b7afca313a3d67  # rank= 41 n= 42 edge=+0.1853 win=0.833 $    12,189 lt=+0.1360
+0xb44288e88903ee85bd4ca4020fc828738036d6ee  # rank= 42 n= 20 edge=+0.1852 win=1.000 $     1,418 lt=+0.1089
+0xfb99694be73501b69c46b3d5ae469a0375114dae  # rank= 43 n= 62 edge=+0.1851 win=0.403 $     6,581 lt=+0.1506
+0x9c4b8f99ca555c215debf659f3dc4303f2f78a81  # rank= 44 n= 44 edge=+0.1844 win=0.682 $    12,002 lt=+0.0156
+0xbd81954a4ebce3a843feb3fc6ebf439cf1c6006d  # rank= 45 n= 27 edge=+0.1838 win=0.926 $     7,447 lt=    -   
+0x9b853977cd5fd900573022deae4c9d5d82e1cd3a  # rank= 46 n= 95 edge=+0.1835 win=0.789 $    59,911 lt=+0.1630
+0x9d91f53986770aff4c6ab538d39d02df0632186e  # rank= 47 n= 22 edge=+0.1830 win=0.727 $     4,816 lt=+0.0695
+0x8168195505c66cc4c2eff831e343ae936d1390e7  # rank= 48 n= 94 edge=+0.1830 win=0.787 $    10,709 lt=+0.2895
+0x1e67fdb5044f6d29808a2fbb2336fe317fb0f4a7  # rank= 49 n= 23 edge=+0.1790 win=0.696 $     5,532 lt=+0.1573
+0x4fca270d2cf7df3ad90e490d3c0e4a916c83f72e  # rank= 50 n=197 edge=+0.1789 win=0.655 $    57,234 lt=+0.1990
+0xe6567431e2b123e1b33647f6b81cf1e891475e07  # rank= 51 n= 90 edge=+0.1775 win=0.789 $    11,608 lt=+0.1311
+0xec85247a3e1968e1d6ab516e3e468bddf06a8ba8  # rank= 52 n= 95 edge=+0.1760 win=0.747 $     6,248 lt=+0.1834
+0x8bc395225ebe784f9941714b279e542b846573d1  # rank= 53 n=486 edge=+0.1735 win=0.794 $    96,507 lt=+0.1738
+0x04745def388f6ce8c6bdb4124958614ebb8c9ffa  # rank= 54 n= 38 edge=+0.1713 win=0.895 $    14,132 lt=+0.2858
+0xe0586a72946dabda6275a10b5a2fa64973f0d73e  # rank= 55 n= 81 edge=+0.1713 win=0.765 $    34,111 lt=+0.1383
+0x5e6fc781e022ba5c1fe195aef20076081737c515  # rank= 56 n= 38 edge=+0.1710 win=0.658 $    13,715 lt=+0.1805
+0x0bed6a5ab2316872ca3f0b584fd918cc4e3fc478  # rank= 57 n= 28 edge=+0.1704 win=0.857 $     3,446 lt=+0.1168
+0xa1b2d18d231d0026190a3a267d72eba0b63e7f60  # rank= 58 n= 28 edge=+0.1655 win=0.821 $    14,922 lt=+0.1091
+0x3c2fe37102a58cdfbd807658968517d55a2f9765  # rank= 59 n= 20 edge=+0.1644 win=0.550 $     1,236 lt=+0.1568
+0x02982ce109fed9b564a493bb81cb34a5617e6606  # rank= 60 n= 27 edge=+0.1642 win=1.000 $    16,664 lt=    -   
+0x6b33f1396a7a2e9f3ee4e254f7f08d5f709df191  # rank= 61 n= 32 edge=+0.1636 win=0.812 $    28,673 lt=+0.1563
+0xcb8e96e1fb36708798b58f904c0527d0ef6d1d33  # rank= 62 n= 63 edge=+0.1635 win=0.921 $    12,029 lt=+0.1524
+0x7e1d3cb44c3f2a6ec9abc667820ee2645bd44d41  # rank= 63 n= 22 edge=+0.1620 win=0.955 $     3,717 lt=+0.1019
+0xdbce8d0a69e4cda8edb9b73ee310508044428faa  # rank= 64 n=160 edge=+0.1618 win=0.944 $   170,668 lt=+0.1623
+0x65dd2532d2c908a05a79e7d0638b18df57734664  # rank= 65 n= 20 edge=+0.1610 win=1.000 $     4,143 lt=+0.1640
+0x6c6578f2fa62b307d71e9c6fcc543dbce5bb3e45  # rank= 66 n= 35 edge=+0.1598 win=0.686 $     8,297 lt=+0.0210
+0x2f510f302ad731ad493efcab84d745473e35eace  # rank= 67 n= 20 edge=+0.1594 win=0.400 $     1,248 lt=+0.2049
+0x59b85aa7785616a1309195681d16c5a1f6df26b2  # rank= 68 n= 46 edge=+0.1586 win=0.391 $     4,657 lt=+0.1711
+0xa794b8eee315d8adff4751a39355e7bd72f142ad  # rank= 69 n= 24 edge=+0.1563 win=0.958 $     7,695 lt=    -   
+0x7789c218a7641a0c5b495067082b2c9ace2aa2ce  # rank= 70 n= 54 edge=+0.1561 win=0.519 $    18,685 lt=+0.1450
+0x67fcb66ff1ac47a85f99c5fb56b55a8e8055ddfb  # rank= 71 n= 51 edge=+0.1561 win=1.000 $    12,969 lt=+0.1578
+0x5f45b60c29d6e4d55c0bfd8ddd39ad45c5e0a77a  # rank= 72 n=384 edge=+0.1539 win=0.706 $   320,080 lt=+0.1569
+0x8043e65e93f40139d48d36001a2b8a324bb091c8  # rank= 73 n= 79 edge=+0.1535 win=0.608 $     3,886 lt=-0.1008
+0x630519aed8ebc5e0e08a95f4e83b0ae541c09d0b  # rank= 74 n= 66 edge=+0.1524 win=0.439 $    25,770 lt=+0.1687
+0xc0dc9f17882a73e27ddde09701428060b9fe42b7  # rank= 75 n= 35 edge=+0.1514 win=1.000 $    19,609 lt=+0.1155
+0x8f49a065a16bfb8f420e1a7219dfdefb1d2091cc  # rank= 76 n= 95 edge=+0.1508 win=0.989 $     6,999 lt=+0.1518
+0x1549c224e4a10431aa577d6a12aed05c2ab446f6  # rank= 77 n= 57 edge=+0.1504 win=0.456 $    13,555 lt=+0.2377
+0x1340b8d3a4b22f9ea9995f75a5edae016c5ae38b  # rank= 78 n= 26 edge=+0.1491 win=0.731 $    20,413 lt=+0.1466
+0x0b8baf36e2176658169c019104fb6b1cd99d2183  # rank= 79 n= 24 edge=+0.1490 win=0.750 $     5,592 lt=+0.0737
+0x976392babe1127199f6635e4aa8943d8b5fba292  # rank= 80 n= 23 edge=+0.1484 win=0.783 $    12,867 lt=+0.1531
+0x9bf19d5560bdad5fdc058f60744c92f60338e7a4  # rank= 82 n= 21 edge=+0.1469 win=0.952 $    13,133 lt=+0.1352
+0x64e93f87d8a0c1b2cde6f20d71f211372a95eb4c  # rank= 83 n=459 edge=+0.1467 win=0.586 $   101,478 lt=+0.1337
+0xeafb3d21a3d9333f0cbbcf7e61f7b207db533179  # rank= 84 n= 50 edge=+0.1467 win=0.820 $    35,270 lt=+0.0753
+0x7eb485b118ed1cc5fd3d85977350131e7a070872  # rank= 85 n= 31 edge=+0.1465 win=0.839 $     2,008 lt=+0.0714
+0xcf676bf6e546fc13753ebd92675b4e5cbab43de2  # rank= 86 n= 43 edge=+0.1440 win=0.953 $    19,466 lt=+0.1505
+0xa8d5d0b69856508777cf49b4eac9726621105730  # rank= 87 n= 24 edge=+0.1434 win=0.542 $       251 lt=+0.1258
+0xa3c3e568aa3d640a0f758d716d6d90477c2a976e  # rank= 88 n= 40 edge=+0.1434 win=0.950 $    11,379 lt=+0.1338
+0xfbdce91400354f839113d37b27e39af0384e2a9b  # rank= 89 n= 25 edge=+0.1432 win=0.600 $     5,500 lt=+0.4555
+0x51ec7ad62f3e44e15fbbcb947ec81bc6f68805fd  # rank= 90 n=128 edge=+0.1417 win=0.703 $     5,254 lt=+0.1477
+0xd27652b19293d3bb6157adde1005a1de0356b562  # rank= 91 n=178 edge=+0.1411 win=0.758 $   197,185 lt=+0.2188
+0x529531ba6dacf1d9a7465d8d24c2ed5b1520571c  # rank= 92 n= 20 edge=+0.1408 win=0.600 $     1,030 lt=+0.1079
+0xc36a4fc205df253286a58f8a84613670c677be63  # rank= 93 n=119 edge=+0.1378 win=0.756 $     4,328 lt=+0.0586
+0x1208d46c13b4df1d945aae7739bb448aadc8fe1b  # rank= 94 n= 68 edge=+0.1377 win=0.574 $     7,732 lt=+0.1517
+0xd0792ed4cae01ed80aee0eb7abcc1bef672c9810  # rank= 95 n= 33 edge=+0.1339 win=1.000 $     4,125 lt=+0.1042
+0xab51c55eb5cefec49c52a174acc10b3cd69e2473  # rank= 96 n=147 edge=+0.1338 win=0.306 $    31,750 lt=+0.1260
+0xd8af7b4404f0b2fc74e6c6e9003df661cae604e7  # rank= 97 n= 29 edge=+0.1331 win=1.000 $   120,300 lt=+0.0759
+0xf1f1431412b49e16916e7c95b1551564b94c2d5f  # rank= 98 n= 25 edge=+0.1331 win=0.800 $     2,706 lt=+0.0483
+0x971ab95567c05cc2d0b899183e08b4b4aae7ea89  # rank= 99 n=120 edge=+0.1323 win=0.992 $    38,832 lt=+0.1229
+0xd4f71021a1027b603105b56ed005cbd3556373bb  # rank=100 n= 62 edge=+0.1316 win=0.645 $    15,477 lt=+0.1326
+0xf22b92600b8736a7c1552f6de5808eee72647eab  # rank=101 n=266 edge=+0.1307 win=0.737 $    13,133 lt=+0.1331
+0x12f10b626693a3a5ef9676b25021bc6f6102456f  # rank=102 n= 32 edge=+0.1304 win=0.781 $    53,022 lt=+0.0462
+0x9dcb944c2cad7543d132258c39b6ee906027fe0e  # rank=103 n= 23 edge=+0.1303 win=0.739 $     2,029 lt=+0.1319
+0x2e346a8c56f07ce0b566042e00f220b3e2599434  # rank=104 n= 28 edge=+0.1297 win=0.857 $     2,023 lt=+0.0888
+0xcc918b2be9704d27acdd9cb2c600df6c59861a88  # rank=105 n= 25 edge=+0.1291 win=0.680 $     2,542 lt=+0.1034
+0xc02d7c8bc948d91412253d9cabb696326d4292c1  # rank=106 n=107 edge=+0.1282 win=0.766 $    42,431 lt=+0.1293
+0x5c23dead9ecf271448411096f349133e0bb9c465  # rank=107 n= 22 edge=+0.1281 win=0.818 $    64,528 lt=+0.2199
+0xd265f416c31d7b11c86b2d86c049f49a0b1282af  # rank=108 n= 62 edge=+0.1280 win=0.419 $    18,645 lt=+0.1100
+0x226ba49a8f81306c48d960f2d5e6cff567a27343  # rank=109 n= 35 edge=+0.1272 win=0.829 $     1,884 lt=+0.1234
+0xc829e4bb10868dc8fc3520505b433c372bd1cad3  # rank=110 n= 22 edge=+0.1249 win=0.682 $     4,670 lt=-0.0084
+0xcff8a070f0de59dcfd8337099556c281f007bea7  # rank=111 n= 21 edge=+0.1247 win=0.667 $     5,081 lt=+0.0586
+0x4d4d23695ff2fc39332eb3bf1aa1d1d6a588b3f4  # rank=112 n=107 edge=+0.1243 win=0.523 $    10,932 lt=+0.1280
+0x94df964127f1deddf1aa0f9624848f3ea4682dce  # rank=113 n=212 edge=+0.1242 win=0.830 $    68,282 lt=+0.1297
+0x8e2abdf079a345ceb485f848f55a9118e87fdebf  # rank=114 n= 23 edge=+0.1240 win=0.957 $     1,689 lt=+0.1251
+0x9189219973aeafbaf41144ad51a256e6c7637250  # rank=115 n=299 edge=+0.1238 win=0.923 $   301,367 lt=+0.1186
+0x10ada67f59c7449f745d9ef4213d26c2e5a4827c  # rank=116 n= 29 edge=+0.1233 win=0.517 $     1,278 lt=+0.1226
+0x009a692ea2d5a94be2cb175841d8db2fa6982b8e  # rank=117 n= 38 edge=+0.1231 win=0.684 $     6,611 lt=+0.1274
+0xde2635694c77e8f73e148aadc9271a372b8e2de2  # rank=118 n= 29 edge=+0.1228 win=0.552 $    19,831 lt=+0.4348
+0x609bda4b65a7b912bb1dd6e639b39c451eb45877  # rank=119 n= 50 edge=+0.1227 win=0.580 $     1,672 lt=+0.1263
+0x659053c72451d2f695fb112205b18eda0168fb8f  # rank=120 n= 40 edge=+0.1226 win=0.575 $     3,374 lt=+0.1158
+0xf6cbda3f48569107ba09fd75b0088bf7e3743f69  # rank=121 n=123 edge=+0.1225 win=0.691 $     8,692 lt=+0.1279
+0xb60936df709fa1bca2d7f4c564e8770c0004f030  # rank=122 n= 35 edge=+0.1214 win=0.800 $     6,806 lt=+0.1485
+0xc30b7a059dfeed5967515611283907f57f6a1b6d  # rank=123 n= 24 edge=+0.1212 win=0.958 $    41,924 lt=+0.0621
+0xe88bf2f3a827a110eada37c59419b109bc07f99f  # rank=124 n= 62 edge=+0.1183 win=0.629 $    14,431 lt=+0.1388
+#
+# ====== ELECTIONS (77 wallets) ======
+# Dropped (4): #27 #39 #49 #77
+#
+0x384fdc42f4f9cdee6b311c5d0dba6f81eb4658ad  # rank=  1 n= 43 edge=+0.9092 win=1.000 $     4,318 lt=    -   
+0xc3b9cbc5e5a128226c133fafa8eb7dbfaa3466ac  # rank=  2 n= 46 edge=+0.6965 win=0.957 $     4,745 lt=+0.7093
+0x1cfc6f041b5b8dad3c14b867be8482a69d45b8e0  # rank=  3 n=1241 edge=+0.5781 win=0.821 $   182,042 lt=+0.6117
+0x5f56805ce0d1d65e96556427321c952ffc98a330  # rank=  4 n= 29 edge=+0.5121 win=0.828 $     3,469 lt=+0.5502
+0xbd9ea7374d0bd2c911752c7bcd151fcb222e3723  # rank=  5 n= 85 edge=+0.4836 win=0.941 $     9,765 lt=+0.2639
+0x9236b31fe717c7cda64ad753a3ad3eb4e304e368  # rank=  6 n= 48 edge=+0.4674 win=0.938 $    22,092 lt=    -   
+0xc14e1840aaaa56e12409585ad2c2a74c161339a5  # rank=  7 n= 76 edge=+0.3986 win=0.711 $    22,982 lt=+0.4107
+0x065e295eaf30e94f1b94b29e843db7d131a379ad  # rank=  8 n= 75 edge=+0.3623 win=1.000 $    23,620 lt=    -   
+0xa3c5721a107e0908bc552b7f90230d85954ec91c  # rank=  9 n= 37 edge=+0.3576 win=1.000 $     2,972 lt=-0.1382
+0x1bdb14f1fb8e85590a5e08eb64b729ffe827a2c4  # rank= 10 n= 69 edge=+0.3568 win=1.000 $     3,703 lt=    -   
+0x27b0f6b066b38b7b1829ae5a874e9235ab63fc67  # rank= 11 n= 21 edge=+0.3534 win=0.857 $     7,391 lt=+0.3686
+0xbc3bb18ee85a87b025e6eef3c3e2b2b6d0852d7c  # rank= 12 n= 73 edge=+0.3529 win=1.000 $    13,315 lt=    -   
+0xfa8024ffad06e222eff6c4084d489189cf583aa0  # rank= 13 n= 21 edge=+0.3505 win=1.000 $     6,893 lt=    -   
+0x6f6465996df846d5a8954df1159a72f5e78732b3  # rank= 14 n=188 edge=+0.3494 win=0.702 $    16,622 lt=+0.3475
+0x584827e878edf2d0940278516565abcd25e5b529  # rank= 15 n= 21 edge=+0.3400 win=1.000 $     1,750 lt=    -   
+0x54624426b2f4b0c3afd4c83306faaf7f7b47eed6  # rank= 16 n=314 edge=+0.3381 win=0.990 $    90,467 lt=+0.3482
+0x0189d8f03406b04b146507720e91c77ce09ecab8  # rank= 17 n= 23 edge=+0.3278 win=0.957 $     4,056 lt=+0.1994
+0xe0ee41e6407a32ca7dd5cf4e68df11c392b5e8d1  # rank= 18 n= 37 edge=+0.3230 win=1.000 $    14,119 lt=    -   
+0x9985e769d8860f32d34b3bd36c16832e78e172aa  # rank= 19 n= 22 edge=+0.3220 win=0.455 $     6,748 lt=+0.3782
+0x95398d1d33d1b2570d3c1f365057733d1044e9bb  # rank= 20 n= 20 edge=+0.3219 win=0.650 $     3,121 lt=+0.3809
+0x017f81e2691aa342d4e95a26f850332d6cc67acb  # rank= 21 n= 37 edge=+0.3192 win=1.000 $    12,250 lt=    -   
+0x7664aa7df89e2c02c01e3cd57e0abee078eb2e50  # rank= 22 n= 58 edge=+0.3040 win=0.983 $    21,550 lt=+0.3129
+0xee43a1dbee849fa99d8ce812dd67289673c8ae9d  # rank= 23 n= 68 edge=+0.3028 win=0.926 $    13,149 lt=+0.3055
+0xc990eb97658745178ee15a861352266554006a32  # rank= 24 n= 27 edge=+0.3002 win=0.926 $     8,935 lt=+0.3658
+0xc58351a51d9a4db0ad7c39eb9d794ce3793dbd46  # rank= 25 n= 20 edge=+0.2940 win=1.000 $    10,014 lt=    -   
+0xe3494893be6952fa237b9ff7b69303cd0c06db20  # rank= 26 n=195 edge=+0.2818 win=1.000 $    43,426 lt=    -   
+0xea2f794a7f0ce05e4bbd357b3ccbb3bd2048a8ef  # rank= 28 n=180 edge=+0.2652 win=0.367 $    42,431 lt=+0.2317
+0x133ba4d001ae339bfb08631eead95c5dabe92f22  # rank= 29 n= 70 edge=+0.2635 win=0.829 $    52,095 lt=+0.2329
+0xe19ad5aacd541b6aa9ae7fe0e7ee5536dda8adcd  # rank= 30 n= 22 edge=+0.2614 win=0.909 $    20,597 lt=    -   
+0xff7c2da97732a3d523996c4ec8d120e485353768  # rank= 31 n= 25 edge=+0.2581 win=1.000 $     2,591 lt=    -   
+0x77fc9cdaea8b408a30e5b11c98d5efbf2d5a0eac  # rank= 32 n= 95 edge=+0.2542 win=0.842 $    11,279 lt=-0.2483
+0xf960042084241f157e125096f8df8554d7cbfcbf  # rank= 33 n=304 edge=+0.2537 win=0.845 $    33,518 lt=+0.2485
+0x3978c221d67ccf4a08d0efc772ab3c09e32d4309  # rank= 34 n= 40 edge=+0.2522 win=1.000 $     6,251 lt=+0.2583
+0x82001288e3b1f5dd413e3126a34e1583badedf37  # rank= 35 n= 37 edge=+0.2452 win=0.703 $     7,587 lt=+0.2097
+0x8a694f5f8bf7ddbfc4e714df4eadf142771b5a45  # rank= 36 n= 57 edge=+0.2446 win=0.526 $     5,315 lt=+0.2432
+0xe426550455bc63ae1c9a977d529c9605e02445b4  # rank= 37 n=200 edge=+0.2415 win=1.000 $   104,308 lt=    -   
+0x69c96d22e1be6f6cd9fa32bb45f5fd5b7b423b29  # rank= 38 n= 28 edge=+0.2355 win=0.964 $     5,445 lt=+0.2567
+0x6bb5f2b0fbe2430328ee7b21369f9c0aa7bca518  # rank= 40 n=146 edge=+0.2337 win=0.897 $    12,331 lt=+0.2719
+0x4be5bfbdc705157e075d21ea1926594a03aac1b3  # rank= 41 n=150 edge=+0.2331 win=0.613 $    25,910 lt=+0.2435
+0x0c88e274ae9c716ecf8c15e7b229347b9c20d960  # rank= 42 n= 24 edge=+0.2311 win=0.750 $     3,340 lt=+0.1671
+0x903221b1098263779ae19486028c844e8c338717  # rank= 43 n= 24 edge=+0.2295 win=0.833 $    44,245 lt=+0.3563
+0x2b9dbf4b6e0e11309a9d6d2a09b72f65f652adc0  # rank= 44 n=155 edge=+0.2290 win=0.690 $    23,728 lt=+0.1768
+0xa72aa09e0377b68615e00b6dd1db0c3edb0193fd  # rank= 45 n= 89 edge=+0.2285 win=1.000 $   167,629 lt=+0.0323
+0x5a9adfa5419c01bd4e6c21211f92f21e76555f43  # rank= 46 n= 38 edge=+0.2261 win=1.000 $    12,556 lt=+0.2102
+0x0e787eb62d456988a10d97a615f8037b4e674e26  # rank= 47 n= 27 edge=+0.2261 win=0.815 $    27,686 lt=+0.2951
+0x4867293b553c91c8f35a8fd811660d23c353a6f8  # rank= 48 n= 20 edge=+0.2086 win=0.800 $     9,677 lt=+0.3018
+0x94c4fe3b18435aa92024c7c1589537fcda3f43ca  # rank= 50 n=111 edge=+0.2044 win=0.982 $    98,664 lt=+0.2053
+0xcfc2c4c7a4de2f9db6ea0875e03f355fce090b59  # rank= 51 n= 91 edge=+0.2031 win=0.714 $     5,811 lt=+0.1173
+0xdc03d611e5bcc9f1c87edb95edeb91671471804c  # rank= 52 n=224 edge=+0.2031 win=0.969 $   156,231 lt=+0.1215
+0x8a17fe2942f4bc45269961228fc65535ce1e2560  # rank= 53 n= 20 edge=+0.2020 win=0.850 $     2,878 lt=+0.2025
+0x40cfb29411d29f4fa0908f2a121297042cccd21d  # rank= 54 n= 42 edge=+0.2001 win=0.595 $     8,052 lt=+0.1071
+0x9ce2e85deccd90f0548a1170dde53096b6485f90  # rank= 55 n= 41 edge=+0.1980 win=0.683 $     2,919 lt=-0.0039
+0x4f6c09f6ab1a9f59935c29ca9fb380319bf76909  # rank= 56 n=166 edge=+0.1959 win=0.922 $    22,115 lt=+0.0827
+0x3c5b209601d6cfbbd27e101c96f365c072100584  # rank= 57 n=151 edge=+0.1956 win=0.901 $    77,886 lt=+0.1945
+0x225c247de8bb280315dece341cd57367c5f240dc  # rank= 58 n= 27 edge=+0.1927 win=0.778 $     2,742 lt=-0.0129
+0x44549c80188ebd6bfef4b7e71927d5972a63f6bf  # rank= 59 n= 28 edge=+0.1923 win=0.964 $     1,221 lt=+0.2021
+0x21064fd320bfd5a86f8c92a94d3209edf4154dea  # rank= 60 n=143 edge=+0.1909 win=0.350 $     5,680 lt=+0.0603
+0x01218820a9bb3f4c7467beebff82e259d300f82c  # rank= 61 n= 50 edge=+0.1888 win=0.420 $     2,488 lt=+0.1238
+0xd5eb2846e5f41e76fd1a607320ae1ec45af0b9d6  # rank= 62 n= 33 edge=+0.1753 win=0.394 $    21,774 lt=+0.5211
+0xd4a363428c78db46b600f15e98e4163d33048992  # rank= 63 n= 49 edge=+0.1719 win=0.612 $     2,821 lt=+0.2184
+0x4ff428f7e38db1d0a56019254540184ffc20a15b  # rank= 64 n= 23 edge=+0.1717 win=0.957 $     6,789 lt=+0.2178
+0x5ba14fa6711907d8f34b7903a94fb533a0c61171  # rank= 65 n= 38 edge=+0.1714 win=0.474 $    40,094 lt=+0.2313
+0xf5bd0f1e561a14bb1b527e3b06d59989ae17169a  # rank= 66 n= 98 edge=+0.1711 win=0.347 $     4,037 lt=+0.2005
+0xc279749f8417dab525a94760a319b665fdb2999c  # rank= 67 n= 33 edge=+0.1684 win=0.273 $     3,084 lt=    -   
+0x7c7a74e2a72b1ce28206a258faee57505ded201a  # rank= 68 n= 32 edge=+0.1679 win=0.719 $    10,249 lt=+0.1696
+0x974faca19c56e2f16a6ee568cb40acd4d0cfcd80  # rank= 69 n= 50 edge=+0.1670 win=0.680 $     2,230 lt=+0.0934
+0xc2d7fef7f24d389cd28d52b48e6ecb172490deb5  # rank= 70 n= 96 edge=+0.1663 win=0.750 $     1,598 lt=    -   
+0xc8fc07cf7c55a03b062cbcb51806384b81a0ac2b  # rank= 71 n= 58 edge=+0.1649 win=0.914 $    30,467 lt=+0.1977
+0x31060e9b2c0703d6009154e38092d475b00cd672  # rank= 72 n=192 edge=+0.1617 win=0.542 $    26,101 lt=+0.1558
+0x0956c00ae11bb7e668bb3c26c6516d148259d99a  # rank= 73 n= 56 edge=+0.1598 win=0.857 $    24,601 lt=+0.1935
+0x7e34b41b14e6413decce962ddb81ea06f49463f7  # rank= 74 n= 43 edge=+0.1593 win=0.907 $     9,082 lt=-0.1153
+0x89c602c9559d01c13a6547dc878af45770397961  # rank= 75 n=119 edge=+0.1570 win=0.513 $     5,308 lt=+0.1528
+0x4e4203102fd7bde55ce1bcf9f1ef222e251949ed  # rank= 76 n= 38 edge=+0.1565 win=0.947 $    18,202 lt=+0.1812
+0x511374966ad5f98abf5a200b2d5ea94b46b9f0ba  # rank= 78 n= 48 edge=+0.1546 win=0.542 $     4,354 lt=+0.0549
+0x1f4c45517fac61b0673f2904e8a2f5ba4f20de22  # rank= 79 n= 63 edge=+0.1541 win=0.667 $     1,944 lt=+0.0096
+0x854dd4db9230143f19bccfd6850aacb6facbdeb0  # rank= 80 n= 71 edge=+0.1538 win=0.563 $    55,167 lt=-0.0318
+0x98a1f7612f8132dd3772f33558d03c88997061b6  # rank= 81 n= 25 edge=+0.1510 win=1.000 $     7,967 lt=+0.1512
+#
+# ====== MACRO (29 wallets) ======
+#
+0x2a1410533fe6abeeff9d124a51f023539b64e0fb  # rank=  1 n=152 edge=+0.4018 win=0.967 $   437,789 lt=+0.3180
+0x4e2059e3e3bb2c31a9a4a0748e9278282a09ccb8  # rank=  2 n=114 edge=+0.3233 win=0.632 $    11,093 lt=+0.1847
+0x4ee25443ecef95b30fc92af99c6aa1f83eacac40  # rank=  3 n= 20 edge=+0.3198 win=1.000 $     2,189 lt=+0.3416
+0x1a28172088b60fdb808c90e8bdf0342d9e45da50  # rank=  4 n= 31 edge=+0.2854 win=0.419 $     5,085 lt=-0.1302
+0x71e11e0fc20a2adf27026fbf8674b38f8ff945f0  # rank=  5 n=1702 edge=+0.2839 win=0.639 $    96,371 lt=+0.2608
+0xe2e10f790c159bfbd5d74ba0d38fcc19dcf8c20a  # rank=  6 n= 39 edge=+0.2618 win=0.846 $     6,775 lt=+0.3937
+0x63c743421ca78b42d39108b5042897f89016d693  # rank=  7 n= 20 edge=+0.2471 win=0.350 $     2,930 lt=+0.4004
+0x17600e58febff4f44d773ca63135f7a0afcb56ec  # rank=  8 n=106 edge=+0.2448 win=0.877 $   276,640 lt=+0.2363
+0xd45958e02d9cb1019fc96fc9e86ba27920b613f9  # rank=  9 n= 42 edge=+0.2210 win=0.929 $   190,898 lt=+0.2275
+0x2c08812ce4fcfe935b6dd403109af5a53e022e87  # rank= 10 n= 61 edge=+0.1916 win=1.000 $     3,445 lt=+0.1874
+0xfc230c17ba56862ba0930fa969c359f17886dbe6  # rank= 11 n= 45 edge=+0.1911 win=0.778 $     7,780 lt=+0.1463
+0x36f62bc897b9a17b80b5080fe75f93e35f73237c  # rank= 12 n= 20 edge=+0.1906 win=0.500 $    39,106 lt=+0.0503
+0x24787691ebc296444add2ee3dea03c9d6f9b2e62  # rank= 13 n=303 edge=+0.1773 win=0.640 $    36,635 lt=+0.1245
+0x94885a3566cd74f28e0346f22a4bf002046ad531  # rank= 14 n=233 edge=+0.1703 win=0.266 $    36,396 lt=+0.1550
+0x49ae18c82dab9fd3a2bb84d0a96c3ded503ff3ba  # rank= 15 n=130 edge=+0.1701 win=0.977 $   130,249 lt=+0.1589
+0x48538e8ad543b83a077439ec04af5626dcd7030a  # rank= 16 n=106 edge=+0.1680 win=1.000 $    15,021 lt=+0.1692
+0x4e1394174e28bfc6c3248ab992f84f08d3d10105  # rank= 17 n= 21 edge=+0.1634 win=0.714 $     2,794 lt=+0.1101
+0xc757635b67bd79745a73ed69e98b5f1e54323619  # rank= 18 n= 42 edge=+0.1614 win=1.000 $   166,282 lt=+0.0968
+0x641b56cd1de69da37e9bfefeddc7b277341c5433  # rank= 19 n= 30 edge=+0.1592 win=0.900 $   116,496 lt=+0.1589
+0x1b5655739e33491a3d831bcb51e2c74e0501715e  # rank= 20 n=110 edge=+0.1590 win=1.000 $    59,575 lt=+0.1595
+0x4bfcf7c2a76c0f56a83d73e4bd94f6629380f43d  # rank= 21 n= 72 edge=+0.1552 win=0.986 $    24,901 lt=+0.1621
+0xfa686b1486c0622c54164d86b1d6f784d0bbba5d  # rank= 22 n= 49 edge=+0.1370 win=0.857 $     7,835 lt=+0.0704
+0xdda022be1b7707489a2593a515b1f8f5e4139553  # rank= 23 n= 52 edge=+0.1325 win=0.865 $    51,314 lt=+0.1995
+0xde5127518e87879b7f13981a0c237d61c11cb01e  # rank= 24 n=152 edge=+0.1323 win=0.763 $    31,779 lt=+0.1614
+0x3b5ba62bdbc408fe7800513c07db6b40a8b526fa  # rank= 25 n=145 edge=+0.1223 win=0.338 $     8,486 lt=+0.1232
+0x2792dfa780a27bcd40c34c116544756811497e0c  # rank= 26 n= 27 edge=+0.1214 win=1.000 $    18,054 lt=+0.0450
+0xe7889e994282bb732c2fc44861300fa0d2c3736b  # rank= 27 n= 79 edge=+0.1202 win=0.481 $     3,690 lt=+0.2282
+0xe94894d51172ada5a6af1b7f784711237f9c61e1  # rank= 28 n= 47 edge=+0.1179 win=0.957 $    17,173 lt=+0.0955
+0x7a35f8849c597cd12c3e2e3086b52b8c4f682744  # rank= 29 n= 71 edge=+0.1156 win=1.000 $    84,980 lt=+0.1163
+#
+# ====== GEOPOLITICS (60 wallets) ======
+#
+0x21af26a0436f379e66c12c6089e5c2c1e1cef272  # rank=  1 n= 21 edge=+0.6040 win=1.000 $     1,900 lt=+0.6114
+0x1b6022ae41ad7a0b387a88c17885c754436ca55b  # rank=  2 n=125 edge=+0.5801 win=0.984 $    34,754 lt=+0.5869
+0x43be5186cf940352e7063c1d740b9cd5606f5000  # rank=  3 n= 37 edge=+0.5727 win=1.000 $    48,118 lt=+0.5862
+0x8a6d61d4a2f8efaf16bf49892908194d8168723a  # rank=  4 n= 28 edge=+0.5231 win=0.893 $    16,517 lt=+0.5356
+0xad1972ef00580dd337561751f6da9d4dc6ada7ad  # rank=  5 n= 29 edge=+0.4804 win=0.759 $    14,182 lt=+0.4678
+0xc3907f00ba3fd35ef96c3b9afa1483b644af2a1f  # rank=  6 n=124 edge=+0.4289 win=0.887 $    30,326 lt=+0.4577
+0x371ca7c768d4129cacf0985443589d92e026c236  # rank=  7 n= 57 edge=+0.4188 win=1.000 $     1,525 lt=+0.4260
+0xefcedda09b4f2224c856edbd9c41c1d6db124e4a  # rank=  8 n= 26 edge=+0.3992 win=0.808 $     4,917 lt=+0.0887
+0x6bc74c392c320cfe10d5be61db978a58c8444ad4  # rank=  9 n= 82 edge=+0.3886 win=0.683 $     3,519 lt=+0.3991
+0xdf758b6701c16eef30b32a7c006e026111e53880  # rank= 10 n= 23 edge=+0.3819 win=0.783 $     1,876 lt=+0.4050
+0xf904a930fe1cbf3b2bb312a1127f6a9f441126e5  # rank= 11 n= 22 edge=+0.3768 win=0.955 $       602 lt=+0.4077
+0x5afe3dd82317090c2f2eae0370049878669caf69  # rank= 12 n= 41 edge=+0.3718 win=1.000 $    31,757 lt=+0.3271
+0xd93a864d425af6d53609f9bf0f17b80df31039dd  # rank= 13 n= 29 edge=+0.3651 win=0.931 $     1,042 lt=+0.3914
+0x72b2d0ffab41c12727fdfe52e530320d50325548  # rank= 14 n= 54 edge=+0.3511 win=0.704 $     2,031 lt=+0.4424
+0xdae6349433286ec4034e61c79698447d4f7ce440  # rank= 15 n= 31 edge=+0.3187 win=0.871 $     7,788 lt=+0.3597
+0x2461356399fa75b23697097aa0fc45dc32d1f240  # rank= 16 n= 60 edge=+0.3156 win=0.683 $     3,910 lt=+0.3072
+0xb886580698ede4b18de3e446b2d8da8bcedd81b3  # rank= 17 n=131 edge=+0.3122 win=0.679 $    14,203 lt=+0.3506
+0x769d4bb0d555ccb87ac71ad470ae0a469cd005bf  # rank= 18 n= 54 edge=+0.3114 win=0.519 $     2,078 lt=+0.3272
+0xb416b22084be9d13d8854dba5de26b6e953bc7a1  # rank= 19 n= 21 edge=+0.3089 win=0.905 $     5,651 lt=+0.3408
+0xfa2bc333d6d26372e7d1064c6fa61ecf67f2c35d  # rank= 20 n= 96 edge=+0.3086 win=0.521 $     3,296 lt=+0.1734
+0xbd68ba06e71a14e4f781d585b3b225ffc802746a  # rank= 21 n=120 edge=+0.2981 win=0.767 $    31,080 lt=+0.2937
+0x34379b9a574de6c5f05b3216a315fbf5b707f8f3  # rank= 22 n= 81 edge=+0.2877 win=0.852 $    11,318 lt=+0.2005
+0xc77a8ae3de307d7b4aa910c997015d1c45b4daf8  # rank= 23 n= 93 edge=+0.2854 win=0.376 $     7,998 lt=+0.2637
+0x7639db7f8d4eced02a3e67921e8bff8794b5cbdd  # rank= 24 n= 33 edge=+0.2835 win=1.000 $     7,094 lt=+0.2748
+0x54a598106e0467dacc1a4ced3909582f72aaee3d  # rank= 25 n= 20 edge=+0.2822 win=0.600 $    17,484 lt=+0.1783
+0xab15040749c9a4ead610d6f0ba8f8da669137eac  # rank= 26 n= 33 edge=+0.2768 win=0.576 $     1,539 lt=+0.3103
+0xa96340c583504f2c199b9d38a443fe324f7394d6  # rank= 27 n= 35 edge=+0.2740 win=1.000 $     5,709 lt=+0.2856
+0x71878dddb3cfa8744e47dcfa983b62eaac45f08b  # rank= 28 n= 42 edge=+0.2723 win=0.667 $     6,979 lt=+0.5675
+0xf7f5d456888bb54a0447a41acf0dcbc9d099fe12  # rank= 29 n=155 edge=+0.2719 win=0.703 $    78,290 lt=+0.2707
+0x2e617f2cb474acaba820030e4819fe92148519bd  # rank= 30 n=126 edge=+0.2658 win=0.762 $    13,226 lt=+0.2527
+0x6db21a181412ef1cadfd29f580ff0c4c8d77a781  # rank= 31 n=117 edge=+0.2620 win=0.684 $    48,651 lt=+0.2884
+0xdaf0ae787b3318f165f90ef692c0ad3ad3fffd08  # rank= 32 n= 62 edge=+0.2589 win=0.871 $     2,039 lt=+0.3002
+0xa022ba0a68e11a78348382ff168601012d4d77f8  # rank= 33 n= 43 edge=+0.2564 win=0.744 $   226,515 lt=+0.0713
+0x2ac5d02d79e928ab4c1bcb0674c7c3332ef92a5e  # rank= 34 n= 28 edge=+0.2470 win=0.679 $     2,201 lt=+0.2423
+0x8790b88055f5b20a645d9f50a78ad084820d60c2  # rank= 35 n= 22 edge=+0.2449 win=0.864 $     2,228 lt=+0.2144
+0x20e5752800dd85f44375f926c3de0819d3fa8180  # rank= 36 n= 21 edge=+0.2385 win=0.571 $     1,666 lt=+0.2489
+0x2ce36bb42acf2e728934d3af049176f1ae6f966b  # rank= 37 n= 84 edge=+0.2343 win=0.393 $    12,756 lt=+0.2529
+0x019c0ddecb3f91ca13fdd7203b24b26ccd37b424  # rank= 38 n= 85 edge=+0.2339 win=0.800 $     8,791 lt=+0.2091
+0xca5b229280dd30fab1cf134f3d305c69bdb6f1fb  # rank= 39 n= 25 edge=+0.2194 win=0.880 $     2,302 lt=+0.1700
+0xfe140d9eac2a1565349ac7ea3405749efd011a10  # rank= 40 n= 57 edge=+0.2179 win=0.526 $     4,826 lt=+0.2382
+0x29d337076f24d135b7b2b08796edfff4e32cb2ed  # rank= 41 n=113 edge=+0.2175 win=0.965 $    77,152 lt=+0.2158
+0xf66bb1374fc6bcece37b9f562eb5f5bedc95b1d1  # rank= 42 n= 25 edge=+0.2169 win=0.520 $     5,697 lt=+0.2574
+0xbdd727999a1e05f8f2abdb1f96ae8a9e29b86497  # rank= 43 n= 24 edge=+0.2122 win=1.000 $     2,597 lt=+0.1761
+0x19913b3bfed6a1d94fff0cf7704756a91609348e  # rank= 44 n=107 edge=+0.2121 win=0.822 $    11,460 lt=+0.1907
+0x934c48284b955942cc8809a6faa7e606887dcd38  # rank= 45 n= 54 edge=+0.2106 win=0.611 $    47,485 lt=+0.2154
+0x0b13ffcfaa14fdf81196a961e1c5750b697a5957  # rank= 46 n= 62 edge=+0.2074 win=0.887 $    17,517 lt=+0.1059
+0x2d4e90768c7ae9661acca6b16e605eba3e70edb0  # rank= 47 n= 89 edge=+0.2070 win=0.427 $    22,159 lt=+0.2118
+0x11fcbba836d927c5fe6e6a6a64c9c0461e33dc48  # rank= 48 n=137 edge=+0.2050 win=0.927 $   439,704 lt=+0.2647
+0x49b306b0c083ebf5230dce5b151ecfaf63f06486  # rank= 49 n=101 edge=+0.2040 win=0.792 $   168,034 lt=+0.1582
+0x65d45d1454cadae706511ec883cfb2d8ab0fb7e3  # rank= 50 n= 22 edge=+0.2037 win=0.773 $     4,164 lt=+0.2374
+0xa204c9cfab0569f2623d2ec6fdbf26a986ddbf99  # rank= 51 n= 22 edge=+0.2032 win=0.500 $    10,630 lt=+0.2263
+0xe443b5f6105c075f562a24f658a396451170c065  # rank= 52 n= 27 edge=+0.2009 win=0.593 $     1,883 lt=+0.2074
+0x165ed327dd594bfe95a5a9836cad385813cff5aa  # rank= 53 n= 20 edge=+0.2006 win=1.000 $     4,953 lt=+0.2002
+0xa39c488ea8269609aea27f5f8486044d839908bc  # rank= 54 n=206 edge=+0.1935 win=0.927 $    79,706 lt=+0.1886
+0xb8b44e3cc9e0962982e3c8bf444b6a7411f51f6e  # rank= 55 n= 79 edge=+0.1923 win=0.949 $    28,497 lt=+0.2141
+0x5572500002bc495269a0f0320b35802c8445984e  # rank= 56 n= 52 edge=+0.1914 win=0.423 $     4,675 lt=+0.1614
+0x0b652d3e55be0e1d50c2f7be39358585c415293e  # rank= 57 n=107 edge=+0.1899 win=0.991 $    58,412 lt=+0.1922
+0xb1fa1aa03ce4f1f4e259cda433e7fdaf80f91a14  # rank= 58 n= 62 edge=+0.1893 win=0.339 $    51,454 lt=+0.2607
+0x89415363658d88a8914beee6ac6b203df686cb10  # rank= 59 n= 28 edge=+0.1892 win=0.893 $    41,050 lt=+0.2125
+0x20d919b88e1cede2093f6a9cfc94734c2ad95490  # rank= 60 n= 24 edge=+0.1892 win=0.958 $    31,405 lt=+0.2294
+#
+# ====== TECH (14 wallets) ======
+#
+0x862ea21f71f1592fe9f8feb0575d207008027972  # rank=  1 n= 50 edge=+0.5078 win=0.880 $     5,364 lt=+0.5098
+0x6cb0f2bb3bfc941f9eca0d0f21c7aa6aea798fc5  # rank=  2 n= 24 edge=+0.2292 win=1.000 $     2,430 lt=+0.2173
+0xed2b4da877bb0c5e4cd78f874957af2430fd3aba  # rank=  3 n= 68 edge=+0.2213 win=0.882 $    42,149 lt=+0.2301
+0x073a1caba3c22e9e361ceae83aaa5405706f91e7  # rank=  4 n= 81 edge=+0.1845 win=0.679 $     8,063 lt=+0.1797
+0x77f3e79c009e9efb998752c42bbca2ed53b7800c  # rank=  5 n= 21 edge=+0.1775 win=1.000 $       999 lt=+0.2950
+0xd63beb9f11b937c2798e039f42fc2877fc9e21c0  # rank=  6 n= 31 edge=+0.1751 win=1.000 $     1,411 lt=+0.2854
+0xfd30ddd9bd9a98048001720c9bb4b78d584c8cd0  # rank=  7 n= 31 edge=+0.1751 win=1.000 $     1,537 lt=+0.2573
+0x5999ebfa145490e0280dd246856a5b3605f7ae94  # rank=  8 n= 48 edge=+0.1750 win=0.812 $    30,046 lt=+0.1720
+0xe86d226142bbb59e0c786a82c53b802a852247c2  # rank=  9 n= 49 edge=+0.1731 win=1.000 $     3,116 lt=+0.2830
+0x22e4248bdb066f65c9f11cd66cdd3719a28eef1c  # rank= 10 n=1570 edge=+0.1659 win=0.834 $ 1,205,634 lt=+0.1573
+0x736539924a5602b37a03a54fc12c1cc8f98964da  # rank= 11 n=147 edge=+0.1641 win=0.850 $    18,878 lt=+0.1441
+0xc9b6227a295985591fe576ff2e054267a78a9b6a  # rank= 12 n=613 edge=+0.1614 win=0.527 $   111,160 lt=+0.1479
+0xaead6bc3c615d21c55b063c785c16ac0b6326695  # rank= 13 n= 44 edge=+0.1450 win=0.977 $     5,221 lt=+0.1471
+0x4d9370fd3a26c80f867d1fa2b3fc84ed66d6c671  # rank= 14 n= 28 edge=+0.1425 win=1.000 $     1,413 lt=+0.1521
+#
+# ====== CULTURE (20 wallets) ======
+#
+0x9c874e5326c3fd72cdf04503565c38b822f92e1c  # rank=  1 n= 33 edge=+0.4663 win=1.000 $    16,090 lt=+0.4800
+0x941ffec19516e8f222d36e4e945798b6f25fbac9  # rank=  2 n= 27 edge=+0.3632 win=0.889 $     1,781 lt=+0.3943
+0xf40f825520148a438e494192d0f214372d0ec3bc  # rank=  3 n= 90 edge=+0.3589 win=0.911 $     6,095 lt=+0.2725
+0xd242a25885985f887fed08df98d569950047e84d  # rank=  4 n= 81 edge=+0.2864 win=0.852 $     5,070 lt=+0.2695
+0x146ddbae0a17c93df342680d878afa804d8317c7  # rank=  5 n=174 edge=+0.2780 win=0.626 $     7,359 lt=+0.2800
+0x16e3ae75fa540cff072af531ba2a28ea4da422d5  # rank=  6 n= 27 edge=+0.2467 win=0.593 $     3,846 lt=+0.0233
+0x8b341308395fecf666820e74a323458033d95ebd  # rank=  7 n= 20 edge=+0.2404 win=0.850 $     3,685 lt=+0.0616
+0x9fd4ca44be6bf74afc5987aa5b4305f5f748325c  # rank=  8 n= 48 edge=+0.2297 win=0.917 $    20,696 lt=+0.0412
+0xc851cd9bee7d262afd78674f861f9f576a12cd2a  # rank=  9 n=1133 edge=+0.2245 win=0.823 $ 1,835,327 lt=+0.0830
+0x97f3f9f15c0063710c60d3ac9c40d17f4ba60eba  # rank= 10 n= 65 edge=+0.2240 win=0.600 $    59,300 lt=+0.2399
+0x584eee598b341109592b985c1a253ab044fa090f  # rank= 11 n= 83 edge=+0.2188 win=0.807 $    15,430 lt=+0.1890
+0xaac2469db4c243a2931acc252967b171bd97e8ce  # rank= 12 n= 46 edge=+0.2169 win=1.000 $    48,295 lt=+0.1281
+0xe828957de161efdff4318de1cf1d9716a1e45cea  # rank= 13 n= 68 edge=+0.2091 win=0.824 $    57,134 lt=+0.1178
+0xd81df2727a02904168775b37b888180355a120f7  # rank= 14 n= 27 edge=+0.2064 win=0.815 $     1,508 lt=+0.1106
+0x878a4fa0882e7638369caf9198c4d08cc9d9a429  # rank= 15 n= 38 edge=+0.2058 win=0.789 $     6,482 lt=+0.1661
+0xa65737560aea9fc6505855258c035329700000bf  # rank= 16 n= 21 edge=+0.1991 win=0.714 $     2,687 lt=-0.0582
+0xe2437981f6da5defc2047991412bb834a6e4af59  # rank= 17 n= 32 edge=+0.1978 win=0.406 $     2,063 lt=+0.2445
+0x84449adc1338287bafcceeecf94d943719291cf9  # rank= 18 n= 70 edge=+0.1950 win=0.671 $     3,737 lt=+0.1184
+0x67ea1a9fc49b9ee618f4bb84c199cae6206eae12  # rank= 19 n= 41 edge=+0.1941 win=1.000 $    23,631 lt=+0.1841
+0x6770bf688b8121331b1c5cfd7723ebd4152545fb  # rank= 20 n= 96 edge=+0.1910 win=0.531 $    27,282 lt=+0.0090
+#
