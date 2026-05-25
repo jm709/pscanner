@@ -14,7 +14,7 @@ from pscanner.store.repo import AlertsRepo
 
 def _make_alert(key: str = "k1") -> Alert:
     return Alert(
-        detector="smart_money",
+        detector="subgraph_copy",
         alert_key=key,
         severity="med",
         title="title",

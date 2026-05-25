@@ -75,12 +75,6 @@ def sample_leaderboard_json() -> list[dict[str, Any]]:
 
 
 @pytest.fixture
-def sample_trade_ws_json() -> dict[str, Any]:
-    """Synthetic ``CONFIRMED`` trade message for the CLOB websocket."""
-    return _load_fixture("ws_trade.json")
-
-
-@pytest.fixture
 def fake_clock() -> FakeClock:
     """Shared :class:`FakeClock` for tests that drive time-based loops."""
     return FakeClock()

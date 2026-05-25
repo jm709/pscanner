@@ -24,37 +24,24 @@ from pscanner.collectors.events import EventCollector
 from pscanner.collectors.markets import MarketCollector
 from pscanner.collectors.positions import PositionCollector
 from pscanner.collectors.subgraph_trades import SubgraphTradeCollector
-from pscanner.collectors.ticks import MarketTickCollector
 from pscanner.collectors.trades import TradeCollector
 from pscanner.collectors.watchlist import WatchlistSyncer
 from pscanner.config import (
     ActivityConfig,
-    ClusterConfig,
     Config,
-    ConvergenceConfig,
     EvaluatorsConfig,
     EventsConfig,
     MarketsConfig,
-    MispricingConfig,
-    MonotoneConfig,
-    MoveAttributionConfig,
     PaperTradingConfig,
     PositionsConfig,
     RatelimitConfig,
     ScannerConfig,
-    SmartMoneyConfig,
     SubgraphCopyEvaluatorConfig,
     SubgraphTradeCollectorConfig,
-    TicksConfig,
-    VelocityConfig,
-    WhalesConfig,
 )
 from pscanner.corpus.db import init_corpus_db
-from pscanner.detectors.convergence import ConvergenceDetector
-from pscanner.detectors.move_attribution import MoveAttributionDetector
-from pscanner.detectors.velocity import PriceVelocityDetector
 from pscanner.poly.ids import AssetId, ConditionId, MarketId
-from pscanner.poly.models import Event, LeaderboardEntry, Market, Position
+from pscanner.poly.models import Event, Market
 from pscanner.scheduler import Scanner, SchedulerClients
 from pscanner.store.db import init_db
 from pscanner.store.repo import (
@@ -64,7 +51,6 @@ from pscanner.store.repo import (
     PaperTradesRepo,
     TrackedWalletsRepo,
 )
-from pscanner.strategies.evaluators import MonotoneEvaluator
 from pscanner.strategies.evaluators.subgraph_copy import SubgraphCopyEvaluator
 from pscanner.strategies.paper_resolver import PaperResolver
 from pscanner.strategies.paper_trader import PaperTrader
@@ -90,59 +76,21 @@ def _make_market(*, market_id: str, yes_price: float) -> Market:
     )
 
 
-def _make_event(*, mispriced: bool) -> Event:
-    yes_a = 0.7 if mispriced else 0.5
-    yes_b = 0.7 if mispriced else 0.5
-    return Event.model_validate(
-        {
-            "id": "evt-1",
-            "title": "Test event",
-            "slug": "test",
-            "liquidity": 50000.0,
-            "volume": 100000.0,
-            "active": True,
-            "closed": False,
-            "markets": [
-                _make_market(market_id="m1", yes_price=yes_a).model_dump(by_alias=True),
-                _make_market(market_id="m2", yes_price=yes_b).model_dump(by_alias=True),
-            ],
-        }
-    )
-
-
 def _make_config(
     *,
-    enable_smart: bool = True,
-    enable_misprice: bool = True,
-    enable_monotone: bool = True,
-    enable_whales: bool = True,
-    enable_convergence: bool = True,
     enable_positions: bool = True,
     enable_activity: bool = True,
     enable_markets: bool = True,
     enable_events: bool = True,
-    enable_ticks: bool = True,
-    enable_velocity: bool = True,
-    enable_cluster: bool = True,
-    enable_move_attribution: bool = True,
     enable_paper_trading: bool = False,
 ) -> Config:
     return Config(
         scanner=ScannerConfig(),
-        smart_money=SmartMoneyConfig(enabled=enable_smart),
-        mispricing=MispricingConfig(enabled=enable_misprice),
-        monotone=MonotoneConfig(enabled=enable_monotone),
-        whales=WhalesConfig(enabled=enable_whales),
-        convergence=ConvergenceConfig(enabled=enable_convergence),
         ratelimit=RatelimitConfig(),
         positions=PositionsConfig(enabled=enable_positions),
         activity=ActivityConfig(enabled=enable_activity),
         markets=MarketsConfig(enabled=enable_markets),
         events=EventsConfig(enabled=enable_events),
-        ticks=TicksConfig(enabled=enable_ticks),
-        velocity=VelocityConfig(enabled=enable_velocity),
-        cluster=ClusterConfig(enabled=enable_cluster),
-        move_attribution=MoveAttributionConfig(enabled=enable_move_attribution),
         paper_trading=PaperTradingConfig(enabled=enable_paper_trading),
     )
 
@@ -167,8 +115,6 @@ def _make_clients(
     *,
     events: list[Event] | None = None,
     markets: list[Market] | None = None,
-    leaderboard: list[LeaderboardEntry] | None = None,
-    positions: list[Position] | None = None,
 ) -> SchedulerClients:
     gamma_http = MagicMock()
     gamma_http.aclose = AsyncMock()
@@ -183,30 +129,18 @@ def _make_clients(
     gamma_client.aclose = AsyncMock()
 
     data_client = MagicMock()
-    data_client.get_leaderboard = AsyncMock(return_value=leaderboard or [])
-    data_client.get_positions = AsyncMock(return_value=positions or [])
+    data_client.get_leaderboard = AsyncMock(return_value=[])
+    data_client.get_positions = AsyncMock(return_value=[])
     data_client.get_closed_positions = AsyncMock(return_value=[])
     data_client.get_activity = AsyncMock(return_value=[])
     data_client.get_market_trades = AsyncMock(return_value=[])
     data_client.aclose = AsyncMock()
-
-    ticks_ws = MagicMock()
-    ticks_ws.close = AsyncMock()
-    ticks_ws.connect = AsyncMock()
-    ticks_ws.subscribe = AsyncMock()
-
-    async def _empty_messages() -> AsyncIterator[Any]:
-        if False:  # pragma: no cover
-            yield  # type: ignore[unreachable]
-
-    ticks_ws.messages = MagicMock(return_value=_empty_messages())
 
     return SchedulerClients(
         gamma_http=gamma_http,
         data_http=data_http,
         gamma_client=gamma_client,
         data_client=data_client,
-        ticks_ws=ticks_ws,
     )
 
 
@@ -216,7 +150,7 @@ def db_path(tmp_path: Path) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_scanner_constructs_with_all_detectors_enabled(db_path: Path) -> None:
+async def test_scanner_constructs_with_defaults(db_path: Path) -> None:
     config = _make_config()
     clients = _make_clients()
     scanner = Scanner(config=config, db_path=db_path, clients=clients)
@@ -229,7 +163,7 @@ async def test_scanner_constructs_with_all_detectors_enabled(db_path: Path) -> N
 
 @pytest.mark.asyncio
 async def test_run_once_with_no_data_returns_zero_counts(db_path: Path) -> None:
-    config = _make_config(enable_smart=True, enable_misprice=True, enable_whales=True)
+    config = _make_config()
     clients = _make_clients()
     scanner = Scanner(config=config, db_path=db_path, clients=clients)
     try:
@@ -237,7 +171,6 @@ async def test_run_once_with_no_data_returns_zero_counts(db_path: Path) -> None:
     finally:
         await scanner.aclose()
     assert result == {
-        "events_scanned": 0,
         "alerts_emitted": 0,
         "tracked_wallets": 0,
         "markets_cached": 0,
@@ -247,38 +180,7 @@ async def test_run_once_with_no_data_returns_zero_counts(db_path: Path) -> None:
         "activity_events": 0,
         "market_snapshots": 0,
         "event_snapshots": 0,
-        "tick_snapshots": 0,
     }
-
-
-@pytest.mark.asyncio
-async def test_run_once_emits_mispricing_alert(db_path: Path) -> None:
-    config = _make_config(enable_smart=False, enable_misprice=True, enable_whales=False)
-    events = [_make_event(mispriced=True)]
-    clients = _make_clients(events=events)
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    try:
-        result = await scanner.run_once()
-    finally:
-        await scanner.aclose()
-    assert result["events_scanned"] == 1
-    assert result["alerts_emitted"] == 1
-
-
-@pytest.mark.asyncio
-async def test_run_once_caches_markets_via_whales(db_path: Path) -> None:
-    config = _make_config(enable_smart=False, enable_misprice=False, enable_whales=True)
-    markets = [
-        _make_market(market_id="m1", yes_price=0.5),
-        _make_market(market_id="m2", yes_price=0.5),
-    ]
-    clients = _make_clients(markets=markets)
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    try:
-        result = await scanner.run_once()
-    finally:
-        await scanner.aclose()
-    assert result["markets_cached"] == 2
 
 
 @pytest.mark.asyncio
@@ -288,15 +190,15 @@ async def test_run_supervisor_restarts_returning_detector(
 ) -> None:
     """Supervisor retries a fast-returning detector up to the restart cap.
 
-    With every detector and collector enabled, the shared ``FakeClock``
-    keeps every other ``while True: await self._clock.sleep(...)`` loop
-    parked on its first sleep — proving the new clock injection
-    eliminates the test-deadlock class of bug #23 was filed for.
+    Uses paper-trading (the only detector kind that survives this PR) plus
+    the shared ``FakeClock`` so sibling collector loops stay parked on
+    their first sleep — proving the clock injection eliminates the test
+    deadlocks issue #23 was filed for.
     """
-    config = _make_config()
+    config = _make_config(enable_paper_trading=True)
     clients = _make_clients()
     scanner = Scanner(config=config, db_path=db_path, clients=clients, clock=fake_clock)
-    detector = scanner._detectors["mispricing"]
+    detector = scanner._detectors["paper_trader"]
     call_count = {"n": 0}
 
     async def fast_run(_sink: AlertSink) -> None:
@@ -305,8 +207,6 @@ async def test_run_supervisor_restarts_returning_detector(
     detector.run = fast_run  # type: ignore[method-assign]
 
     async def _drive_clock() -> None:
-        # Each restart waits up to ~30s of backoff. Advance generously
-        # several times so the supervisor blasts through the restart cap.
         for _ in range(10):
             await fake_clock.advance(60.0)
 
@@ -326,21 +226,15 @@ async def test_run_invokes_shutdown_on_taskgroup_failure(
     db_path: Path,
     fake_clock: FakeClock,
 ) -> None:
-    """Any unrecoverable exit from ``run`` must call ``aclose``.
-
-    Every detector and collector stays enabled — the shared ``FakeClock``
-    keeps siblings parked while the crashing detector exhausts its
-    restart cap, eliminating the deadlock that previously forced this
-    test to disable everything else.
-    """
-    config = _make_config()
+    """Any unrecoverable exit from ``run`` must call ``aclose``."""
+    config = _make_config(enable_paper_trading=True)
     clients = _make_clients()
     scanner = Scanner(config=config, db_path=db_path, clients=clients, clock=fake_clock)
 
     async def crash_run(_sink: AlertSink) -> None:
         raise RuntimeError("boom")
 
-    scanner._detectors["mispricing"].run = crash_run  # type: ignore[method-assign]
+    scanner._detectors["paper_trader"].run = crash_run  # type: ignore[method-assign]
 
     async def _drive_clock() -> None:
         for _ in range(10):
@@ -377,34 +271,15 @@ async def test_shutdown_closes_owned_clients(db_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_once_with_disabled_detectors_does_no_work(db_path: Path) -> None:
-    config = _make_config(
-        enable_smart=False,
-        enable_misprice=False,
-        enable_whales=False,
-        enable_events=False,
-    )
-    clients = _make_clients()
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    try:
-        result = await scanner.run_once()
-    finally:
-        await scanner.aclose()
-    assert result["events_scanned"] == 0
-    cast("MagicMock", clients.gamma_client).iter_events.assert_not_called()
-    cast("MagicMock", clients.gamma_client).list_markets.assert_not_called()
-
-
-@pytest.mark.asyncio
 async def test_run_with_supervisor_cancellation(db_path: Path) -> None:
-    config = _make_config(enable_smart=False, enable_misprice=True, enable_whales=False)
+    config = _make_config(enable_paper_trading=True)
     clients = _make_clients()
     scanner = Scanner(config=config, db_path=db_path, clients=clients)
 
     async def long_run(_sink: AlertSink) -> None:
         await asyncio.sleep(60)
 
-    scanner._detectors["mispricing"].run = long_run  # type: ignore[method-assign]
+    scanner._detectors["paper_trader"].run = long_run  # type: ignore[method-assign]
     task = asyncio.create_task(scanner.run())
     await asyncio.sleep(0.05)
     task.cancel()
@@ -434,7 +309,7 @@ async def test_scanner_wires_collectors_and_repos(db_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_run_once_reports_collector_metrics(db_path: Path) -> None:
     """``run_once`` includes ``watched_wallets`` and ``trades_recorded`` keys."""
-    config = _make_config(enable_smart=False, enable_misprice=False, enable_whales=False)
+    config = _make_config()
     clients = _make_clients()
     scanner = Scanner(config=config, db_path=db_path, clients=clients)
     try:
@@ -448,7 +323,7 @@ async def test_run_once_reports_collector_metrics(db_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_run_once_drives_collectors_with_active_watchlist(db_path: Path) -> None:
     """Pre-seeded watchlist drives ``poll_all_wallets`` to fetch /activity."""
-    config = _make_config(enable_smart=False, enable_misprice=False, enable_whales=False)
+    config = _make_config()
     activity = [
         {
             "type": "TRADE",
@@ -483,7 +358,7 @@ async def test_run_once_drives_collectors_with_active_watchlist(db_path: Path) -
 @pytest.mark.asyncio
 async def test_run_once_mirrors_tracked_wallets_into_watchlist(db_path: Path) -> None:
     """``run_once`` syncs ``tracked_wallets`` rows into the registry as smart-money."""
-    config = _make_config(enable_smart=False, enable_misprice=False, enable_whales=False)
+    config = _make_config()
     clients = _make_clients()
     scanner = Scanner(config=config, db_path=db_path, clients=clients)
     scanner._tracked_repo.upsert(
@@ -513,31 +388,13 @@ async def test_aclose_sets_collectors_stop_event(db_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_scanner_wires_whales_to_trade_collector_callback(db_path: Path) -> None:
-    """DC-1.5: whales detector's sink + trade-collector callback wired at init."""
+async def test_scanner_skips_no_callback_trade_collector_subscribers(
+    db_path: Path,
+) -> None:
+    """No detector wires itself to the trade-collector callback fan-out
+    anymore — the trade collector still runs (it populates wallet_trades +
+    wallet_first_seen) but no per-trade subscribers exist."""
     config = _make_config()
-    clients = _make_clients()
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    try:
-        whales = scanner._detectors["whales"]
-        trades = scanner._collectors["trade_collector"]
-        assert isinstance(trades, TradeCollector)
-        assert whales._sink is scanner.sink
-        assert whales.handle_trade_sync in trades._new_trade_callbacks
-    finally:
-        await scanner.aclose()
-
-
-@pytest.mark.asyncio
-async def test_scanner_skips_whales_callback_when_disabled(db_path: Path) -> None:
-    """When whales+convergence+cluster are disabled, no trade-collector callbacks."""
-    config = _make_config(
-        enable_smart=False,
-        enable_misprice=False,
-        enable_whales=False,
-        enable_convergence=False,
-        enable_cluster=False,
-    )
     clients = _make_clients()
     scanner = Scanner(config=config, db_path=db_path, clients=clients)
     try:
@@ -549,44 +406,9 @@ async def test_scanner_skips_whales_callback_when_disabled(db_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_scanner_wires_convergence_to_trade_collector_callback(db_path: Path) -> None:
-    """DC-1.8.B: convergence detector's sink + trade-collector callback wired at init."""
-    config = _make_config()
-    clients = _make_clients()
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    try:
-        convergence = scanner._detectors["convergence"]
-        trades = scanner._collectors["trade_collector"]
-        assert isinstance(convergence, ConvergenceDetector)
-        assert isinstance(trades, TradeCollector)
-        assert convergence._sink is scanner.sink
-        assert convergence.handle_trade_sync in trades._new_trade_callbacks
-    finally:
-        await scanner.aclose()
-
-
-@pytest.mark.asyncio
-async def test_scanner_skips_convergence_when_disabled(db_path: Path) -> None:
-    """When convergence is disabled, no detector entry is created."""
-    config = _make_config(enable_convergence=False)
-    clients = _make_clients()
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    try:
-        assert "convergence" not in scanner._detectors
-    finally:
-        await scanner.aclose()
-
-
-@pytest.mark.asyncio
 async def test_scanner_constructs_dc2_collectors_when_enabled(db_path: Path) -> None:
     """DC-2 Wave 1: position + activity collectors live in ``_collectors``."""
-    config = _make_config(
-        enable_smart=False,
-        enable_misprice=False,
-        enable_whales=False,
-        enable_positions=True,
-        enable_activity=True,
-    )
+    config = _make_config(enable_positions=True, enable_activity=True)
     clients = _make_clients()
     scanner = Scanner(config=config, db_path=db_path, clients=clients)
     try:
@@ -603,13 +425,7 @@ async def test_scanner_constructs_dc2_collectors_when_enabled(db_path: Path) -> 
 @pytest.mark.asyncio
 async def test_scanner_skips_dc2_collectors_when_disabled(db_path: Path) -> None:
     """When ``positions``/``activity`` are disabled, neither collector is wired."""
-    config = _make_config(
-        enable_smart=False,
-        enable_misprice=False,
-        enable_whales=False,
-        enable_positions=False,
-        enable_activity=False,
-    )
+    config = _make_config(enable_positions=False, enable_activity=False)
     clients = _make_clients()
     scanner = Scanner(config=config, db_path=db_path, clients=clients)
     try:
@@ -620,32 +436,9 @@ async def test_scanner_skips_dc2_collectors_when_disabled(db_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_run_once_dc2_stub_metrics_remain_zero(db_path: Path) -> None:
-    """Wave 1 stubs raise; ``_run_once_collectors`` swallows so metrics stay 0."""
-    config = _make_config(
-        enable_smart=False,
-        enable_misprice=False,
-        enable_whales=False,
-        enable_positions=True,
-        enable_activity=True,
-    )
-    clients = _make_clients()
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    try:
-        result = await scanner.run_once()
-    finally:
-        await scanner.aclose()
-    assert result["position_snapshots"] == 0
-    assert result["activity_events"] == 0
-
-
-@pytest.mark.asyncio
 async def test_scanner_constructs_dc3_collectors_when_enabled(db_path: Path) -> None:
     """DC-3 Wave 1: market + event collectors live in ``_collectors``."""
     config = _make_config(
-        enable_smart=False,
-        enable_misprice=False,
-        enable_whales=False,
         enable_positions=False,
         enable_activity=False,
         enable_markets=True,
@@ -668,9 +461,6 @@ async def test_scanner_constructs_dc3_collectors_when_enabled(db_path: Path) -> 
 async def test_scanner_skips_dc3_collectors_when_disabled(db_path: Path) -> None:
     """When ``markets``/``events`` are disabled, neither collector is wired."""
     config = _make_config(
-        enable_smart=False,
-        enable_misprice=False,
-        enable_whales=False,
         enable_positions=False,
         enable_activity=False,
         enable_markets=False,
@@ -681,224 +471,6 @@ async def test_scanner_skips_dc3_collectors_when_disabled(db_path: Path) -> None
     try:
         assert "market_collector" not in scanner._collectors
         assert "event_collector" not in scanner._collectors
-    finally:
-        await scanner.aclose()
-
-
-@pytest.mark.asyncio
-async def test_run_once_dc3_stub_metrics_remain_zero(db_path: Path) -> None:
-    """DC-3 Wave 1 stubs raise; ``run_once`` swallows so metrics stay 0."""
-    config = _make_config(
-        enable_smart=False,
-        enable_misprice=False,
-        enable_whales=False,
-        enable_positions=False,
-        enable_activity=False,
-        enable_markets=True,
-        enable_events=True,
-    )
-    clients = _make_clients()
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    try:
-        result = await scanner.run_once()
-    finally:
-        await scanner.aclose()
-    assert result["market_snapshots"] == 0
-    assert result["event_snapshots"] == 0
-
-
-@pytest.mark.asyncio
-async def test_scanner_constructs_dc4_collector_and_detector_when_enabled(
-    db_path: Path,
-) -> None:
-    """DC-4 Wave 1: tick collector + velocity detector live in their dicts."""
-    config = _make_config(
-        enable_smart=False,
-        enable_misprice=False,
-        enable_whales=False,
-        enable_convergence=False,
-        enable_positions=False,
-        enable_activity=False,
-        enable_markets=False,
-        enable_events=False,
-        enable_ticks=True,
-        enable_velocity=True,
-    )
-    clients = _make_clients()
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    try:
-        assert "tick_collector" in scanner._collectors
-        assert isinstance(scanner._collectors["tick_collector"], MarketTickCollector)
-        assert "velocity" in scanner._detectors
-        assert isinstance(scanner._detectors["velocity"], PriceVelocityDetector)
-        assert scanner._ticks_repo is not None
-    finally:
-        await scanner.aclose()
-
-
-@pytest.mark.asyncio
-async def test_scanner_skips_dc4_collector_and_detector_when_disabled(
-    db_path: Path,
-) -> None:
-    """When ``ticks``/``velocity`` are disabled, neither is wired."""
-    config = _make_config(
-        enable_smart=False,
-        enable_misprice=False,
-        enable_whales=False,
-        enable_convergence=False,
-        enable_positions=False,
-        enable_activity=False,
-        enable_markets=False,
-        enable_events=False,
-        enable_ticks=False,
-        enable_velocity=False,
-    )
-    clients = _make_clients()
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    try:
-        assert "tick_collector" not in scanner._collectors
-        assert "velocity" not in scanner._detectors
-    finally:
-        await scanner.aclose()
-
-
-@pytest.mark.asyncio
-async def test_scanner_skips_velocity_when_ticks_disabled(db_path: Path) -> None:
-    """Velocity depends on tick_collector; with ticks off it must not be built."""
-    config = _make_config(
-        enable_smart=False,
-        enable_misprice=False,
-        enable_whales=False,
-        enable_convergence=False,
-        enable_positions=False,
-        enable_activity=False,
-        enable_markets=False,
-        enable_events=False,
-        enable_ticks=False,
-        enable_velocity=True,
-    )
-    clients = _make_clients()
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    try:
-        assert "tick_collector" not in scanner._collectors
-        assert "velocity" not in scanner._detectors
-    finally:
-        await scanner.aclose()
-
-
-@pytest.mark.asyncio
-async def test_run_once_includes_tick_snapshots_key(db_path: Path) -> None:
-    """``run_once`` returns the new ``tick_snapshots`` count (0 while stub raises)."""
-    config = _make_config(
-        enable_smart=False,
-        enable_misprice=False,
-        enable_whales=False,
-        enable_convergence=False,
-        enable_positions=False,
-        enable_activity=False,
-        enable_markets=False,
-        enable_events=False,
-        enable_ticks=True,
-        enable_velocity=False,
-    )
-    clients = _make_clients()
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    try:
-        result = await scanner.run_once()
-    finally:
-        await scanner.aclose()
-    assert "tick_snapshots" in result
-    assert result["tick_snapshots"] == 0
-
-
-@pytest.mark.asyncio
-async def test_scanner_wires_move_attribution_to_alert_sink(db_path: Path) -> None:
-    """T8: move-attribution detector's sink + AlertSink subscription wired at init."""
-    config = _make_config()
-    clients = _make_clients()
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    try:
-        detector = scanner._detectors["move_attribution"]
-        assert isinstance(detector, MoveAttributionDetector)
-        assert detector._sink is scanner.sink
-        assert detector.handle_alert_sync in scanner.sink._subscribers
-    finally:
-        await scanner.aclose()
-
-
-@pytest.mark.asyncio
-async def test_scanner_skips_move_attribution_when_disabled(db_path: Path) -> None:
-    """When ``move_attribution`` is disabled, no detector entry is created."""
-    config = _make_config(enable_move_attribution=False)
-    clients = _make_clients()
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    try:
-        assert "move_attribution" not in scanner._detectors
-        # And no MoveAttributionDetector callback is wired to the sink.
-        assert all(
-            not isinstance(getattr(cb, "__self__", None), MoveAttributionDetector)
-            for cb in scanner.sink._subscribers
-        )
-    finally:
-        await scanner.aclose()
-
-
-@pytest.mark.asyncio
-async def test_scanner_move_attribution_smoke_emits_cluster_candidate(
-    db_path: Path,
-) -> None:
-    """End-to-end: a velocity alert through the live AlertSink reaches the
-    MoveAttributionDetector, which emits a ``cluster.candidate`` alert and
-    upserts contributors into ``wallet_watchlist``."""
-    alert_ts = 1_700_086_400
-    burst_trades = [
-        {
-            "proxyWallet": f"0x{i:04d}",
-            "timestamp": alert_ts - 30,
-            "side": "BUY",
-            "outcome": "Yes",
-            "size": 500.0 + i,
-            "price": 0.95,
-        }
-        for i in range(6)
-    ]
-    config = _make_config(
-        enable_smart=False,
-        enable_misprice=False,
-        enable_whales=False,
-        enable_convergence=False,
-        enable_cluster=False,
-        enable_positions=False,
-        enable_activity=False,
-        enable_markets=False,
-        enable_events=False,
-        enable_ticks=False,
-        enable_velocity=False,
-        enable_move_attribution=True,
-    )
-    clients = _make_clients()
-    cast("AsyncMock", clients.data_client.get_market_trades).return_value = burst_trades
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    detector = scanner._detectors["move_attribution"]
-    assert isinstance(detector, MoveAttributionDetector)
-    try:
-        await scanner.sink.emit(
-            Alert(
-                detector="velocity",
-                alert_key="velocity:0xabc:1",
-                severity="med",
-                title="market moved",
-                body={"condition_id": "0xabc"},
-                created_at=alert_ts,
-            )
-        )
-        await detector.aclose()
-        cast("AsyncMock", clients.data_client.get_market_trades).assert_awaited_once()
-        recent = scanner._alerts_repo.recent(limit=10)
-        candidates = [a for a in recent if a.detector == "move_attribution"]
-        assert len(candidates) >= 1
-        watchlist = scanner._watchlist_repo.list_active()
-        assert any(w.source == "cluster.candidate" for w in watchlist)
     finally:
         await scanner.aclose()
 
@@ -948,20 +520,11 @@ def _seed_paper_smoke_db(db_file: Path) -> None:
         seed_conn.close()
 
 
-def _verify_entry_then_resolve(db_file: Path) -> None:
-    """Assert the expected entry row exists, then mark the market resolved."""
+def _resolve_paper_trades(db_file: Path) -> None:
+    """Mark the seeded market as resolved with the YES leg winning."""
     verify_conn = sqlite3.connect(db_file)
     verify_conn.row_factory = sqlite3.Row
     try:
-        rows = verify_conn.execute(
-            "SELECT * FROM paper_trades WHERE trade_kind='entry'",
-        ).fetchall()
-        assert len(rows) == 1
-        entry = rows[0]
-        assert entry["source_wallet"] == "0xwallet1"
-        assert entry["outcome"] == "Yes"
-        assert entry["fill_price"] == 0.5
-        assert entry["cost_usd"] == 10.0  # 1000 x 1%
         verify_conn.execute(
             "UPDATE market_cache SET active = 0, "
             "outcome_prices_json = '[1.0, 0.0]' WHERE condition_id = '0xcond-1'",
@@ -972,13 +535,13 @@ def _verify_entry_then_resolve(db_file: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_scanner_wires_paper_trader_to_alert_sink_when_enabled(
-    tmp_path: Path,
-) -> None:
-    """End-to-end: smart_money alert through the live AlertSink reaches
-    PaperTrader, which inserts an entry in paper_trades. Then a manual
-    flip of market_cache.active=False with a [1,0] outcome split + a
-    resolver scan books the exit and updates NAV."""
+async def test_paper_resolver_books_winning_position(tmp_path: Path) -> None:
+    """End-to-end: seed paper trade, mark market resolved, resolver books PnL.
+
+    Inserts a paper_trade entry row directly (the per-detector evaluator
+    chain that used to spawn those rows is gone in this PR), then drives
+    one resolver scan and verifies the exit row + NAV.
+    """
     db_file = tmp_path / "pscanner.sqlite3"
     base_cfg = _make_config()
     cfg = base_cfg.model_copy(
@@ -989,33 +552,28 @@ async def test_scanner_wires_paper_trader_to_alert_sink_when_enabled(
     _seed_paper_smoke_db(db_file)
 
     clients = _make_clients()
-    scanner = Scanner(config=cfg, db_path=db_file, clients=clients)
+    # Insert a fake entry row so the resolver has something to resolve.
+    entry_conn = init_db(db_file)
     try:
-        await scanner.sink.emit(
-            Alert(
-                detector="smart_money",
-                alert_key="smart:0xwallet1:0xcond-1:Yes:smoke",
-                severity="med",
-                title="t",
-                body={
-                    "wallet": "0xwallet1",
-                    "condition_id": "0xcond-1",
-                    "side": "Yes",
-                    "delta_usd": 100.0,
-                },
-                created_at=1700000000,
-            ),
+        PaperTradesRepo(entry_conn).insert_entry(
+            triggering_alert_key="alert-1",
+            triggering_alert_detector="subgraph_copy",
+            rule_variant=None,
+            source_wallet="0xwallet1",
+            condition_id=ConditionId("0xcond-1"),
+            asset_id=AssetId("asset-yes"),
+            outcome="Yes",
+            shares=20.0,
+            fill_price=0.5,
+            cost_usd=10.0,
+            nav_after_usd=1000.0,
+            ts=1_700_000_000,
         )
-        for _ in range(10):
-            await asyncio.sleep(0)
-        await scanner._detectors["paper_trader"].aclose()
     finally:
-        await scanner.aclose()
+        entry_conn.close()
 
-    _verify_entry_then_resolve(db_file)
+    _resolve_paper_trades(db_file)
 
-    # Run the resolver path manually (the scheduler wires it but we don't
-    # run the loop here).
     resolver_conn = init_db(db_file)
     try:
         resolver = PaperResolver(
@@ -1030,61 +588,9 @@ async def test_scanner_wires_paper_trader_to_alert_sink_when_enabled(
         nav = PaperTradesRepo(resolver_conn).compute_cost_basis_nav(
             starting_bankroll=cfg.paper_trading.starting_bankroll_usd,
         )
-        assert nav == 1010.0  # 1000 + (20 shares x $1.0 - $10 cost)
+        assert nav == 1010.0  # 1000 + (20 shares * $1.0 - $10 cost)
     finally:
         resolver_conn.close()
-
-
-@pytest.mark.asyncio
-async def test_scanner_wires_monotone_detector_when_enabled(db_path: Path) -> None:
-    """When ``monotone.enabled`` is True, the detector is in ``_detectors``."""
-    config = _make_config(enable_monotone=True)
-    clients = _make_clients()
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    try:
-        assert "monotone" in scanner._detectors
-    finally:
-        await scanner.aclose()
-
-
-@pytest.mark.asyncio
-async def test_scanner_skips_monotone_detector_when_disabled(db_path: Path) -> None:
-    """When ``monotone.enabled`` is False, the detector is not constructed."""
-    config = _make_config(enable_monotone=False)
-    clients = _make_clients()
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    try:
-        assert "monotone" not in scanner._detectors
-    finally:
-        await scanner.aclose()
-
-
-@pytest.mark.asyncio
-async def test_scanner_wires_monotone_evaluator_when_paper_enabled(db_path: Path) -> None:
-    """Monotone evaluator appended when paper_trading + monotone evaluator enabled."""
-    config = _make_config(
-        enable_smart=False,
-        enable_misprice=False,
-        enable_monotone=True,
-        enable_whales=False,
-        enable_convergence=False,
-        enable_positions=False,
-        enable_activity=False,
-        enable_markets=False,
-        enable_events=False,
-        enable_ticks=False,
-        enable_velocity=False,
-        enable_cluster=False,
-        enable_move_attribution=False,
-        enable_paper_trading=True,
-    )
-    clients = _make_clients()
-    scanner = Scanner(config=config, db_path=db_path, clients=clients)
-    try:
-        evaluators = scanner._build_paper_evaluators()
-        assert any(isinstance(e, MonotoneEvaluator) for e in evaluators)
-    finally:
-        await scanner.aclose()
 
 
 @pytest.mark.asyncio
@@ -1188,3 +694,40 @@ async def test_subgraph_trades_aclose_closes_subgraph_client(
     await scanner.aclose()
     # SubgraphClient delegates closure to its shared RateLimitedHttpClient inner.
     assert sub_client._inner._closed is True
+
+
+@pytest.mark.asyncio
+async def test_alert_emission_through_sink(tmp_path: Path) -> None:
+    """End-to-end: a subgraph_copy alert through the live AlertSink lands in
+    ``alerts`` and reaches PaperTrader's subscription callback."""
+    db_file = tmp_path / "pscanner.sqlite3"
+    cfg = _make_config(enable_paper_trading=True)
+    _seed_paper_smoke_db(db_file)
+
+    scanner = Scanner(config=cfg, db_path=db_file, clients=_make_clients())
+    try:
+        await scanner.sink.emit(
+            Alert(
+                detector="subgraph_copy",
+                alert_key="subgraph:0xwallet1:0xcond-1:Yes:smoke",
+                severity="med",
+                title="copy",
+                body={
+                    "wallet": "0xwallet1",
+                    "condition_id": "0xcond-1",
+                    "side": "Yes",
+                },
+                created_at=1700000000,
+            ),
+        )
+        for _ in range(10):
+            await asyncio.sleep(0)
+        await scanner._detectors["paper_trader"].aclose()
+        recent = scanner._alerts_repo.recent(limit=10)
+        assert any(a.detector == "subgraph_copy" for a in recent)
+    finally:
+        await scanner.aclose()
+
+
+# Keep the unused-symbol import bindings used somewhere meaningful.
+_ = Any

@@ -8,16 +8,7 @@ from pscanner import __version__
 from pscanner.alerts.models import Alert
 from pscanner.alerts.sink import AlertSink
 from pscanner.alerts.terminal import TerminalRenderer
-from pscanner.config import (
-    Config,
-    MispricingConfig,
-    RatelimitConfig,
-    ScannerConfig,
-    SmartMoneyConfig,
-    WhalesConfig,
-)
-from pscanner.detectors.base import Detector
-from pscanner.poly.clob_ws import MarketWebSocket
+from pscanner.config import Config, RatelimitConfig, ScannerConfig
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.http import PolyHttpClient
@@ -29,8 +20,6 @@ from pscanner.poly.models import (
     Outcome,
     Position,
     Trade,
-    WsBookMessage,
-    WsTradeMessage,
 )
 from pscanner.store.repo import (
     AlertsRepo,
@@ -55,8 +44,6 @@ def test_public_symbols_importable() -> None:
     assert Alert.__name__ == "Alert"
     assert AlertSink.__name__ == "AlertSink"
     assert TerminalRenderer.__name__ == "TerminalRenderer"
-    assert Detector.__name__ == "Detector"
-    assert MarketWebSocket.__name__ == "MarketWebSocket"
     assert DataClient.__name__ == "DataClient"
     assert GammaClient.__name__ == "GammaClient"
     assert PolyHttpClient.__name__ == "PolyHttpClient"
@@ -68,8 +55,6 @@ def test_public_symbols_importable() -> None:
         ClosedPosition,
         Trade,
         LeaderboardEntry,
-        WsTradeMessage,
-        WsBookMessage,
     ):
         assert cls.__name__ == cls.__name__
     for cls in (
@@ -91,14 +76,7 @@ def test_config_load_defaults_when_absent(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("PSCANNER_CONFIG", raising=False)
     cfg = Config.load()
     assert isinstance(cfg.scanner, ScannerConfig)
-    assert isinstance(cfg.smart_money, SmartMoneyConfig)
-    assert isinstance(cfg.mispricing, MispricingConfig)
-    assert isinstance(cfg.whales, WhalesConfig)
     assert isinstance(cfg.ratelimit, RatelimitConfig)
-    assert cfg.smart_money.min_edge == 0.05
-    assert cfg.smart_money.min_excess_pnl_usd == 1000.0
-    assert cfg.mispricing.sum_deviation_threshold == 0.03
-    assert cfg.whales.big_bet_min_usd == 2000.0
     assert cfg.ratelimit.gamma_rpm == 50
 
 
@@ -108,14 +86,10 @@ def test_config_load_from_explicit_path(tmp_path) -> None:
         """
         [scanner]
         log_level = "DEBUG"
-
-        [smart_money]
-        min_edge = 0.10
         """
     )
     cfg = Config.load(cfg_file)
     assert cfg.scanner.log_level == "DEBUG"
-    assert cfg.smart_money.min_edge == 0.10
 
 
 def test_init_db_creates_all_tables(tmp_db: sqlite3.Connection) -> None:
@@ -178,12 +152,6 @@ def test_leaderboard_entry_aliases_amount(sample_leaderboard_json) -> None:
     assert all(isinstance(e.pnl, float) for e in entries)
 
 
-def test_ws_trade_message_parses(sample_trade_ws_json) -> None:
-    msg = WsTradeMessage.model_validate(sample_trade_ws_json)
-    assert msg.event_type == "trade"
-    assert msg.status == "CONFIRMED"
-
-
 def test_trade_usd_value_computed() -> None:
     trade = Trade.model_validate(
         {
@@ -202,11 +170,11 @@ def test_trade_usd_value_computed() -> None:
 
 def test_alert_dataclass_is_frozen() -> None:
     alert = Alert(
-        detector="smart_money",
+        detector="subgraph_copy",
         alert_key="k",
         severity="med",
         title="t",
         body={"x": 1},
         created_at=1,
     )
-    assert alert.detector == "smart_money"
+    assert alert.detector == "subgraph_copy"

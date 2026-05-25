@@ -1,17 +1,8 @@
-"""Shared periodic-loop helper used by polling-shaped detector loops.
+"""Shared periodic-loop helper used by polling-shaped loops.
 
 The "while True / try work / except CancelledError raise / except Exception
-log / sleep" pattern was duplicated across five detector loop sites:
-
-* :class:`PollingDetector.run` (canonical version).
-* :class:`ClusterDetector.run`.
-* :class:`WhalesDetector.run`.
-* :meth:`SmartMoneyDetector._refresh_loop` and
-  :meth:`SmartMoneyDetector._poll_loop`.
-
-This module hosts the single shared implementation. Stream-driven
-detectors (e.g. :class:`PriceVelocityDetector`) use a different
-``async for`` shape and stay on their inline implementation.
+log / sleep" pattern lives here as the single shared implementation;
+:class:`PollingDetector.run` is the canonical caller.
 """
 
 from __future__ import annotations

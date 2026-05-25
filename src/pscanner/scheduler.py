@@ -30,10 +30,8 @@ from typing import Any, TypeVar
 
 import structlog
 
-from pscanner.alerts.protocol import IAlertSink
 from pscanner.alerts.sink import AlertSink
 from pscanner.alerts.terminal import TerminalRenderer
-from pscanner.alerts.worker_sink import WorkerSink
 from pscanner.collectors.activity import ActivityCollector
 from pscanner.collectors.base import Collector
 from pscanner.collectors.events import EventCollector
@@ -41,7 +39,6 @@ from pscanner.collectors.market_scoped_trades import MarketScopedTradeCollector
 from pscanner.collectors.markets import MarketCollector
 from pscanner.collectors.positions import PositionCollector
 from pscanner.collectors.subgraph_trades import SubgraphTradeCollector
-from pscanner.collectors.ticks import MarketTickCollector
 from pscanner.collectors.trades import TradeCollector
 from pscanner.collectors.watchlist import WatchlistRegistry, WatchlistSyncer
 from pscanner.config import Config
@@ -53,22 +50,10 @@ from pscanner.daemon.corpus_loader import (
     load_corpus_resolutions_into,
 )
 from pscanner.daemon.live_history import LiveHistoryProvider
-from pscanner.detectors.cluster import ClusterDetector
-from pscanner.detectors.convergence import ConvergenceDetector
-from pscanner.detectors.gate_model import GateModelDetector
-from pscanner.detectors.mispricing import MispricingDetector
-from pscanner.detectors.monotone import MonotoneDetector
-from pscanner.detectors.move_attribution import MoveAttributionDetector
-from pscanner.detectors.smart_money import SmartMoneyDetector
-from pscanner.detectors.trade_driven import TradeDrivenDetector
-from pscanner.detectors.velocity import PriceVelocityDetector
-from pscanner.detectors.whales import WhalesDetector
-from pscanner.poly.clob_ws import MarketWebSocket
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.http import PolyHttpClient
 from pscanner.poly.subgraph import SubgraphClient
-from pscanner.poly.tick_stream import BroadcastTickStream
 from pscanner.store.db import init_db
 from pscanner.store.repo import (
     AlertsRepo,
@@ -92,14 +77,8 @@ from pscanner.store.repo import (
     WatchlistRepo,
 )
 from pscanner.strategies.evaluators import (
-    GateModelEvaluator,
-    MispricingEvaluator,
-    MonotoneEvaluator,
-    MoveAttributionEvaluator,
     SignalEvaluator,
-    SmartMoneyEvaluator,
     SubgraphCopyEvaluator,
-    VelocityEvaluator,
 )
 from pscanner.strategies.paper_resolver import PaperResolver
 from pscanner.strategies.paper_trader import PaperTrader
@@ -112,10 +91,6 @@ _DATA_BASE_URL = "https://data-api.polymarket.com"
 
 _MAX_RESTARTS = 3
 _RESTART_WINDOW_SECONDS = 300.0
-_RUN_ONCE_MARKETS_PAGE_SIZE = 200
-_RUN_ONCE_EVENTS_PAGE_SIZE = 100
-_RUN_ONCE_MAX_EVENT_PAGES = 5
-_RUN_ONCE_LEADERBOARD_LIMIT = 25
 
 _CollectorT = TypeVar("_CollectorT", bound=Collector)
 
@@ -132,7 +107,6 @@ class SchedulerClients:
     data_http: PolyHttpClient
     gamma_client: GammaClient
     data_client: DataClient
-    ticks_ws: MarketWebSocket
 
 
 class Scanner:
@@ -195,77 +169,26 @@ class Scanner:
         self._clients = clients or self._build_default_clients()
         self._renderer = TerminalRenderer()
         self._sink = AlertSink(self._alerts_repo, renderer=self._renderer)
-        self._detector_sinks: dict[str, IAlertSink] = {}
-        self._workers: list[WorkerSink] = []
         self._watchlist_registry = WatchlistRegistry(self._watchlist_repo)
-        self._tick_stream = BroadcastTickStream()
         self._collectors = self._build_collectors()
         self._detectors = self._build_detectors()
-        self._wire_trade_callbacks()
-        self._wire_market_scoped_trade_callbacks()
         self._wire_alert_subscribers()
         self._collectors_stop = asyncio.Event()
         self._closed = False
 
-    def _wire_trade_callbacks(self) -> None:
-        """Wire trade-collector callbacks for every trade-driven detector.
-
-        Each trade-driven detector evaluates per-trade and needs its
-        ``_sink`` populated before the run-loop starts so callbacks fire
-        correctly during the first poll cycle. :class:`ClusterDetector`
-        has a hybrid loop+callback shape and :class:`GateModelDetector`
-        is queue-deferred — neither inherits from
-        :class:`TradeDrivenDetector`, so both are wired explicitly via
-        ``isinstance`` widening alongside the TradeDrivenDetector
-        subclasses.
-        """
-        trade_collector = self._collectors.get("trade_collector")
-        if not isinstance(trade_collector, TradeCollector):
-            return
-        for detector in self._detectors.values():
-            if isinstance(
-                detector,
-                TradeDrivenDetector | ClusterDetector | GateModelDetector,
-            ):
-                detector.wire_sink(self._sink)
-                trade_collector.subscribe_new_trade(detector.handle_trade_sync)
-                _LOG.info("scanner.trade_driven_detector_wired", detector=detector.name)
-
-    def _wire_market_scoped_trade_callbacks(self) -> None:
-        """Wire MarketScopedTradeCollector to GateModelDetector callback."""
-        market_scoped = self._collectors.get("market_scoped_trades")
-        gate_detector = self._detectors.get("gate_model")
-        if not isinstance(market_scoped, MarketScopedTradeCollector):
-            return
-        if not isinstance(gate_detector, GateModelDetector):
-            return
-        gate_detector.wire_sink(self._sink)
-        market_scoped.subscribe_new_trade(gate_detector.handle_trade_sync)
-        _LOG.info("scanner.gate_model_wired", detector=gate_detector.name)
-
     def _wire_alert_subscribers(self) -> None:
         """Register every alert-driven detector as a subscriber on the sink.
 
-        Mirrors :meth:`_wire_trade_callbacks` but for detectors that listen
-        to upstream alerts rather than per-trade callbacks. Detectors that
-        re-emit downstream alerts (e.g. :class:`MoveAttributionDetector`)
-        also need their ``_sink`` populated before the run-loop starts so
-        the synchronous ``handle_alert_sync`` callback can spawn
-        ``evaluate`` tasks correctly during the very first
-        ``AlertSink.emit`` call. :class:`PaperTrader` only consumes
-        alerts — it never emits — so it just needs the subscription.
+        :class:`PaperTrader` only consumes alerts — it never emits — so it
+        just needs the subscription.
         """
         for detector in self._detectors.values():
-            if isinstance(detector, MoveAttributionDetector):
-                detector.wire_sink(self._sink)
-                self._sink.subscribe(detector.handle_alert_sync)
-                _LOG.info("scanner.alert_driven_detector_wired", detector=detector.name)
-            elif isinstance(detector, PaperTrader):
+            if isinstance(detector, PaperTrader):
                 self._sink.subscribe(detector.handle_alert_sync)
                 _LOG.info("scanner.alert_driven_detector_wired", detector=detector.name)
 
     def _build_default_clients(self) -> SchedulerClients:
-        """Construct the production HTTP/WS clients from config."""
+        """Construct the production HTTP clients from config."""
         gamma_http = PolyHttpClient(
             base_url=_GAMMA_BASE_URL,
             rpm=self._config.ratelimit.gamma_rpm,
@@ -279,7 +202,6 @@ class Scanner:
             data_http=data_http,
             gamma_client=GammaClient(http=gamma_http),
             data_client=DataClient(http=data_http),
-            ticks_ws=MarketWebSocket(),
         )
 
     def _build_collectors(self) -> dict[str, Collector]:
@@ -336,17 +258,6 @@ class Scanner:
                 snapshot_interval_seconds=self._config.events.snapshot_interval_seconds,
                 snapshot_max=self._config.events.snapshot_max,
             )
-        if self._config.ticks.enabled:
-            collectors["tick_collector"] = MarketTickCollector(
-                config=self._config.ticks,
-                ws=self._clients.ticks_ws,
-                gamma_client=self._clients.gamma_client,
-                data_client=self._clients.data_client,
-                registry=self._watchlist_registry,
-                ticks_repo=self._ticks_repo,
-                market_cache=self._market_cache_repo,
-                tick_stream=self._tick_stream,
-            )
         if self._config.gate_model_market_filter.enabled:
             collectors["market_scoped_trades"] = MarketScopedTradeCollector(
                 config=self._config.gate_model_market_filter,
@@ -395,81 +306,8 @@ class Scanner:
     def _build_detectors(self) -> dict[str, Any]:
         """Instantiate the enabled detectors from config."""
         detectors: dict[str, Any] = {}
-        if self._config.smart_money.enabled:
-            detectors["smart_money"] = SmartMoneyDetector(
-                config=self._config.smart_money,
-                data_client=self._clients.data_client,
-                gamma_client=self._clients.gamma_client,
-                tracked_repo=self._tracked_repo,
-                snapshots_repo=self._snapshots_repo,
-                categories_repo=self._categories_repo,
-                event_tag_cache=self._event_tag_cache_repo,
-                clock=self._clock,
-            )
-        if self._config.mispricing.enabled:
-            detectors["mispricing"] = MispricingDetector(
-                config=self._config.mispricing,
-                gamma_client=self._clients.gamma_client,
-                sum_history_repo=self._sum_history_repo,
-                clock=self._clock,
-            )
-        if self._config.monotone.enabled:
-            detectors["monotone"] = MonotoneDetector(
-                config=self._config.monotone,
-                gamma_client=self._clients.gamma_client,
-                clock=self._clock,
-            )
-        if self._config.whales.enabled:
-            detectors["whales"] = WhalesDetector(
-                config=self._config.whales,
-                gamma_client=self._clients.gamma_client,
-                data_client=self._clients.data_client,
-                market_cache=self._market_cache_repo,
-                wallet_first_seen=self._first_seen_repo,
-                clock=self._clock,
-            )
-        if self._config.convergence.enabled:
-            detectors["convergence"] = ConvergenceDetector(
-                config=self._config.convergence,
-                trades_repo=self._wallet_trades_repo,
-                category_repo=self._categories_repo,
-                market_cache=self._market_cache_repo,
-                event_tag_cache=self._event_tag_cache_repo,
-                smart_money_config=self._config.smart_money,
-            )
-        if self._config.cluster.enabled:
-            detectors["cluster"] = ClusterDetector(
-                config=self._config.cluster,
-                wallet_first_seen=self._first_seen_repo,
-                trades_repo=self._wallet_trades_repo,
-                market_cache=self._market_cache_repo,
-                clusters_repo=self._clusters_repo,
-                members_repo=self._cluster_members_repo,
-                clock=self._clock,
-            )
-        if self._config.move_attribution.enabled:
-            detectors["move_attribution"] = MoveAttributionDetector(
-                config=self._config.move_attribution,
-                data_client=self._clients.data_client,
-                watchlist_repo=self._watchlist_repo,
-            )
-        self._maybe_attach_gate_model_detector(detectors)
         self._maybe_attach_paper_trading(detectors)
-        self._maybe_attach_velocity_detector(detectors)
         return detectors
-
-    def _maybe_attach_gate_model_detector(self, detectors: dict[str, Any]) -> None:
-        """Attach gate-model detector when gate_model is enabled."""
-        if not self._config.gate_model.enabled:
-            return
-        if self._live_history_provider is None:
-            return
-        detectors["gate_model"] = GateModelDetector(
-            config=self._config.gate_model,
-            provider=self._live_history_provider,
-            alerts_repo=self._alerts_repo,
-            market_cache=self._market_cache_repo,
-        )
 
     def _maybe_attach_paper_trading(self, detectors: dict[str, Any]) -> None:
         """Attach paper-trader and paper-resolver when paper trading is enabled."""
@@ -503,43 +341,10 @@ class Scanner:
 
         Each evaluator is gated by its ``enabled`` flag in
         ``paper_trading.evaluators.<source>``; disabled sources are simply
-        not in the list. Order is fixed: smart_money, move_attribution,
-        mispricing, monotone, velocity. Order matters because PaperTrader.evaluate
-        returns on first acceptance — though there's no overlap today
-        (each evaluator accepts a unique detector name).
+        not in the list.
         """
         cfg = self._config.paper_trading.evaluators
         evaluators: list[SignalEvaluator] = []
-        if cfg.smart_money.enabled:
-            evaluators.append(
-                SmartMoneyEvaluator(
-                    config=cfg.smart_money,
-                    tracked_wallets=self._tracked_repo,
-                )
-            )
-        if cfg.move_attribution.enabled:
-            evaluators.append(
-                MoveAttributionEvaluator(config=cfg.move_attribution),
-            )
-        if cfg.mispricing.enabled:
-            evaluators.append(
-                MispricingEvaluator(config=cfg.mispricing),
-            )
-        if cfg.monotone.enabled:
-            evaluators.append(
-                MonotoneEvaluator(config=cfg.monotone),
-            )
-        if cfg.velocity.enabled:
-            evaluators.append(
-                VelocityEvaluator(
-                    config=cfg.velocity,
-                    market_cache=self._market_cache_repo,
-                ),
-            )
-        if cfg.gate_model.enabled:
-            evaluators.append(
-                GateModelEvaluator(config=cfg.gate_model),
-            )
         if cfg.subgraph_copy.enabled:
             repo = paper_trades_repo if paper_trades_repo is not None else PaperTradesRepo(self._db)
             evaluators.append(
@@ -551,38 +356,6 @@ class Scanner:
             )
         return evaluators
 
-    def _maybe_attach_velocity_detector(self, detectors: dict[str, Any]) -> None:
-        """Attach the velocity detector if both ticks and velocity are enabled.
-
-        Velocity subscribes to the shared :class:`BroadcastTickStream`; if the
-        tick collector isn't enabled the stream stays silent and the detector
-        would idle forever, so we still gate construction on ticks being on.
-
-        Velocity goes through a per-detector :class:`WorkerSink` that defers
-        the alert-emit work off its tick-consume hot loop. The worker's
-        lifecycle is owned by the scheduler.
-        """
-        if not self._config.velocity.enabled:
-            return
-        tick_collector = self._collectors.get("tick_collector")
-        if not isinstance(tick_collector, MarketTickCollector):
-            return
-        detectors["velocity"] = PriceVelocityDetector(
-            config=self._config.velocity,
-            tick_stream=self._tick_stream,
-            market_cache=self._market_cache_repo,
-            clock=self._clock,
-        )
-        worker = WorkerSink(
-            self._sink,
-            maxsize=self._config.worker_sink.velocity_maxsize,
-            name="velocity",
-            stats_interval_seconds=self._config.worker_sink.stats_interval_seconds,
-            clock=self._clock,
-        )
-        self._detector_sinks["velocity"] = worker
-        self._workers.append(worker)
-
     def preflight(self) -> None:
         """Run startup checks before entering the run loop.
 
@@ -590,9 +363,9 @@ class Scanner:
         - ``wallet_state_live`` has been populated via
           ``pscanner daemon bootstrap-features``.
         - ``markets.enabled`` is true (the markets collector populates the
-          ``MarketCacheRepo`` that ``GateModelDetector._resolve_outcome_side``
-          depends on; without it, every trade silently drops to ``""`` —
-          see issue #101).
+          ``MarketCacheRepo`` that the gate-model live path depends on to
+          map ``asset_id`` to YES/NO; without it, every trade silently
+          drops — see issue #101).
 
         When ``subgraph_trades`` is enabled, refuses to start unless
         ``GRAPH_API_KEY`` is set in the environment — the SubgraphClient
@@ -654,8 +427,6 @@ class Scanner:
         """
         self.preflight()
         await self._replay_paper_trader()
-        for worker in self._workers:
-            await worker.start()
         try:
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(self._renderer.run(), name="renderer")
@@ -677,14 +448,13 @@ class Scanner:
     async def _supervise_detector(
         self,
         name: str,
-        run_fn: Callable[[IAlertSink], Awaitable[None]],
+        run_fn: Callable[[AlertSink], Awaitable[None]],
     ) -> None:
         """Restart a detector on unexpected return/exception, up to a cap."""
         restarts: list[float] = []
-        sink: IAlertSink = self._detector_sinks.get(name, self._sink)
         while True:
             try:
-                await run_fn(sink)
+                await run_fn(self._sink)
                 _LOG.warning("scanner.detector.returned", detector=name)
             except asyncio.CancelledError:
                 raise
@@ -735,24 +505,19 @@ class Scanner:
 
         Returns:
             Counts of work done in this pass — useful for the ``--once`` CLI:
-            ``events_scanned``, ``alerts_emitted``, ``tracked_wallets``,
-            ``markets_cached``, ``watched_wallets``, ``trades_recorded``,
-            ``position_snapshots``, ``activity_events``, ``market_snapshots``,
-            ``event_snapshots``.
+            ``tracked_wallets``, ``markets_cached``, ``watched_wallets``,
+            ``trades_recorded``, ``position_snapshots``, ``activity_events``,
+            ``market_snapshots``, ``event_snapshots``.
         """
         baseline_alerts = self._alerts_repo.recent(limit=10000)
         before = len(baseline_alerts)
         trades_before = sum(self._wallet_trades_repo.count_by_wallet().values())
-        events_scanned = await self._run_once_mispricing()
-        await self._run_once_smart_money()
-        await self._run_once_whales()
         collector_counts = await self._run_once_collectors()
         after_alerts = self._alerts_repo.recent(limit=10000)
         markets = self._market_cache_repo.list_active()
         tracked = self._tracked_repo.list_all()
         trades_after = sum(self._wallet_trades_repo.count_by_wallet().values())
         return {
-            "events_scanned": events_scanned,
             "alerts_emitted": len(after_alerts) - before,
             "tracked_wallets": len(tracked),
             "markets_cached": len(markets),
@@ -762,23 +527,21 @@ class Scanner:
             "activity_events": collector_counts["activity_events"],
             "market_snapshots": collector_counts["market_snapshots"],
             "event_snapshots": collector_counts["event_snapshots"],
-            "tick_snapshots": collector_counts["tick_snapshots"],
         }
 
     async def _run_once_collectors(self) -> dict[str, int]:
         """Drive a single iteration of each collector.
 
         ``WatchlistSyncer.sync_smart_money`` mirrors any tracked wallets the
-        smart-money detector just upserted into the watchlist, so the trade
-        collector's subsequent ``poll_all_wallets`` covers them too. Errors
-        are logged and swallowed — single-shot mode should report whatever
-        it can finish, not bail on the first transient failure.
+        upstream catalog refresh just upserted into the watchlist, so the
+        trade collector's subsequent ``poll_all_wallets`` covers them too.
+        Errors are logged and swallowed — single-shot mode should report
+        whatever it can finish, not bail on the first transient failure.
 
         Returns:
             Mapping with ``position_snapshots``, ``activity_events``,
-            ``market_snapshots``, ``event_snapshots``, ``tick_snapshots`` keys.
-            Each is 0 when the corresponding collector is disabled or raises
-            (Wave 1 stubs always raise).
+            ``market_snapshots``, ``event_snapshots`` keys. Each is 0 when
+            the corresponding collector is disabled or raises.
         """
         await self._run_once_watchlist_sync()
         await self._run_once_trade_collector()
@@ -806,12 +569,6 @@ class Scanner:
                 type_=EventCollector,
                 call=EventCollector.snapshot_all_events,
                 log_event="scanner.run_once.events_failed",
-            ),
-            "tick_snapshots": await self._run_once_collector(
-                key="tick_collector",
-                type_=MarketTickCollector,
-                call=MarketTickCollector.snapshot_once,
-                log_event="scanner.run_once.ticks_failed",
             ),
         }
 
@@ -858,112 +615,12 @@ class Scanner:
             _LOG.exception(log_event)
             return 0
 
-    async def _run_once_mispricing(self) -> int:
-        """Run the mispricing scan once over a bounded slice of the event catalogue.
-
-        The full ``/events`` endpoint paginates over thousands of rows; in
-        single-shot mode we only need a representative slice so the smoke
-        test verifies wiring. The daemon (`run`) iterates everything via the
-        detector's own loop.
-        """
-        detector = self._detectors.get("mispricing")
-        if not isinstance(detector, MispricingDetector):
-            return 0
-        events_scanned = 0
-        for page_index in range(_RUN_ONCE_MAX_EVENT_PAGES):
-            try:
-                page = await self._clients.gamma_client.list_events(
-                    active=True,
-                    closed=False,
-                    limit=_RUN_ONCE_EVENTS_PAGE_SIZE,
-                    offset=page_index * _RUN_ONCE_EVENTS_PAGE_SIZE,
-                )
-            except Exception:
-                _LOG.exception("scanner.run_once.mispricing.list_failed")
-                break
-            if not page:
-                break
-            for event in page:
-                events_scanned += 1
-                try:
-                    await detector.evaluate_event(event, self._sink)
-                except Exception:
-                    _LOG.exception(
-                        "scanner.run_once.mispricing.event_failed",
-                        event_id=event.id,
-                    )
-            if len(page) < _RUN_ONCE_EVENTS_PAGE_SIZE:
-                break
-        return events_scanned
-
-    async def _run_once_smart_money(self) -> None:
-        """Refresh a small leaderboard slice and poll positions once.
-
-        The daemon's smart-money detector pulls the full top-N leaderboard
-        on its hourly cadence; here we cap the candidate pool so a single
-        shot stays under the rate limit while still exercising every code
-        path (leaderboard → closed-positions → upsert → poll → diff → emit).
-        """
-        detector = self._detectors.get("smart_money")
-        if not isinstance(detector, SmartMoneyDetector):
-            return
-        try:
-            entries = await self._clients.data_client.get_leaderboard(
-                period="all",
-                limit=_RUN_ONCE_LEADERBOARD_LIMIT,
-            )
-        except Exception:
-            _LOG.exception("scanner.run_once.smart_money.leaderboard_failed")
-            entries = []
-        for entry in entries:
-            try:
-                await detector.refresh_one_wallet(entry)
-            except Exception:
-                _LOG.exception(
-                    "scanner.run_once.smart_money.refresh_one_failed",
-                    wallet=entry.proxy_wallet,
-                )
-        try:
-            await detector.poll_positions(self._sink)
-        except Exception:
-            _LOG.exception("scanner.run_once.smart_money.poll_failed")
-
-    async def _run_once_whales(self) -> None:
-        """Snapshot the markets cache (one bounded page).
-
-        ``WhalesDetector._refresh_market_cache`` paginates the entire active
-        market catalogue (50k+ rows on Polymarket today). That's appropriate
-        for a long-running daemon, but in single-shot mode we only need
-        enough markets to populate the cache so downstream `pscanner status`
-        and the smoke test can verify the wiring. This caches the first
-        ``_RUN_ONCE_MARKETS_PAGE_SIZE`` markets directly.
-        """
-        if "whales" not in self._detectors:
-            return
-        try:
-            markets = await self._clients.gamma_client.list_markets(
-                active=True,
-                closed=False,
-                limit=_RUN_ONCE_MARKETS_PAGE_SIZE,
-            )
-        except Exception:
-            _LOG.exception("scanner.run_once.whales.list_markets_failed")
-            return
-        for market in markets:
-            try:
-                self._market_cache_repo.upsert(market)
-            except Exception:
-                _LOG.exception("scanner.run_once.whales.upsert_failed", market_id=market.id)
-
     async def aclose(self) -> None:
         """Tear down sockets, HTTP clients, renderer, and DB. Idempotent."""
         if self._closed:
             return
         self._closed = True
         self._collectors_stop.set()
-        for worker in self._workers:
-            with contextlib.suppress(Exception):
-                await worker.aclose()
         with contextlib.suppress(Exception):
             await self._renderer.stop()
         if self._owns_clients:
@@ -985,7 +642,6 @@ class Scanner:
             self._clients.gamma_client.aclose,
             self._clients.gamma_http.aclose,
             self._clients.data_http.aclose,
-            self._clients.ticks_ws.close,
         )
         for closer in closers:
             with contextlib.suppress(Exception):

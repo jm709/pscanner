@@ -1,4 +1,4 @@
-"""Base class for periodic-scan detectors (e.g. mispricing).
+"""Base class for periodic-scan detectors (e.g. paper-trade resolver).
 
 These detectors run a fixed-interval loop where each iteration calls a
 subclass-defined ``_scan(sink)`` method and then sleeps. Failures inside

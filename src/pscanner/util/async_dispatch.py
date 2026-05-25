@@ -6,11 +6,9 @@ to spawn coroutines as fire-and-forget tasks while still holding a
 reference to each task so the GC doesn't collect it mid-flight.
 
 The same three-step idiom (``try get_running_loop``, ``create_task``,
-``add + add_done_callback``) was duplicated across
-:class:`TradeDrivenDetector`, :class:`ClusterDetector`, and
-:class:`MoveAttributionDetector`. This module hosts the one shared
-implementation; detectors compose an :class:`AsyncDispatcher` instead
-of re-implementing the pattern.
+``add + add_done_callback``) is shared by every callback-driven
+consumer; this module hosts the one implementation so consumers
+compose an :class:`AsyncDispatcher` instead of re-implementing it.
 """
 
 from __future__ import annotations
