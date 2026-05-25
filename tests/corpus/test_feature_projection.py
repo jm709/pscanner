@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from pscanner.corpus import feature_projection as fp
-from pscanner.corpus.features import (
+from pscanner.corpus.feature_projection import (
     FeatureRow,
     MarketMetadata,
     Trade,

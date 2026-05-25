@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from pscanner.corpus.features import (
+from pscanner.corpus.feature_projection import (
     MarketMetadata,
     StreamingHistoryProvider,
     Trade,

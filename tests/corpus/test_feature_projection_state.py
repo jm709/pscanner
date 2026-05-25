@@ -1,4 +1,4 @@
-"""Tests for the pure state-update functions in ``corpus.features``."""
+"""Tests for the pure state-update functions in ``corpus.feature_projection``."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from collections import deque
 
 import pytest
 
-from pscanner.corpus.features import (
+from pscanner.corpus.feature_projection import (
     Trade,
     apply_buy_to_state,
     apply_resolution_to_state,
