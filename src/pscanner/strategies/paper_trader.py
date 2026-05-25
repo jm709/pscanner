@@ -363,9 +363,22 @@ class PaperTrader:
         Thin wrapper around
         :func:`pscanner.strategies.market_cache_refresh.refresh_market_cache_row`.
         Preserves the legacy ``paper_trader.market_cache_backfilled`` /
-        ``paper_trader.backfill_failed`` events for operator dashboards;
-        the helper emits granular ``market_cache.refresh.*`` events with
-        the same payload alongside.
+        ``paper_trader.backfill_failed`` events at the paper_trader log
+        namespace for operator dashboards.
+
+        Note on log level + payload:
+
+        - ``paper_trader.backfill_failed`` is emitted at ``debug`` for all
+          failure modes (slug miss, gamma miss, exception). The
+          warning-level + ``exc_info`` signal for the exception case lives
+          at the helper's ``market_cache.refresh.failed`` event — alerting
+          rules should subscribe there.
+        - ``paper_trader.market_cache_backfilled`` carries
+          ``event_slug`` (the parent event slug, may be ``None``) rather
+          than the market slug — ``CachedMarket`` does not store the
+          market slug separately. The helper's
+          ``market_cache.refresh.ok`` event logs ``slug=market.slug`` for
+          callers that need the market-level identifier.
 
         Args:
             condition_id: The market's on-chain condition id.
@@ -386,7 +399,7 @@ class PaperTrader:
         _LOG.info(
             "paper_trader.market_cache_backfilled",
             condition_id=condition_id,
-            slug=cached.event_slug if cached is not None else None,
+            event_slug=cached.event_slug if cached is not None else None,
         )
         return True
 
