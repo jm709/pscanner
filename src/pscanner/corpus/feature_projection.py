@@ -31,7 +31,6 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Literal, Protocol
 
-
 # ---------------------------------------------------------------------------
 # Shared dataclasses
 # ---------------------------------------------------------------------------
