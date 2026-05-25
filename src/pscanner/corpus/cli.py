@@ -22,11 +22,10 @@ from typing import Any, Final
 import psutil
 import structlog
 
-from pscanner.corpus._build_features_sentinel import check_and_set_sentinel, clear_sentinel
+from pscanner.corpus._build_features_sentinel import check_and_set_sentinel
 from pscanner.corpus._duckdb_engine import _scratch_path, _wipe_scratch, build_features_duckdb
-from pscanner.corpus.db import apply_read_pragmas, init_corpus_db
+from pscanner.corpus.db import init_corpus_db
 from pscanner.corpus.enumerator import enumerate_closed_markets
-from pscanner.corpus.examples import build_features
 from pscanner.corpus.gamma_tags_backfill import run_backfill_gamma_tags
 from pscanner.corpus.kalshi_enumerator import enumerate_resolved_kalshi_markets
 from pscanner.corpus.kalshi_walker import walk_kalshi_market
@@ -39,7 +38,6 @@ from pscanner.corpus.repos import (
     CorpusStateRepo,
     CorpusTradesRepo,
     MarketResolutionsRepo,
-    TrainingExamplesRepo,
 )
 from pscanner.corpus.resolutions import (
     record_kalshi_resolutions,
@@ -120,18 +118,6 @@ def build_corpus_parser() -> argparse.ArgumentParser:
         help="Platform whose corpus rows feed the training_examples build.",
     )
     bf.add_argument(
-        "--engine",
-        type=str,
-        choices=["python", "duckdb"],
-        default="python",
-        help=(
-            "Build engine. `python` is the row-by-row streaming fold (6h on "
-            "the production corpus). `duckdb` is the SQL-pipeline rewrite "
-            "(target 5-25 min). See issue #116. Default `python` until "
-            "parity is gated."
-        ),
-    )
-    bf.add_argument(
         "--force",
         action="store_true",
         help=(
@@ -144,25 +130,20 @@ def build_corpus_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Wipe leftover DuckDB scratch file from a prior crashed run. "
-            "Implies --force on the sentinel. Only relevant with --engine duckdb."
+            "Implies --force on the sentinel."
         ),
     )
     bf.add_argument(
         "--duckdb-memory",
         type=str,
         default=None,
-        help=(
-            "DuckDB memory_limit (e.g. '6GB'). Default: min(available//2, 12GB). "
-            "Only relevant with --engine duckdb."
-        ),
+        help="DuckDB memory_limit (e.g. '6GB'). Default: min(available//2, 12GB).",
     )
     bf.add_argument(
         "--duckdb-threads",
         type=int,
         default=None,
-        help=(
-            "DuckDB thread count. Default: min(cpu_count, 8). Only relevant with --engine duckdb."
-        ),
+        help="DuckDB thread count. Default: min(cpu_count, 8).",
     )
     sg = sub.add_parser(
         "subgraph-backfill",
@@ -529,12 +510,10 @@ async def _run_alt_platform_refresh(args: argparse.Namespace, binding: _AltPlatf
 
 
 async def _cmd_build_features(args: argparse.Namespace) -> int:
-    """Rebuild the training_examples table. Dispatches on ``--engine``."""
+    """Rebuild the training_examples table via the DuckDB SQL-pipeline engine."""
     db_path = Path(args.db)
     now_ts = int(time.time())
 
-    # Sentinel guard runs for BOTH engines: a crashed Python build also
-    # needs --force on retry, since training_examples may be half-truncated.
     # --reset-scratch implies --force on the sentinel so operators only
     # need one flag for crashed-build recovery.
     force = bool(getattr(args, "force", False) or getattr(args, "reset_scratch", False))
@@ -548,50 +527,14 @@ async def _cmd_build_features(args: argparse.Namespace) -> int:
     finally:
         sentinel_conn.close()
 
-    engine = getattr(args, "engine", "python")
-    try:
-        if engine == "duckdb":
-            written = _run_duckdb_engine(args=args, db_path=db_path, now_ts=now_ts)
-        else:
-            written = _run_python_engine(args=args, db_path=db_path, now_ts=now_ts)
-    except BaseException:
-        # Leave the sentinel set so the operator must --force to recover.
-        # This is intentional: a partial rebuild left the table in an
-        # inconsistent state (Python: truncated; DuckDB: pre-swap with v2 lingering).
-        raise
+    # On exception, leave the sentinel set so the operator must --force to
+    # recover. A partial rebuild leaves training_examples_v2 lingering and
+    # the swap incomplete; --force makes that explicit on retry. On success,
+    # the DuckDB engine clears the sentinel inside the swap transaction.
+    written = _run_duckdb_engine(args=args, db_path=db_path, now_ts=now_ts)
 
-    # DuckDB engine clears the sentinel inside the swap txn. Python engine
-    # has no swap; clear here on success.
-    if engine != "duckdb":
-        clear_conn = init_corpus_db(db_path)
-        try:
-            clear_sentinel(CorpusStateRepo(clear_conn))
-        finally:
-            clear_conn.close()
-
-    _log.info("corpus.build_features_done", written=written, engine=engine)
+    _log.info("corpus.build_features_done", written=written)
     return 0
-
-
-def _run_python_engine(*, args: argparse.Namespace, db_path: Path, now_ts: int) -> int:
-    """Run the row-by-row Python streaming build engine."""
-    write_conn = init_corpus_db(db_path)
-    read_conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    read_conn.row_factory = sqlite3.Row
-    apply_read_pragmas(read_conn)
-    try:
-        return build_features(
-            trades_repo=CorpusTradesRepo(read_conn),
-            resolutions_repo=MarketResolutionsRepo(write_conn),
-            examples_repo=TrainingExamplesRepo(write_conn),
-            markets_conn=write_conn,
-            now_ts=now_ts,
-            rebuild=bool(getattr(args, "rebuild", False)),
-            platform=args.platform,
-        )
-    finally:
-        read_conn.close()
-        write_conn.close()
 
 
 def _run_duckdb_engine(*, args: argparse.Namespace, db_path: Path, now_ts: int) -> int:
