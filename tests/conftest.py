@@ -57,12 +57,6 @@ def sample_position_json() -> list[dict[str, Any]]:
 
 
 @pytest.fixture
-def sample_closed_positions_json() -> list[dict[str, Any]]:
-    """Realistic data-api ``/closed-positions`` response."""
-    return _load_fixture("closed_positions.json")
-
-
-@pytest.fixture
 def sample_activity_json() -> list[dict[str, Any]]:
     """Realistic data-api ``/activity`` response."""
     return _load_fixture("activity.json")

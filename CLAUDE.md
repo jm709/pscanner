@@ -16,7 +16,7 @@ Multi-platform architecture decisions live in
 `uv run ruff check . && uv run ruff format --check . && uv run ty check && uv run pytest -q`
 
 ## Polymarket API quirks (will bite you)
-- `/v1/closed-positions` returns ONLY winning positions, hard-capped at 50. Use `/positions?user=X&closed=true&limit=500` for the real settled-positions list (winners + losers).
+- **Settled positions: paginate `/v1/closed-positions` via offset.** Returns wins AND losses (verified 2026-05-25 against multiple leaderboard wallets; `won` ↔ `realizedPnl > 0`). Server caps each page at 50 rows regardless of `limit`; walk `offset=0,50,100,…` until an empty/short page. **Do NOT use `/positions?closed=true`** — the `closed` flag is silently ignored and the endpoint returns currently-open positions. (`DataClient` does not currently expose a settled-positions helper since `SmartMoneyDetector` was deleted — re-add as a paginated walk if a future caller needs it.)
 - Leaderboard lives at `https://lb-api.polymarket.com/profit` (NOT data-api). Window values are `1d`/`7d`/`all` — not `day`/`week`.
 - Closed-position payloads expose `eventSlug`, NOT numeric `eventId`. The `event_tag_cache.event_id` column actually stores slugs (legacy name).
 - `gamma /markets` does NOT return `event_id`. Backfill via `MarketCacheRepo.get(market_id)` which has it from the `/events` path.
