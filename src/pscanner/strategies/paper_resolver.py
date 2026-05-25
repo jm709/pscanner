@@ -128,6 +128,8 @@ class PaperResolver(PollingDetector):
         shared rate limiter.
         """
         seen: set[ConditionId] = set()
+        refreshed = 0
+        failed = 0
         for pos in open_positions:
             if pos.condition_id in seen:
                 continue
@@ -135,11 +137,21 @@ class PaperResolver(PollingDetector):
             cached = self._market_cache.get_by_condition_id(pos.condition_id)
             if cached is not None and not cached.active:
                 continue
-            await refresh_market_cache_row(
+            ok = await refresh_market_cache_row(
                 data_client=self._data_client,
                 gamma_client=self._gamma_client,
                 market_cache=self._market_cache,
                 condition_id=pos.condition_id,
+            )
+            if ok:
+                refreshed += 1
+            else:
+                failed += 1
+        if refreshed or failed:
+            _LOG.info(
+                "paper_resolver.refresh_completed",
+                refreshed=refreshed,
+                failed=failed,
             )
 
     def _maybe_book_exit(self, pos: OpenPaperPosition) -> bool:

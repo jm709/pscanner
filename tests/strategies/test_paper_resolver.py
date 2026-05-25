@@ -6,6 +6,7 @@ import sqlite3
 from unittest.mock import AsyncMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from pscanner.alerts.sink import AlertSink
 from pscanner.config import PaperTradingConfig
@@ -332,8 +333,15 @@ async def test_resolver_refreshes_stale_active_market_then_books_exit(tmp_db) ->
         gamma_client=gamma,
         clock=clock,
     )
-    await resolver._scan(AlertSink(AlertsRepo(tmp_db)))
+    with capture_logs() as logs:
+        await resolver._scan(AlertSink(AlertsRepo(tmp_db)))
 
+    assert any(
+        entry["event"] == "paper_resolver.refresh_completed"
+        and entry.get("refreshed") == 1
+        and entry.get("failed") == 0
+        for entry in logs
+    )
     data.get_market_slug_by_condition_id.assert_awaited_once_with(ConditionId("0xcond-1"))
     gamma.get_market_by_slug.assert_awaited_once_with("test-market")
     assert paper.list_open_positions() == []
