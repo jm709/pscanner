@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import sqlite3 as _sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -13,7 +12,6 @@ from pscanner.corpus import cli as corpus_cli
 from pscanner.corpus.cli import (
     _DEFAULT_SUBGRAPH_ID,
     _HANDLERS,
-    _cmd_build_features,
     _register_missing_polymarket_resolutions,
     build_corpus_parser,
     run_corpus_command,
@@ -242,57 +240,6 @@ def test_build_features_parser_default_platform_is_polymarket() -> None:
     parser = build_corpus_parser()
     args = parser.parse_args(["build-features"])
     assert args.platform == "polymarket"
-
-
-@pytest.mark.asyncio
-async def test_cli_build_features_uses_separate_read_connection(tmp_path: Path) -> None:
-    """The CLI opens a read-only connection for the chronological cursor (#110)."""
-    db_path = tmp_path / "corpus.sqlite3"
-    init_corpus_db(db_path).close()
-
-    args = argparse.Namespace(
-        db=str(db_path),
-        rebuild=False,
-        platform="polymarket",
-    )
-
-    seen_uris: list[str] = []
-    real_connect = _sqlite3.connect
-
-    def _spy_connect(database: object, *cargs: object, **ckwargs: object) -> object:
-        if ckwargs.get("uri") and "mode=ro" in str(database):
-            seen_uris.append(str(database))
-        return real_connect(database, *cargs, **ckwargs)  # type: ignore[arg-type]
-
-    with patch("pscanner.corpus.cli.sqlite3.connect", side_effect=_spy_connect):
-        rc = await _cmd_build_features(args)
-    assert rc == 0
-    assert seen_uris, "_cmd_build_features must open a read-only connection"
-    assert any("mode=ro" in u for u in seen_uris)
-
-
-@pytest.mark.asyncio
-async def test_cli_build_features_applies_read_pragmas(tmp_path: Path) -> None:
-    """The CLI tunes the read connection with Path A PRAGMAs (#114)."""
-    db_path = tmp_path / "corpus.sqlite3"
-    init_corpus_db(db_path).close()
-
-    pragmas_applied: list[str] = []
-    real_apply = apply_read_pragmas
-
-    def _spy_apply(conn: object) -> None:
-        pragmas_applied.append("called")
-        real_apply(conn)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
-
-    args = argparse.Namespace(
-        db=str(db_path),
-        rebuild=False,
-        platform="polymarket",
-    )
-    with patch("pscanner.corpus.cli.apply_read_pragmas", side_effect=_spy_apply):
-        rc = await _cmd_build_features(args)
-    assert rc == 0
-    assert pragmas_applied, "apply_read_pragmas must be called by _cmd_build_features"
 
 
 def test_apply_read_pragmas_sets_expected_values(tmp_path: Path) -> None:

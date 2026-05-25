@@ -1,140 +1,10 @@
-"""Parity test for the DuckDB build-features engine.
-
-Runs the Python engine and the DuckDB engine against an identical
-synthetic corpus, then asserts the resulting ``training_examples``
-rows match column-by-column.
-"""
+"""Behavior tests for the DuckDB build-features engine."""
 
 from __future__ import annotations
 
-import math
-import sqlite3
-import time
 from pathlib import Path
 
 import pytest
-
-from pscanner.corpus.examples import build_features
-from pscanner.corpus.repos import (
-    CorpusTradesRepo,
-    MarketResolutionsRepo,
-    TrainingExamplesRepo,
-)
-from tests.corpus._duckdb_fixture import build_fixture_db
-
-# Float tolerance per the parity decision (issue #116, branches 9-10):
-# both engines accumulate in the same row order so values should be
-# bit-identical, but assert_allclose with these tolerances is belt-and-
-# suspenders against floating-point reordering inside DuckDB.
-_FLOAT_RTOL = 1e-9
-_FLOAT_ATOL = 1e-12
-
-
-@pytest.fixture
-def parity_dbs(tmp_path: Path) -> tuple[Path, Path]:
-    """Build two identical fixture DBs side-by-side."""
-    py_db = tmp_path / "python_engine.sqlite3"
-    dd_db = tmp_path / "duckdb_engine.sqlite3"
-    build_fixture_db(py_db)
-    build_fixture_db(dd_db)
-    return py_db, dd_db
-
-
-def _run_python_engine(db: Path) -> None:
-    write = sqlite3.connect(db)
-    write.row_factory = sqlite3.Row
-    read = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    read.row_factory = sqlite3.Row
-    try:
-        build_features(
-            trades_repo=CorpusTradesRepo(read),
-            resolutions_repo=MarketResolutionsRepo(write),
-            examples_repo=TrainingExamplesRepo(write),
-            markets_conn=write,
-            now_ts=int(time.time()),
-            rebuild=True,
-            platform="polymarket",
-        )
-    finally:
-        read.close()
-        write.close()
-
-
-def _run_duckdb_engine(db: Path) -> None:
-    # Intentional deferred import: this module doesn't exist until Task 6.
-    # The test FAILs (not skips) until the engine is implemented, serving
-    # as a red checkpoint.  noqa: PLC0415 suppresses the top-level import rule.
-    from pscanner.corpus._duckdb_engine import build_features_duckdb  # noqa: PLC0415
-
-    build_features_duckdb(
-        db_path=db,
-        platform="polymarket",
-        now_ts=int(time.time()),
-        memory_limit="1GB",
-        temp_dir=db.parent / "duckdb_spill",
-        threads=2,
-    )
-
-
-def _ordered_rows(db: Path) -> list[dict[str, object]]:
-    """Return all training_examples rows in a stable canonical order."""
-    conn = sqlite3.connect(db)
-    conn.row_factory = sqlite3.Row
-    try:
-        rows = conn.execute(
-            """
-            SELECT * FROM training_examples
-            ORDER BY platform, condition_id, wallet_address,
-                     tx_hash, asset_id, trade_ts
-            """
-        ).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
-
-
-def _diff_rows(py: dict[str, object], dd: dict[str, object]) -> list[str]:
-    """Return human-readable per-column diffs (empty if rows match)."""
-    diffs: list[str] = []
-    skip = {"id", "built_at"}  # id is autoinc; built_at is wall clock
-    for col, v_py in py.items():
-        if col in skip:
-            continue
-        v_dd = dd[col]
-        if v_py is None and v_dd is None:
-            continue
-        if isinstance(v_py, float) or isinstance(v_dd, float):
-            if v_py is None or v_dd is None:
-                diffs.append(f"{col}: py={v_py!r} dd={v_dd!r}")
-                continue
-            if not math.isclose(float(v_py), float(v_dd), rel_tol=_FLOAT_RTOL, abs_tol=_FLOAT_ATOL):  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
-                diffs.append(f"{col}: py={v_py!r} dd={v_dd!r}")
-        elif v_py != v_dd:
-            diffs.append(f"{col}: py={v_py!r} dd={v_dd!r}")
-    return diffs
-
-
-def test_duckdb_engine_matches_python_engine(parity_dbs: tuple[Path, Path]) -> None:
-    py_db, dd_db = parity_dbs
-
-    _run_python_engine(py_db)
-    _run_duckdb_engine(dd_db)
-
-    py_rows = _ordered_rows(py_db)
-    dd_rows = _ordered_rows(dd_db)
-
-    assert len(py_rows) == len(dd_rows), (
-        f"row count differs: python={len(py_rows)} duckdb={len(dd_rows)}"
-    )
-
-    failures: list[str] = []
-    for i, (p, d) in enumerate(zip(py_rows, dd_rows, strict=True)):
-        key = (p["condition_id"], p["wallet_address"], p["tx_hash"], p["asset_id"])
-        diffs = _diff_rows(p, d)
-        if diffs:
-            failures.append(f"row {i} {key}: {'; '.join(diffs)}")
-
-    assert not failures, "parity mismatch:\n" + "\n".join(failures)
 
 
 def test_build_features_duckdb_rejects_unknown_platform(tmp_path: Path) -> None:
@@ -553,12 +423,11 @@ def test_final_join_top_category_breaks_tied_ts_by_tx_hash(tmp_path: Path) -> No
 
 def test_materialize_trades_coerces_null_category_to_unknown(tmp_path: Path) -> None:
     """Legacy markets with ``corpus_markets.category=NULL`` must surface as
-    ``top_category='unknown'`` (matching the python engine's coercion in
-    ``examples.py:73``). Without the COALESCE in ``_materialize_trades``,
-    a wallet whose ONLY prior activity is on a NULL-category market
-    reports ``top_category=NULL`` and ``category_diversity=0`` in DuckDB,
-    while the python engine reports ``top_category='unknown'``
-    and ``category_diversity=1``.
+    ``top_category='unknown'``. Without the COALESCE in
+    ``_materialize_trades``, a wallet whose ONLY prior activity is on a
+    NULL-category market reports ``top_category=NULL`` and
+    ``category_diversity=0``; the engine must coerce NULL → 'unknown'
+    so categorical statistics stay non-empty.
 
     Sets up two BUYs by the same wallet across two NULL-category markets
     so that, by the second trade, prior-only running counts have observed
@@ -677,8 +546,8 @@ def test_final_join_handles_duplicate_corpus_trades(tmp_path: Path) -> None:
     """corpus_trades may contain duplicate (tx_hash, asset_id, wallet_address)
     tuples from re-ingesting overlapping on-chain ranges (legacy rows that
     pre-date the PRIMARY KEY constraint, or rows landed via paths that
-    bypass the constraint). The python engine silently dedupes via
-    INSERT OR IGNORE on training_examples; the DuckDB engine must match.
+    bypass the constraint). The engine must dedupe via INSERT OR IGNORE
+    on training_examples to avoid a UNIQUE-constraint crash.
 
     Without an equivalent OR IGNORE semantic in the cross-database final
     join, the INSERT into training_examples_v2 crashes with the same
@@ -798,7 +667,7 @@ def test_final_join_handles_duplicate_corpus_trades(tmp_path: Path) -> None:
         threads=1,
     )
 
-    # Exactly ONE row landed (the dedup result) — matches python engine semantics
+    # Exactly ONE row landed — the INSERT OR IGNORE collapsed the duplicates
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
@@ -816,6 +685,7 @@ def test_final_join_handles_duplicate_corpus_trades(tmp_path: Path) -> None:
 def test_heartbeat_emits_during_long_operation() -> None:
     """Heartbeat thread fires at least once and stops cleanly on signal."""
     import threading  # noqa: PLC0415
+    import time  # noqa: PLC0415
 
     from structlog.testing import capture_logs  # noqa: PLC0415
 

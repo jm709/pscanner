@@ -551,6 +551,7 @@ async def test_paper_resolver_books_winning_position(tmp_path: Path) -> None:
     )
     _seed_paper_smoke_db(db_file)
 
+    clients = _make_clients()
     # Insert a fake entry row so the resolver has something to resolve.
     entry_conn = init_db(db_file)
     try:
@@ -579,6 +580,8 @@ async def test_paper_resolver_books_winning_position(tmp_path: Path) -> None:
             config=cfg.paper_trading,
             market_cache=MarketCacheRepo(resolver_conn),
             paper_trades=PaperTradesRepo(resolver_conn),
+            data_client=clients.data_client,
+            gamma_client=clients.gamma_client,
         )
         await resolver._scan(AlertSink(AlertsRepo(resolver_conn)))
         assert PaperTradesRepo(resolver_conn).list_open_positions() == []

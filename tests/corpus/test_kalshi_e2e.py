@@ -5,15 +5,17 @@ Seeds a synthetic three-platform corpus DB by hand, then verifies:
 - Kalshi resolutions land in market_resolutions with platform='kalshi'.
 - A market with `result==''` (voided) lands its trades in corpus_trades but
   has no market_resolutions row.
-- `build_features(platform='manifold')` produces only manifold rows; no
-  Kalshi or Polymarket rows leak.
+- ``build_features_duckdb(platform='manifold')`` produces only manifold rows;
+  no Kalshi or Polymarket rows leak.
 """
 
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
-from pscanner.corpus.examples import build_features
+from pscanner.corpus._duckdb_engine import build_features_duckdb
+from pscanner.corpus.db import init_corpus_db
 from pscanner.corpus.repos import (
     CorpusMarket,
     CorpusMarketsRepo,
@@ -21,7 +23,6 @@ from pscanner.corpus.repos import (
     CorpusTradesRepo,
     MarketResolution,
     MarketResolutionsRepo,
-    TrainingExamplesRepo,
 )
 
 
@@ -81,7 +82,7 @@ def _seed_manifold_yes(conn: sqlite3.Connection) -> None:
         CorpusMarket(
             condition_id="m-yes",
             event_slug="m-yes-slug",
-            category="BINARY",
+            category="sports",
             closed_at=1_700_000_600,
             total_volume_usd=5_000.0,
             enumerated_at=1_700_000_000,
@@ -259,27 +260,35 @@ def test_kalshi_data_isolated_from_other_platforms(
 
 
 def test_build_features_manifold_does_not_leak_kalshi_or_polymarket(
-    tmp_corpus_db: sqlite3.Connection,
+    tmp_path: Path,
 ) -> None:
-    """`build_features(platform='manifold')` produces only manifold-tagged rows."""
-    _seed_polymarket_row(tmp_corpus_db)
-    _seed_manifold_yes(tmp_corpus_db)
-    _seed_kalshi_yes(tmp_corpus_db)
-    _seed_kalshi_voided(tmp_corpus_db)
+    """``build_features_duckdb(platform='manifold')`` produces only manifold rows."""
+    db_path = tmp_path / "corpus.sqlite3"
+    conn = init_corpus_db(db_path)
+    try:
+        _seed_polymarket_row(conn)
+        _seed_manifold_yes(conn)
+        _seed_kalshi_yes(conn)
+        _seed_kalshi_voided(conn)
+    finally:
+        conn.close()
 
-    examples_repo = TrainingExamplesRepo(tmp_corpus_db)
-    written = build_features(
-        trades_repo=CorpusTradesRepo(tmp_corpus_db),
-        resolutions_repo=MarketResolutionsRepo(tmp_corpus_db),
-        examples_repo=examples_repo,
-        markets_conn=tmp_corpus_db,
-        now_ts=2_000_000_000,
-        rebuild=True,
+    written = build_features_duckdb(
+        db_path=db_path,
         platform="manifold",
+        now_ts=2_000_000_000,
+        memory_limit="512MB",
+        temp_dir=tmp_path / "duckdb_spill",
+        threads=1,
     )
     assert written >= 1
 
-    rows = tmp_corpus_db.execute("SELECT platform, condition_id FROM training_examples").fetchall()
+    read_conn = sqlite3.connect(db_path)
+    read_conn.row_factory = sqlite3.Row
+    try:
+        rows = read_conn.execute("SELECT platform, condition_id FROM training_examples").fetchall()
+    finally:
+        read_conn.close()
     platforms = {r["platform"] for r in rows}
     condition_ids = {r["condition_id"] for r in rows}
     assert platforms == {"manifold"}, f"unexpected platforms: {platforms}"

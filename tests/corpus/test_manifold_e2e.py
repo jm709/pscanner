@@ -1,16 +1,19 @@
 """End-to-end Manifold ingestion -> build_features test on a mixed-platform corpus.
 
 Seeds a synthetic corpus with both Polymarket and Manifold rows (one Manifold
-market YES-resolved, one CANCEL-only). Runs ``build_features(platform="manifold")``
-and asserts that only the YES-resolved Manifold market's bets produce
-training_examples rows, and that those rows carry ``platform='manifold'``.
+market YES-resolved, one CANCEL-only). Runs
+``build_features_duckdb(platform="manifold")`` and asserts that only the
+YES-resolved Manifold market's bets produce training_examples rows, and
+that those rows carry ``platform='manifold'``.
 """
 
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
-from pscanner.corpus.examples import build_features
+from pscanner.corpus._duckdb_engine import build_features_duckdb
+from pscanner.corpus.db import init_corpus_db
 from pscanner.corpus.repos import (
     CorpusMarket,
     CorpusMarketsRepo,
@@ -18,7 +21,6 @@ from pscanner.corpus.repos import (
     CorpusTradesRepo,
     MarketResolution,
     MarketResolutionsRepo,
-    TrainingExamplesRepo,
 )
 
 
@@ -82,7 +84,7 @@ def _seed_manifold_yes(conn: sqlite3.Connection) -> None:
         CorpusMarket(
             condition_id="m-yes",
             event_slug="m-yes-slug",
-            category="BINARY",
+            category="sports",
             closed_at=1_700_000_600,
             total_volume_usd=5_000.0,
             enumerated_at=1_700_000_000,
@@ -141,7 +143,7 @@ def _seed_manifold_cancel(conn: sqlite3.Connection) -> None:
         CorpusMarket(
             condition_id="m-cancel",
             event_slug="m-cancel-slug",
-            category="BINARY",
+            category="sports",
             closed_at=1_700_000_700,
             total_volume_usd=5_000.0,
             enumerated_at=1_700_000_000,
@@ -169,36 +171,41 @@ def _seed_manifold_cancel(conn: sqlite3.Connection) -> None:
 
 
 def test_build_features_manifold_only_emits_manifold_training_examples(
-    tmp_corpus_db: sqlite3.Connection,
+    tmp_path: Path,
 ) -> None:
-    """``build_features(platform="manifold")`` produces only Manifold-tagged rows.
+    """``build_features_duckdb(platform="manifold")`` produces only Manifold rows.
 
     Only the YES-resolved Manifold market should yield training_examples;
     the CANCEL market drops out via the resolution lookup, and the
     polymarket rows are filtered by the ``platform`` parameter.
     """
-    _seed_polymarket_row(tmp_corpus_db)
-    _seed_manifold_yes(tmp_corpus_db)
-    _seed_manifold_cancel(tmp_corpus_db)
+    db_path = tmp_path / "corpus.sqlite3"
+    conn = init_corpus_db(db_path)
+    try:
+        _seed_polymarket_row(conn)
+        _seed_manifold_yes(conn)
+        _seed_manifold_cancel(conn)
+    finally:
+        conn.close()
 
-    trades_repo = CorpusTradesRepo(tmp_corpus_db)
-    resolutions_repo = MarketResolutionsRepo(tmp_corpus_db)
-    examples_repo = TrainingExamplesRepo(tmp_corpus_db)
-
-    written = build_features(
-        trades_repo=trades_repo,
-        resolutions_repo=resolutions_repo,
-        examples_repo=examples_repo,
-        markets_conn=tmp_corpus_db,
-        now_ts=1_700_001_000,
-        rebuild=True,
+    written = build_features_duckdb(
+        db_path=db_path,
         platform="manifold",
+        now_ts=1_700_001_000,
+        memory_limit="512MB",
+        temp_dir=tmp_path / "duckdb_spill",
+        threads=1,
     )
     assert written >= 1, "at least one BUY on the YES-resolved manifold market"
 
-    rows = tmp_corpus_db.execute(
-        "SELECT platform, condition_id, tx_hash FROM training_examples ORDER BY tx_hash"
-    ).fetchall()
+    read_conn = sqlite3.connect(db_path)
+    read_conn.row_factory = sqlite3.Row
+    try:
+        rows = read_conn.execute(
+            "SELECT platform, condition_id, tx_hash FROM training_examples ORDER BY tx_hash"
+        ).fetchall()
+    finally:
+        read_conn.close()
     assert all(r["platform"] == "manifold" for r in rows)
     assert {r["condition_id"] for r in rows} == {"m-yes"}
     tx_hashes = {r["tx_hash"] for r in rows}

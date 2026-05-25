@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import sqlite3
+from unittest.mock import AsyncMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from pscanner.alerts.sink import AlertSink
 from pscanner.config import PaperTradingConfig
 from pscanner.poly.ids import AssetId, ConditionId, MarketId
+from pscanner.poly.models import Market
 from pscanner.store.repo import (
     AlertsRepo,
     CachedMarket,
@@ -23,6 +26,20 @@ from pscanner.strategies.paper_resolver import (
 from pscanner.util.clock import FakeClock
 
 _NOW = 1700000000
+
+
+def _async_mocks() -> tuple[AsyncMock, AsyncMock]:
+    """Return (data_client, gamma_client) AsyncMocks for tests that don't
+    exercise the refresh path.
+
+    ``get_market_slug_by_condition_id`` returns ``None`` so the refresh
+    helper exits before any upsert, whether or not the cache row is
+    ``active``. Tests with ``active=True`` cache rows are safe to use this
+    helper — the refresh fires but falls through cleanly on the slug miss.
+    """
+    data = AsyncMock()
+    data.get_market_slug_by_condition_id.return_value = None
+    return data, AsyncMock()
 
 
 def _cache_market(
@@ -138,10 +155,13 @@ async def test_resolver_books_winning_exit(tmp_db) -> None:
     _open_position(paper, outcome="yes", cost_usd=10.0, shares=20.0)
     sink = AlertSink(AlertsRepo(tmp_db))
     clock = FakeClock(start=float(_NOW + 100))
+    data, gamma = _async_mocks()
     resolver = PaperResolver(
         config=cfg,
         market_cache=cache,
         paper_trades=paper,
+        data_client=data,
+        gamma_client=gamma,
         clock=clock,
     )
     await resolver._scan(sink)
@@ -159,10 +179,13 @@ async def test_resolver_books_losing_exit(tmp_db) -> None:
     _open_position(paper, outcome="yes", cost_usd=10.0, shares=20.0)
     sink = AlertSink(AlertsRepo(tmp_db))
     clock = FakeClock(start=float(_NOW + 100))
+    data, gamma = _async_mocks()
     resolver = PaperResolver(
         config=cfg,
         market_cache=cache,
         paper_trades=paper,
+        data_client=data,
+        gamma_client=gamma,
         clock=clock,
     )
     await resolver._scan(sink)
@@ -179,10 +202,13 @@ async def test_resolver_skips_unresolved(tmp_db) -> None:
     _cache_market(cache, active=True, outcome_prices=[0.6, 0.4])
     _open_position(paper)
     clock = FakeClock(start=float(_NOW + 100))
+    data, gamma = _async_mocks()
     resolver = PaperResolver(
         config=cfg,
         market_cache=cache,
         paper_trades=paper,
+        data_client=data,
+        gamma_client=gamma,
         clock=clock,
     )
     await resolver._scan(AlertSink(AlertsRepo(tmp_db)))
@@ -211,10 +237,13 @@ async def test_resolver_books_multiple_in_one_scan(tmp_db) -> None:
     _open_position(paper, condition_id="0xcond-1", asset_id="a-y1", outcome="yes")
     _open_position(paper, condition_id="0xcond-2", asset_id="a-y2", outcome="yes")
     clock = FakeClock(start=float(_NOW + 100))
+    data, gamma = _async_mocks()
     resolver = PaperResolver(
         config=cfg,
         market_cache=cache,
         paper_trades=paper,
+        data_client=data,
+        gamma_client=gamma,
         clock=clock,
     )
     await resolver._scan(AlertSink(AlertsRepo(tmp_db)))
@@ -227,6 +256,8 @@ def test_resolver_interval_from_config(tmp_db) -> None:
         config=cfg,
         market_cache=MarketCacheRepo(tmp_db),
         paper_trades=PaperTradesRepo(tmp_db),
+        data_client=AsyncMock(),
+        gamma_client=AsyncMock(),
     )
     assert resolver._interval_seconds() == 120.0
 
@@ -245,10 +276,13 @@ async def test_resolver_keeps_position_open_when_insert_exit_raises(tmp_db, monk
 
     monkeypatch.setattr(paper, "insert_exit", boom)
     clock = FakeClock(start=float(_NOW + 100))
+    data, gamma = _async_mocks()
     resolver = PaperResolver(
         config=cfg,
         market_cache=cache,
         paper_trades=paper,
+        data_client=data,
+        gamma_client=gamma,
         clock=clock,
     )
     # Must not raise
@@ -258,3 +292,207 @@ async def test_resolver_keeps_position_open_when_insert_exit_raises(tmp_db, monk
     assert len(open_positions) == 1
     # NAV unchanged because no exit was booked
     assert paper.compute_cost_basis_nav(starting_bankroll=1000.0) == 1000.0
+
+
+@pytest.mark.asyncio
+async def test_resolver_refreshes_stale_active_market_then_books_exit(tmp_db) -> None:
+    """A market whose cache row is still active=1 gets refreshed via gamma
+    and, if gamma reports it resolved, an exit row is booked in the same scan.
+    """
+    cfg = PaperTradingConfig(enabled=True)
+    cache = MarketCacheRepo(tmp_db)
+    paper = PaperTradesRepo(tmp_db)
+    # Pre-seed cache as still-active (the bug condition).
+    _cache_market(cache, active=True, outcome_prices=[0.6, 0.4])
+    _open_position(paper, outcome="yes", cost_usd=10.0, shares=20.0)
+
+    resolved_market = Market.model_validate(
+        {
+            "id": "mkt-0xcond-1",
+            "conditionId": "0xcond-1",
+            "question": "Test market",
+            "slug": "test-market",
+            "outcomes": ["Yes", "No"],
+            "outcomePrices": ["1.0", "0.0"],
+            "clobTokenIds": ["asset-yes", "asset-no"],
+            "active": False,
+            "closed": True,
+        },
+    )
+    data = AsyncMock()
+    data.get_market_slug_by_condition_id.return_value = "test-market"
+    gamma = AsyncMock()
+    gamma.get_market_by_slug.return_value = resolved_market
+
+    clock = FakeClock(start=float(_NOW + 100))
+    resolver = PaperResolver(
+        config=cfg,
+        market_cache=cache,
+        paper_trades=paper,
+        data_client=data,
+        gamma_client=gamma,
+        clock=clock,
+    )
+    with capture_logs() as logs:
+        await resolver._scan(AlertSink(AlertsRepo(tmp_db)))
+
+    assert any(
+        entry["event"] == "paper_resolver.refresh_completed"
+        and entry.get("refreshed") == 1
+        and entry.get("failed") == 0
+        for entry in logs
+    )
+    data.get_market_slug_by_condition_id.assert_awaited_once_with(ConditionId("0xcond-1"))
+    gamma.get_market_by_slug.assert_awaited_once_with("test-market")
+    assert paper.list_open_positions() == []
+    assert paper.compute_cost_basis_nav(starting_bankroll=1000.0) == 1010.0
+
+
+@pytest.mark.asyncio
+async def test_resolver_dedups_refresh_per_scan(tmp_db) -> None:
+    """Two open positions on the same condition_id trigger exactly one refresh."""
+    cfg = PaperTradingConfig(enabled=True)
+    cache = MarketCacheRepo(tmp_db)
+    paper = PaperTradesRepo(tmp_db)
+    _cache_market(cache, active=True, outcome_prices=[0.6, 0.4])
+    _open_position(paper, outcome="yes", cost_usd=10.0, shares=20.0)
+    # Second open position on same condition_id, different fill (e.g. twin trade).
+    paper.insert_entry(
+        triggering_alert_key="k-0xcond-1-no",
+        triggering_alert_detector="velocity",
+        rule_variant="fade",
+        source_wallet="0xw2",
+        condition_id=ConditionId("0xcond-1"),
+        asset_id=AssetId("asset-no"),
+        outcome="no",
+        shares=10.0,
+        fill_price=0.4,
+        cost_usd=4.0,
+        nav_after_usd=996.0,
+        ts=_NOW,
+    )
+
+    resolved_market = Market.model_validate(
+        {
+            "id": "mkt-0xcond-1",
+            "conditionId": "0xcond-1",
+            "question": "Test market",
+            "slug": "test-market",
+            "outcomes": ["Yes", "No"],
+            "outcomePrices": ["1.0", "0.0"],
+            "clobTokenIds": ["asset-yes", "asset-no"],
+            "active": False,
+            "closed": True,
+        },
+    )
+    data = AsyncMock()
+    data.get_market_slug_by_condition_id.return_value = "test-market"
+    gamma = AsyncMock()
+    gamma.get_market_by_slug.return_value = resolved_market
+
+    clock = FakeClock(start=float(_NOW + 100))
+    resolver = PaperResolver(
+        config=cfg,
+        market_cache=cache,
+        paper_trades=paper,
+        data_client=data,
+        gamma_client=gamma,
+        clock=clock,
+    )
+    await resolver._scan(AlertSink(AlertsRepo(tmp_db)))
+
+    assert data.get_market_slug_by_condition_id.await_count == 1
+    assert gamma.get_market_by_slug.await_count == 1
+    # Both positions resolved in the same scan.
+    assert paper.list_open_positions() == []
+
+
+@pytest.mark.asyncio
+async def test_resolver_skips_refresh_when_cache_already_inactive(tmp_db) -> None:
+    """Cache rows that already say active=False are not re-fetched."""
+    cfg = PaperTradingConfig(enabled=True)
+    cache = MarketCacheRepo(tmp_db)
+    paper = PaperTradesRepo(tmp_db)
+    _cache_market(cache, active=False, outcome_prices=[1.0, 0.0])
+    _open_position(paper, outcome="yes", cost_usd=10.0, shares=20.0)
+    data = AsyncMock()
+    gamma = AsyncMock()
+
+    clock = FakeClock(start=float(_NOW + 100))
+    resolver = PaperResolver(
+        config=cfg,
+        market_cache=cache,
+        paper_trades=paper,
+        data_client=data,
+        gamma_client=gamma,
+        clock=clock,
+    )
+    await resolver._scan(AlertSink(AlertsRepo(tmp_db)))
+
+    data.get_market_slug_by_condition_id.assert_not_awaited()
+    gamma.get_market_by_slug.assert_not_awaited()
+    # Exit still booked via the unchanged resolution path.
+    assert paper.list_open_positions() == []
+
+
+@pytest.mark.asyncio
+async def test_resolver_refresh_failure_does_not_block_other_positions(tmp_db) -> None:
+    """One market's refresh raising must not prevent another from being booked."""
+    cfg = PaperTradingConfig(enabled=True)
+    cache = MarketCacheRepo(tmp_db)
+    paper = PaperTradesRepo(tmp_db)
+    _cache_market(
+        cache,
+        condition_id="0xcond-1",
+        active=True,
+        outcome_prices=[0.5, 0.5],
+        asset_ids=["a-y1", "a-n1"],
+    )
+    _cache_market(
+        cache,
+        condition_id="0xcond-2",
+        active=True,
+        outcome_prices=[0.5, 0.5],
+        asset_ids=["a-y2", "a-n2"],
+    )
+    _open_position(paper, condition_id="0xcond-1", asset_id="a-y1", outcome="yes")
+    _open_position(paper, condition_id="0xcond-2", asset_id="a-y2", outcome="yes")
+
+    resolved_cond2 = Market.model_validate(
+        {
+            "id": "mkt-0xcond-2",
+            "conditionId": "0xcond-2",
+            "question": "Second market",
+            "slug": "second-market",
+            "outcomes": ["Yes", "No"],
+            "outcomePrices": ["1.0", "0.0"],
+            "clobTokenIds": ["a-y2", "a-n2"],
+            "active": False,
+            "closed": True,
+        },
+    )
+
+    async def slug_side_effect(cid: ConditionId) -> str | None:
+        if cid == ConditionId("0xcond-1"):
+            raise RuntimeError("transient gamma upstream failure")
+        return "second-market"
+
+    data = AsyncMock()
+    data.get_market_slug_by_condition_id.side_effect = slug_side_effect
+    gamma = AsyncMock()
+    gamma.get_market_by_slug.return_value = resolved_cond2
+
+    clock = FakeClock(start=float(_NOW + 100))
+    resolver = PaperResolver(
+        config=cfg,
+        market_cache=cache,
+        paper_trades=paper,
+        data_client=data,
+        gamma_client=gamma,
+        clock=clock,
+    )
+    await resolver._scan(AlertSink(AlertsRepo(tmp_db)))
+
+    open_after = paper.list_open_positions()
+    assert len(open_after) == 1
+    assert open_after[0].condition_id == ConditionId("0xcond-1")
