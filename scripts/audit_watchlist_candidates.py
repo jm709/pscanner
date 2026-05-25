@@ -184,8 +184,11 @@ async def _audit_wallet(
     limit: int,
 ) -> WalletAudit:
     audit = WalletAudit(candidate=candidate)
+    # ``limit`` is in positions; get_settled_positions takes max_pages
+    # (server caps at 50 rows/page).
+    max_pages = max(1, limit // 50)
     try:
-        positions = await data_client.get_settled_positions(candidate.address, limit=limit)
+        positions = await data_client.get_settled_positions(candidate.address, max_pages=max_pages)
     except Exception as exc:
         print(f"  WARN: fetch failed for {candidate.address}: {exc}", flush=True)
         return audit

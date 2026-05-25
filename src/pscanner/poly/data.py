@@ -15,7 +15,7 @@ import httpx
 import structlog
 
 from pscanner.poly.http import PolyHttpClient
-from pscanner.poly.models import LeaderboardEntry, Position
+from pscanner.poly.models import ClosedPosition, LeaderboardEntry, Position
 
 _DATA_API_BASE_URL: Final[str] = "https://data-api.polymarket.com"
 _LB_API_BASE_URL: Final[str] = "https://lb-api.polymarket.com"
@@ -23,6 +23,9 @@ _LB_API_BASE_URL: Final[str] = "https://lb-api.polymarket.com"
 _PERIOD_TO_WINDOW: Final[dict[str, str]] = {"day": "1d", "week": "7d", "all": "all"}
 
 _ACTIVITY_PAGE_SIZE: Final[int] = 500
+
+# /v1/closed-positions is server-capped at 50 rows/page; offset paginates the rest.
+_CLOSED_POSITIONS_PAGE_SIZE: Final[int] = 50
 
 _TRADES_PAGE_SIZE: Final[int] = 500
 _TRADES_PAGE_CAP: Final[int] = 30  # 15k trades per condition_id maximum
@@ -109,6 +112,52 @@ class DataClient:
         payload = await self._data_http.get("/positions", params=params)
         items = _ensure_list(payload, endpoint="/positions")
         return [Position.model_validate(item) for item in items]
+
+    async def get_settled_positions(
+        self,
+        address: str,
+        *,
+        max_pages: int = 100,
+    ) -> list[ClosedPosition]:
+        """Walk ``/v1/closed-positions`` paginated for ALL settled positions.
+
+        Returns the wallet's wins + losses across resolved markets.
+        The server caps each page at ``_CLOSED_POSITIONS_PAGE_SIZE`` (50)
+        and offset pagination walks the rest; the walk stops on the
+        first short page. ``max_pages`` is a defensive cap against a
+        runaway pagination loop on a misbehaving response.
+
+        Per PR #191's verification: ``/positions?closed=true`` is a
+        server-side no-op (returns currently-open positions). Use this
+        helper instead for any "all settled positions for a wallet"
+        query.
+
+        Args:
+            address: 0x-prefixed proxy wallet address.
+            max_pages: Hard cap on pages to walk (default 100 = up to
+                5,000 settled positions per wallet).
+
+        Returns:
+            A list of ``ClosedPosition`` models. May be empty for a
+            wallet with no settled positions.
+        """
+        out: list[ClosedPosition] = []
+        for page_idx in range(max_pages):
+            offset = page_idx * _CLOSED_POSITIONS_PAGE_SIZE
+            params: dict[str, Any] = {
+                "user": address,
+                "limit": _CLOSED_POSITIONS_PAGE_SIZE,
+            }
+            if offset:
+                params["offset"] = offset
+            payload = await self._data_http.get("/v1/closed-positions", params=params)
+            items = _ensure_list(payload, endpoint="/v1/closed-positions")
+            if not items:
+                break
+            out.extend(ClosedPosition.model_validate(item) for item in items)
+            if len(items) < _CLOSED_POSITIONS_PAGE_SIZE:
+                break
+        return out
 
     async def get_activity(
         self,

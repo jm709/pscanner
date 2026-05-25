@@ -107,11 +107,16 @@ async def _fetch_wallet(
     address: str,
     limit: int,
 ) -> WalletOnchain:
-    """Fetch one wallet's settled positions and aggregate. Returns zeroed on error."""
+    """Fetch one wallet's settled positions and aggregate. Returns zeroed on error.
+
+    ``limit`` is in positions; we convert to ``max_pages`` for
+    ``get_settled_positions`` (server caps at 50 rows/page).
+    """
+    max_pages = max(1, limit // 50)
     try:
         positions: list[ClosedPosition] = await data_client.get_settled_positions(
             address,
-            limit=limit,
+            max_pages=max_pages,
         )
     except Exception as exc:
         print(f"  WARN: fetch failed for {address}: {exc}", flush=True)
