@@ -1,4 +1,9 @@
-"""Wiring tests: Scanner builds gate-model components when enabled (#79)."""
+"""Wiring tests: Scanner builds gate-model components when enabled (#79).
+
+Note: the GateModelDetector class itself was removed alongside the other
+detectors. The market-scoped collector, LiveHistoryProvider, and preflight
+gating still live until PR 3 cleans up the gate-model config + provider.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +11,6 @@ import json
 import sqlite3
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
@@ -29,7 +33,6 @@ from pscanner.daemon.corpus_loader import (
     load_corpus_resolutions_into as _load_corpus_resolutions,
 )
 from pscanner.daemon.live_history import LiveHistoryProvider
-from pscanner.detectors.gate_model import GateModelDetector
 from pscanner.poly.models import Event, Market
 from pscanner.scheduler import Scanner, SchedulerClients
 from pscanner.store.db import init_db
@@ -52,23 +55,11 @@ def _make_stub_clients() -> SchedulerClients:
     data_client.get_activity = AsyncMock(return_value=[])
     data_client.get_market_trades = AsyncMock(return_value=[])
 
-    ticks_ws = MagicMock()
-    ticks_ws.close = AsyncMock()
-    ticks_ws.connect = AsyncMock()
-    ticks_ws.subscribe = AsyncMock()
-
-    async def _empty_messages() -> AsyncIterator[Any]:
-        if False:  # pragma: no cover
-            yield  # type: ignore[unreachable]
-
-    ticks_ws.messages = MagicMock(return_value=_empty_messages())
-
     return SchedulerClients(
         gamma_http=gamma_http,
         data_http=data_http,
         gamma_client=gamma_client,
         data_client=data_client,
-        ticks_ws=ticks_ws,
     )
 
 
@@ -139,14 +130,15 @@ async def test_scanner_omits_gate_model_when_disabled(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_scanner_builds_gate_model_when_enabled(tmp_path: Path) -> None:
+async def test_scanner_builds_market_scoped_collector_when_enabled(tmp_path: Path) -> None:
+    """The market-scoped collector still wires up when the gate-model
+    market filter is enabled (the consuming detector class is gone)."""
     artifact_dir = tmp_path / "model"
     _train_dummy_model(artifact_dir)
     cfg = _make_config(artifact_dir=artifact_dir, gate_enabled=True, filter_enabled=True)
     clients = _make_stub_clients()
     scanner = Scanner(config=cfg, db_path=tmp_path / "daemon.sqlite3", clients=clients)
     try:
-        assert isinstance(scanner._detectors.get("gate_model"), GateModelDetector)
         collector = scanner._collectors.get("market_scoped_trades")
         assert isinstance(collector, MarketScopedTradeCollector)
         # Issue #102: collector must reference the live provider so it can
@@ -407,15 +399,15 @@ def test_load_corpus_resolutions_handles_unmigrated_market_resolutions(
 
 
 @pytest.mark.asyncio
-async def test_collector_refresh_makes_live_market_visible_to_detector(
+async def test_collector_refresh_makes_live_market_visible_to_provider(
     tmp_path: Path,
 ) -> None:
-    """End-to-end: a live (non-corpus) market becomes available to the detector.
+    """End-to-end: a live (non-corpus) market becomes available to the provider.
 
     Issue #102: corpus_markets only holds backfilled markets, so live trading
     targets are absent from ``provider.market_metadata`` at boot. The collector's
-    refresh must populate the provider so the detector's metadata lookup
-    succeeds.
+    refresh must populate the provider so future detector metadata lookups
+    succeed.
     """
     artifact_dir = tmp_path / "model"
     _train_dummy_model(artifact_dir)
@@ -467,7 +459,7 @@ async def test_collector_refresh_makes_live_market_visible_to_detector(
         assert isinstance(collector, MarketScopedTradeCollector)
         await collector.refresh_market_set()
 
-        # Post-condition: live market IS now visible to the detector.
+        # Post-condition: live market IS now visible to the provider.
         meta = scanner._live_history_provider.market_metadata("0xLIVE")
         assert meta.category == "esports"
     finally:
