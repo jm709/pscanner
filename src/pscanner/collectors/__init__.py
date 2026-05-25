@@ -1,1 +1,1 @@
-"""Data-collection subpackage (watchlist registry + trade collector)."""
+"""Data-collection subpackage (watchlist registry + collectors)."""

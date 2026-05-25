@@ -29,8 +29,6 @@ from pscanner.store.repo import (
     PositionSnapshotsRepo,
     TrackedWallet,
     TrackedWalletsRepo,
-    WalletFirstSeen,
-    WalletFirstSeenRepo,
 )
 
 
@@ -60,11 +58,9 @@ def test_public_symbols_importable() -> None:
     for cls in (
         TrackedWallet,
         PositionSnapshot,
-        WalletFirstSeen,
         CachedMarket,
         TrackedWalletsRepo,
         PositionSnapshotsRepo,
-        WalletFirstSeenRepo,
         MarketCacheRepo,
         AlertsRepo,
     ):
@@ -100,7 +96,6 @@ def test_init_db_creates_all_tables(tmp_db: sqlite3.Connection) -> None:
     expected = {
         "tracked_wallets",
         "wallet_position_snapshots",
-        "wallet_first_seen",
         "market_cache",
         "alerts",
     }

@@ -37,14 +37,6 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS wallet_first_seen (
-      address TEXT PRIMARY KEY,
-      first_activity_at INTEGER,
-      total_trades INTEGER,
-      cached_at INTEGER NOT NULL
-    )
-    """,
-    """
     CREATE TABLE IF NOT EXISTS market_cache (
       market_id TEXT PRIMARY KEY,
       event_id TEXT,
@@ -79,57 +71,6 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_watchlist_active ON wallet_watchlist(active, address)",
-    """
-    CREATE TABLE IF NOT EXISTS wallet_trades (
-      transaction_hash TEXT NOT NULL,
-      asset_id TEXT NOT NULL,
-      side TEXT NOT NULL,
-      wallet TEXT NOT NULL,
-      condition_id TEXT NOT NULL,
-      size REAL NOT NULL,
-      price REAL NOT NULL,
-      usd_value REAL NOT NULL,
-      status TEXT NOT NULL,
-      source TEXT NOT NULL,
-      timestamp INTEGER NOT NULL,
-      recorded_at INTEGER NOT NULL,
-      PRIMARY KEY (transaction_hash, asset_id, side)
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_wallet_trades_wallet_ts "
-    "ON wallet_trades(wallet, timestamp DESC)",
-    "CREATE INDEX IF NOT EXISTS idx_wallet_trades_market_ts "
-    "ON wallet_trades(condition_id, timestamp DESC)",
-    """
-    CREATE TABLE IF NOT EXISTS wallet_positions_history (
-      wallet TEXT NOT NULL,
-      condition_id TEXT NOT NULL,
-      outcome TEXT NOT NULL,
-      size REAL NOT NULL,
-      avg_price REAL NOT NULL,
-      current_value REAL,
-      cash_pnl REAL,
-      realized_pnl REAL,
-      redeemable INTEGER,
-      snapshot_at INTEGER NOT NULL,
-      PRIMARY KEY (wallet, condition_id, outcome, snapshot_at)
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_wph_wallet_ts "
-    "ON wallet_positions_history(wallet, snapshot_at DESC)",
-    """
-    CREATE TABLE IF NOT EXISTS wallet_activity_events (
-      wallet TEXT NOT NULL,
-      event_type TEXT NOT NULL,
-      payload_json TEXT NOT NULL,
-      timestamp INTEGER NOT NULL,
-      recorded_at INTEGER NOT NULL,
-      source TEXT NOT NULL,
-      PRIMARY KEY (wallet, timestamp, event_type)
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_wae_wallet_ts "
-    "ON wallet_activity_events(wallet, timestamp DESC)",
     """
     CREATE TABLE IF NOT EXISTS market_snapshots (
       market_id TEXT NOT NULL,
