@@ -490,6 +490,8 @@ class Scanner:
             config=self._config.paper_trading,
             market_cache=self._market_cache_repo,
             paper_trades=paper_trades_repo,
+            data_client=self._clients.data_client,
+            gamma_client=self._clients.gamma_client,
             clock=self._clock,
         )
 

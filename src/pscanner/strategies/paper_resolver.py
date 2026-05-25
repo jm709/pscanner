@@ -12,12 +12,15 @@ import structlog
 from pscanner.alerts.sink import AlertSink
 from pscanner.config import PaperTradingConfig
 from pscanner.detectors.polling import PollingDetector
+from pscanner.poly.data import DataClient
+from pscanner.poly.gamma import GammaClient
 from pscanner.poly.ids import AssetId, ConditionId
 from pscanner.store.repo import (
     MarketCacheRepo,
     OpenPaperPosition,
     PaperTradesRepo,
 )
+from pscanner.strategies.market_cache_refresh import refresh_market_cache_row
 from pscanner.util.clock import Clock
 
 _LOG = structlog.get_logger(__name__)
@@ -67,6 +70,8 @@ class PaperResolver(PollingDetector):
         config: PaperTradingConfig,
         market_cache: MarketCacheRepo,
         paper_trades: PaperTradesRepo,
+        data_client: DataClient,
+        gamma_client: GammaClient,
         clock: Clock | None = None,
     ) -> None:
         """Wire dependencies; see :class:`PollingDetector` for the loop shape.
@@ -75,31 +80,79 @@ class PaperResolver(PollingDetector):
             config: Paper-trading config; supplies the scan interval and the
                 starting bankroll used when stamping ``nav_after_usd`` on
                 exit rows.
-            market_cache: Read-only access to the cached market table.
+            market_cache: Read/write access to the cached market table. The
+                resolver refreshes stale-active rows for open positions
+                before checking resolution (#170).
             paper_trades: Read/write repo for ``paper_trades``.
+            data_client: Used to resolve a market's slug from its
+                ``condition_id`` during refresh.
+            gamma_client: Used to fetch a market by slug during refresh.
             clock: Optional injected :class:`Clock`; defaults to a real clock.
         """
         super().__init__(clock=clock)
         self._config = config
         self._market_cache = market_cache
         self._paper_trades = paper_trades
+        self._data_client = data_client
+        self._gamma_client = gamma_client
 
     def _interval_seconds(self) -> float:
         return self._config.resolver_scan_interval_seconds
 
     async def _scan(self, sink: AlertSink) -> None:
-        """Walk open positions; insert exit rows for any that resolved.
+        """Refresh stale-active market_cache rows, then book exits.
 
-        Errors on individual positions are logged and skipped — one bad row
-        never blocks the rest.
+        Errors on individual positions or refresh calls are logged and
+        skipped — one bad row never blocks the rest.
         """
         del sink  # contract: _scan accepts a sink; we don't emit
+        open_positions = list(self._paper_trades.list_open_positions())
+        await self._refresh_stale_markets(open_positions)
         booked = 0
-        for pos in self._paper_trades.list_open_positions():
+        for pos in open_positions:
             if self._maybe_book_exit(pos):
                 booked += 1
         if booked:
             _LOG.info("paper_resolver.scan_completed", booked=booked)
+
+    async def _refresh_stale_markets(
+        self,
+        open_positions: list[OpenPaperPosition],
+    ) -> None:
+        """Refresh stale-active entries in ``market_cache`` for open positions.
+
+        Covers any market still cached as ``active=True`` (or missing entirely).
+        Deduplicates by ``condition_id`` so twin positions on the same
+        market only trigger one gamma call per scan. Sequential awaits —
+        no ``gather`` — to keep gamma traffic predictable under the
+        shared rate limiter.
+        """
+        seen: set[ConditionId] = set()
+        refreshed = 0
+        failed = 0
+        for pos in open_positions:
+            if pos.condition_id in seen:
+                continue
+            seen.add(pos.condition_id)
+            cached = self._market_cache.get_by_condition_id(pos.condition_id)
+            if cached is not None and not cached.active:
+                continue
+            ok = await refresh_market_cache_row(
+                data_client=self._data_client,
+                gamma_client=self._gamma_client,
+                market_cache=self._market_cache,
+                condition_id=pos.condition_id,
+            )
+            if ok:
+                refreshed += 1
+            else:
+                failed += 1
+        if refreshed or failed:
+            _LOG.info(
+                "paper_resolver.refresh_completed",
+                refreshed=refreshed,
+                failed=failed,
+            )
 
     def _maybe_book_exit(self, pos: OpenPaperPosition) -> bool:
         """Check resolution for one position; insert exit if resolved.

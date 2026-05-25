@@ -988,7 +988,8 @@ async def test_scanner_wires_paper_trader_to_alert_sink_when_enabled(
     )
     _seed_paper_smoke_db(db_file)
 
-    scanner = Scanner(config=cfg, db_path=db_file, clients=_make_clients())
+    clients = _make_clients()
+    scanner = Scanner(config=cfg, db_path=db_file, clients=clients)
     try:
         await scanner.sink.emit(
             Alert(
@@ -1021,6 +1022,8 @@ async def test_scanner_wires_paper_trader_to_alert_sink_when_enabled(
             config=cfg.paper_trading,
             market_cache=MarketCacheRepo(resolver_conn),
             paper_trades=PaperTradesRepo(resolver_conn),
+            data_client=clients.data_client,
+            gamma_client=clients.gamma_client,
         )
         await resolver._scan(AlertSink(AlertsRepo(resolver_conn)))
         assert PaperTradesRepo(resolver_conn).list_open_positions() == []
