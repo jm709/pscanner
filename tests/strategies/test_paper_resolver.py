@@ -95,7 +95,7 @@ def _open_position(
     )
 
 
-def test_check_resolution_active_market_returns_none(tmp_db) -> None:
+def test_check_resolution_non_definitive_prices_return_none(tmp_db) -> None:
     cache = MarketCacheRepo(tmp_db)
     _cache_market(cache, active=True, outcome_prices=[0.6, 0.4])
     assert _check_resolution(cache, ConditionId("0xcond-1")) is None
@@ -113,6 +113,16 @@ def test_check_resolution_no_won(tmp_db) -> None:
     _cache_market(cache, active=False, outcome_prices=[0.0, 1.0])
     res = _check_resolution(cache, ConditionId("0xcond-1"))
     assert res == AssetId("asset-no")
+
+
+def test_check_resolution_active_with_definitive_split_resolves(tmp_db) -> None:
+    """Gamma reports resolved markets as active=True closed=True with the
+    definitive price split. The resolver MUST not gate on cached.active.
+    """
+    cache = MarketCacheRepo(tmp_db)
+    _cache_market(cache, active=True, outcome_prices=[1.0, 0.0])
+    res = _check_resolution(cache, ConditionId("0xcond-1"))
+    assert res == AssetId("asset-yes")
 
 
 def test_check_resolution_ambiguous_outcomes_returns_none(tmp_db) -> None:
@@ -408,12 +418,14 @@ async def test_resolver_dedups_refresh_per_scan(tmp_db) -> None:
 
 
 @pytest.mark.asyncio
-async def test_resolver_skips_refresh_when_cache_already_inactive(tmp_db) -> None:
-    """Cache rows that already say active=False are not re-fetched."""
+async def test_resolver_skips_refresh_when_cache_already_resolved(tmp_db) -> None:
+    """Cache rows that already show the definitive [1,0]/[0,1] split are not re-fetched."""
     cfg = PaperTradingConfig(enabled=True)
     cache = MarketCacheRepo(tmp_db)
     paper = PaperTradesRepo(tmp_db)
-    _cache_market(cache, active=False, outcome_prices=[1.0, 0.0])
+    # Gamma reports resolved markets as active=True with the definitive split;
+    # the refresh path must recognize that and skip the gamma round-trip.
+    _cache_market(cache, active=True, outcome_prices=[1.0, 0.0])
     _open_position(paper, outcome="yes", cost_usd=10.0, shares=20.0)
     data = AsyncMock()
     gamma = AsyncMock()
