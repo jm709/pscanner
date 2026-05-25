@@ -2,7 +2,8 @@
 
 Given seed wallets (a known coordinated cluster), this script:
 
-1. Reads each seed wallet's trades from the local ``wallet_trades`` table.
+1. Fetches each seed wallet's full TRADE-type activity history via
+   ``DataClient.get_activity`` (paginated newest-first).
 2. Selects "high-coordination" shared markets (≥3 seed wallets co-traded OR
    ≥4 total seed trades) and computes the cluster's per-market trade window.
 3. Paginates ``data-api.polymarket.com/trades?market=`` for each shared market
@@ -42,6 +43,10 @@ import httpx
 from pscanner.config import Config
 from pscanner.poly.data import DataClient
 from pscanner.store.db import init_db
+
+_ACTIVITY_PAGE_SIZE = 500
+# /activity offset is capped server-side; DataClient logs and returns [] past it.
+_ACTIVITY_PAGE_CAP = 20  # 10k trades per seed wallet maximum
 
 _DATA_API = "https://data-api.polymarket.com"
 _PAGE_SIZE = 500
@@ -113,30 +118,79 @@ def _seed_wallets_from_cluster(conn: sqlite3.Connection, cluster_id: str) -> lis
     return [r["wallet"].lower() for r in rows]
 
 
-def _select_seed_markets(conn: sqlite3.Connection, seeds: list[str]) -> list[SeedMarket]:
-    """Group seed-wallet trades by condition_id; keep high-coordination markets."""
-    # Placeholders are a fixed comma-separated list of '?' — no user data; safe.
-    placeholders = ",".join("?" * len(seeds))
-    query = f"""
-        SELECT condition_id, COUNT(*) AS n_trades,
-               COUNT(DISTINCT wallet) AS n_wallets,
-               MIN(timestamp) AS ts_min, MAX(timestamp) AS ts_max
-        FROM wallet_trades
-        WHERE wallet IN ({placeholders})
-        GROUP BY condition_id ORDER BY n_trades DESC
-    """  # noqa: S608
-    rows = conn.execute(query, seeds).fetchall()
-    return [
-        SeedMarket(
-            condition_id=r["condition_id"],
-            ts_min=r["ts_min"],
-            ts_max=r["ts_max"],
-            n_seed_trades=r["n_trades"],
-            n_seed_wallets=r["n_wallets"],
+async def _fetch_seed_trades(
+    client: DataClient,
+    wallet: str,
+) -> list[dict[str, Any]]:
+    """Page ``DataClient.get_activity`` (newest-first) for a single seed wallet.
+
+    Returns every ``type == "TRADE"`` event carrying a non-empty
+    ``conditionId`` and integer ``timestamp``. Rate limiting is handled by
+    the underlying ``RateLimitedHttpClient``; no manual sleeps needed.
+    """
+    out: list[dict[str, Any]] = []
+    offset = 0
+    for _ in range(_ACTIVITY_PAGE_CAP):
+        page = await client.get_activity(
+            wallet,
+            type="TRADE",
+            limit=_ACTIVITY_PAGE_SIZE,
+            offset=offset,
         )
-        for r in rows
-        if r["n_wallets"] >= _HIGH_COORD_MIN_WALLETS or r["n_trades"] >= _HIGH_COORD_MIN_TRADES
+        if not page:
+            break
+        for event in page:
+            cond = event.get("conditionId")
+            ts = event.get("timestamp")
+            if isinstance(cond, str) and cond and isinstance(ts, int):
+                out.append(event)
+        if len(page) < _ACTIVITY_PAGE_SIZE:
+            break
+        offset += _ACTIVITY_PAGE_SIZE
+    return out
+
+
+def _select_seed_markets(
+    trades_by_wallet: dict[str, list[dict[str, Any]]],
+) -> list[SeedMarket]:
+    """Group seed-wallet trades by condition_id; keep high-coordination markets.
+
+    Args:
+        trades_by_wallet: Mapping from seed wallet → list of TRADE activity
+            events fetched via ``DataClient.get_activity``.
+
+    Returns:
+        ``SeedMarket`` rows for markets where ≥3 seed wallets co-traded OR
+        ≥4 seed-wallet trades happened, ordered by total seed trades desc.
+    """
+    per_market_wallets: dict[str, set[str]] = defaultdict(set)
+    per_market_trades: dict[str, int] = defaultdict(int)
+    per_market_ts_min: dict[str, int] = {}
+    per_market_ts_max: dict[str, int] = {}
+    for wallet, trades in trades_by_wallet.items():
+        for event in trades:
+            cond = event["conditionId"]
+            ts = event["timestamp"]
+            per_market_wallets[cond].add(wallet)
+            per_market_trades[cond] += 1
+            per_market_ts_min[cond] = min(per_market_ts_min.get(cond, ts), ts)
+            per_market_ts_max[cond] = max(per_market_ts_max.get(cond, ts), ts)
+    markets = [
+        SeedMarket(
+            condition_id=cond,
+            ts_min=per_market_ts_min[cond],
+            ts_max=per_market_ts_max[cond],
+            n_seed_trades=per_market_trades[cond],
+            n_seed_wallets=len(per_market_wallets[cond]),
+        )
+        for cond in per_market_trades
+        if (
+            len(per_market_wallets[cond]) >= _HIGH_COORD_MIN_WALLETS
+            or per_market_trades[cond] >= _HIGH_COORD_MIN_TRADES
+        )
     ]
+    markets.sort(key=lambda m: m.n_seed_trades, reverse=True)
+    return markets
 
 
 async def _fetch_market_trades(
@@ -388,57 +442,86 @@ def _parse_args() -> argparse.Namespace:
 
 async def _async_main(args: argparse.Namespace) -> int:
     config = Config.load()
-    conn = init_db(config.scanner.db_path)
-    try:
-        seeds = sorted({w.lower() for w in (args.wallet or [])})
-        if args.cluster_id:
+    seeds = sorted({w.lower() for w in (args.wallet or [])})
+    if args.cluster_id:
+        conn = init_db(config.scanner.db_path)
+        try:
             seeds = _seed_wallets_from_cluster(conn, args.cluster_id)
-        if len(seeds) < _MIN_SEED_WALLETS:
-            print(f"need ≥{_MIN_SEED_WALLETS} seed wallets, got {len(seeds)}", file=sys.stderr)
-            return 2
-        print(f"seeds: {len(seeds)} wallets")
+        finally:
+            conn.close()
+    if len(seeds) < _MIN_SEED_WALLETS:
+        print(f"need ≥{_MIN_SEED_WALLETS} seed wallets, got {len(seeds)}", file=sys.stderr)
+        return 2
+    print(f"seeds: {len(seeds)} wallets")
 
-        seed_markets = _select_seed_markets(conn, seeds)
-        if not seed_markets:
-            print("no high-coordination markets in local DB for these seeds", file=sys.stderr)
-            return 3
-        print(f"high-coordination markets: {len(seed_markets)}")
+    trades_by_wallet = await _fetch_all_seed_trades(seeds, rpm=args.rpm)
+    total_trades = sum(len(v) for v in trades_by_wallet.values())
+    print(f"seed trades fetched: {total_trades} across {len(trades_by_wallet)} wallets")
 
-        rows = await _collect_co_trader_rows(seed_markets, rpm=args.rpm)
-        print(f"co-trader rows fetched: {len(rows)}")
+    seed_markets = _select_seed_markets(trades_by_wallet)
+    if not seed_markets:
+        print("no high-coordination markets found for these seeds", file=sys.stderr)
+        return 3
+    print(f"high-coordination markets: {len(seed_markets)}")
 
-        candidates = _score_candidates(rows, set(seeds))
-        print(f"candidates passing overlap/trade-count gate: {len(candidates)}")
+    rows = await _collect_co_trader_rows(seed_markets, rpm=args.rpm)
+    print(f"co-trader rows fetched: {len(rows)}")
 
-        seed_window: tuple[int, int] | None = None
-        if not args.skip_verify and candidates:
-            await _verify_first_activity(candidates, rpm=args.rpm)
-            seed_first = await _seed_first_activity(seeds, rpm=args.rpm)
-            if seed_first:
-                seed_window = (min(seed_first.values()), max(seed_first.values()))
-                print(f"seed creation window: {seed_window[0]}..{seed_window[1]}")
+    candidates = _score_candidates(rows, set(seeds))
+    print(f"candidates passing overlap/trade-count gate: {len(candidates)}")
 
-        summary = _summarize(candidates, seed_window=seed_window)
-        terse = {k: v for k, v in summary.items() if k != "in_seed_window_addresses"}
-        print(f"\nSUMMARY: {json.dumps(terse, indent=2)}")
+    seed_window: tuple[int, int] | None = None
+    if not args.skip_verify and candidates:
+        await _verify_first_activity(candidates, rpm=args.rpm)
+        seed_first = await _seed_first_activity(seeds, rpm=args.rpm)
+        if seed_first:
+            seed_window = (min(seed_first.values()), max(seed_first.values()))
+            print(f"seed creation window: {seed_window[0]}..{seed_window[1]}")
 
-        out = args.out or _default_out_path(config.scanner.db_path, seeds)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(
-            json.dumps(
-                {
-                    "seeds": seeds,
-                    "seed_markets": [m.__dict__ for m in seed_markets],
-                    "summary": summary,
-                    "candidates": [_to_jsonable(c) for c in candidates],
-                },
-                indent=2,
-            )
+    summary = _summarize(candidates, seed_window=seed_window)
+    terse = {k: v for k, v in summary.items() if k != "in_seed_window_addresses"}
+    print(f"\nSUMMARY: {json.dumps(terse, indent=2)}")
+
+    out = args.out or _default_out_path(config.scanner.db_path, seeds)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        json.dumps(
+            {
+                "seeds": seeds,
+                "seed_markets": [m.__dict__ for m in seed_markets],
+                "summary": summary,
+                "candidates": [_to_jsonable(c) for c in candidates],
+            },
+            indent=2,
         )
-        print(f"\nwrote {len(candidates)} candidates → {out}")
-        return 0
+    )
+    print(f"\nwrote {len(candidates)} candidates → {out}")
+    return 0
+
+
+async def _fetch_all_seed_trades(
+    seeds: list[str],
+    *,
+    rpm: int,
+) -> dict[str, list[dict[str, Any]]]:
+    """Sequentially fetch every seed wallet's TRADE activity via ``DataClient``.
+
+    Runs sequentially (not concurrently) so a small ``rpm`` budget translates
+    predictably; ``DataClient``'s token-bucket already paces individual
+    requests. Logs per-wallet progress to stdout.
+    """
+    client = DataClient(rpm=rpm)
+    out: dict[str, list[dict[str, Any]]] = {}
+    try:
+        for i, wallet in enumerate(seeds, 1):
+            t0 = time.time()
+            trades = await _fetch_seed_trades(client, wallet)
+            elapsed = time.time() - t0
+            out[wallet] = trades
+            print(f"[{i:>2}/{len(seeds)}] seed={wallet}  trades={len(trades):>4}  ({elapsed:.1f}s)")
     finally:
-        conn.close()
+        await client.aclose()
+    return out
 
 
 def _default_out_path(db_path: Path, seeds: list[str]) -> Path:
