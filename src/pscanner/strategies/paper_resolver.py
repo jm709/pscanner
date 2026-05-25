@@ -20,6 +20,7 @@ from pscanner.store.repo import (
     OpenPaperPosition,
     PaperTradesRepo,
 )
+from pscanner.strategies.market_cache_refresh import refresh_market_cache_row
 from pscanner.util.clock import Clock
 
 _LOG = structlog.get_logger(__name__)
@@ -99,18 +100,47 @@ class PaperResolver(PollingDetector):
         return self._config.resolver_scan_interval_seconds
 
     async def _scan(self, sink: AlertSink) -> None:
-        """Walk open positions; insert exit rows for any that resolved.
+        """Refresh stale-active market_cache rows, then book exits.
 
-        Errors on individual positions are logged and skipped — one bad row
-        never blocks the rest.
+        Errors on individual positions or refresh calls are logged and
+        skipped — one bad row never blocks the rest.
         """
         del sink  # contract: _scan accepts a sink; we don't emit
+        open_positions = list(self._paper_trades.list_open_positions())
+        await self._refresh_stale_markets(open_positions)
         booked = 0
-        for pos in self._paper_trades.list_open_positions():
+        for pos in open_positions:
             if self._maybe_book_exit(pos):
                 booked += 1
         if booked:
             _LOG.info("paper_resolver.scan_completed", booked=booked)
+
+    async def _refresh_stale_markets(
+        self,
+        open_positions: list[OpenPaperPosition],
+    ) -> None:
+        """Refresh stale-active entries in ``market_cache`` for open positions.
+
+        Covers any market still cached as ``active=True`` (or missing entirely).
+        Deduplicates by ``condition_id`` so twin positions on the same
+        market only trigger one gamma call per scan. Sequential awaits —
+        no ``gather`` — to keep gamma traffic predictable under the
+        shared rate limiter.
+        """
+        seen: set[ConditionId] = set()
+        for pos in open_positions:
+            if pos.condition_id in seen:
+                continue
+            seen.add(pos.condition_id)
+            cached = self._market_cache.get_by_condition_id(pos.condition_id)
+            if cached is not None and not cached.active:
+                continue
+            await refresh_market_cache_row(
+                data_client=self._data_client,
+                gamma_client=self._gamma_client,
+                market_cache=self._market_cache,
+                condition_id=pos.condition_id,
+            )
 
     def _maybe_book_exit(self, pos: OpenPaperPosition) -> bool:
         """Check resolution for one position; insert exit if resolved.
