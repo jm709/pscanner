@@ -24,8 +24,8 @@ class ParsedSignal:
         side: Outcome name (e.g. ``"yes"``, ``"Trump"``) used by
             ``PaperTrader._resolve_outcome`` to look up the asset_id and
             fill price via :class:`MarketCacheRepo`.
-        rule_variant: ``"follow"``/``"fade"`` for velocity twin-trades;
-            ``None`` for single-entry sources.
+        rule_variant: Optional tag distinguishing variants of the same
+            alert (e.g. paired-leg trades); ``None`` for single-entry sources.
         metadata: Pass-through bag of fields each evaluator may stash for
             its own ``quality_passes`` (e.g. SmartMoney stores ``wallet``).
     """
@@ -43,8 +43,8 @@ class SignalEvaluator(Protocol):
 
     1. ``accepts(alert)`` — does this evaluator handle this alert's detector?
     2. ``parse(alert)`` — extract zero-or-more :class:`ParsedSignal` instances
-       (zero on body-shape mismatch; one for single-entry sources; two for
-       velocity twin-trades).
+       (zero on body-shape mismatch; one for single-entry sources; more for
+       paired-leg sources).
     3. ``quality_passes(parsed)`` — per-signal quality gate.
     4. ``size(bankroll, parsed)`` — return cost in USD. Bankroll is
        ``starting_bankroll_usd`` (constant), not running NAV — sizing is

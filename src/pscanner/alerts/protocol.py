@@ -1,8 +1,7 @@
-"""``IAlertSink`` Protocol — the surface tick-driven detectors depend on.
+"""``IAlertSink`` Protocol — the minimal surface alert producers depend on.
 
-Both :class:`AlertSink` (synchronous in-process delivery) and
-:class:`WorkerSink` (queue-deferred delivery) implement this Protocol so
-detectors can accept either without code changes.
+:class:`AlertSink` (synchronous in-process delivery) implements this
+Protocol; consumers can accept any conforming sink without code changes.
 """
 
 from __future__ import annotations

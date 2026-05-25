@@ -1,6 +1,6 @@
-"""Pydantic models for the Polymarket REST and WebSocket payloads.
+"""Pydantic models for the Polymarket REST payloads.
 
-These types are the contract every Polymarket client (gamma, data, clob_ws) must
+These types are the contract every Polymarket client (gamma, data) must
 return. Where Polymarket sends list-shaped data as JSON-encoded strings — for
 example ``outcomePrices`` on the gamma ``markets`` endpoint — we parse defensively
 so callers always see the typed Python list.
@@ -289,77 +289,3 @@ class LeaderboardEntry(BaseModel):
     pnl: Annotated[float, Field(alias="amount")]
     volume: float | None = None
     period: str
-
-
-class WsTradeMessage(BaseModel):
-    """WebSocket ``trade`` event from ``wss://.../ws/market``.
-
-    Polymarket emits two messages per fill — ``MATCHED`` then ``CONFIRMED`` —
-    so consumers must dedupe on ``transaction_hash`` and only act on the
-    ``CONFIRMED`` event.
-    """
-
-    model_config = _BASE_MODEL_CONFIG
-
-    event_type: Literal["trade"]
-    condition_id: ConditionId
-    asset_id: AssetId
-    side: str
-    size: float
-    price: float
-    taker_proxy: str
-    status: Literal["MATCHED", "CONFIRMED"]
-    transaction_hash: str | None = None
-    timestamp: int
-
-
-class WsBookMessage(BaseModel):
-    """WebSocket book/price-change event from the public market channel.
-
-    Polymarket's public market channel (``wss://.../ws/market``) emits two
-    distinct shapes that both flow through this model:
-
-    * ``book`` / ``last_trade_price`` events carry a top-level ``asset_id`` and
-      the full order-book snapshot fields (``bids``, ``asks``, ``tick_size``,
-      ``last_trade_price``, ``hash``).
-    * ``price_change`` / ``tick_size_change`` events carry a top-level
-      ``market`` (condition_id) and a nested ``price_changes`` list, each
-      element of which references its own ``asset_id``.
-
-    Both shapes are accepted; consumers that need the touched asset ids should
-    use :attr:`affected_asset_ids` rather than reading ``asset_id`` directly.
-    """
-
-    model_config = _BASE_MODEL_CONFIG
-
-    event_type: Literal["book", "price_change", "tick_size_change", "last_trade_price"]
-    asset_id: AssetId | None = None
-    market: ConditionId | None = None
-    timestamp: str | None = None
-    hash: str | None = None
-    bids: list[Any] | None = None
-    asks: list[Any] | None = None
-    tick_size: str | None = None
-    last_trade_price: str | None = None
-    price_changes: list[dict[str, Any]] | None = None
-    data: dict[str, Any] = Field(default_factory=dict)
-
-    @property
-    def affected_asset_ids(self) -> list[AssetId]:
-        """Return the asset ids touched by this event.
-
-        For ``book`` / ``last_trade_price`` events the result is the single
-        top-level ``asset_id`` (or empty if missing). For ``price_change`` /
-        ``tick_size_change`` events the result is the union of ``asset_id``
-        values inside ``price_changes`` (empty if the array is missing).
-        """
-        if self.event_type in ("book", "last_trade_price"):
-            return [self.asset_id] if self.asset_id else []
-        if not self.price_changes:
-            return []
-        ids: list[AssetId] = []
-        for change in self.price_changes:
-            asset_id = change.get("asset_id")
-            if isinstance(asset_id, str) and asset_id:
-                ids.append(AssetId(asset_id))
-        return ids

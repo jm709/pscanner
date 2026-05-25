@@ -143,7 +143,7 @@ def _build_parser() -> argparse.ArgumentParser:
     """Build the top-level argparse parser with the run/status subcommands."""
     parser = argparse.ArgumentParser(
         prog=_PROG,
-        description="Polymarket scanner daemon (smart-money, mispricing, whales).",
+        description="Polymarket scanner daemon (subgraph copy-trade signals).",
     )
     parser.add_argument(
         "--config",
