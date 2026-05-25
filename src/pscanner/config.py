@@ -38,23 +38,6 @@ class RatelimitConfig(_Section):
     data_rpm: int = 50
 
 
-class PositionsConfig(_Section):
-    """Cadence + toggles for the position-snapshot collector."""
-
-    enabled: bool = True
-    snapshot_interval_seconds: float = 300.0
-
-
-class ActivityConfig(_Section):
-    """Cadence + toggles for the activity-stream collector."""
-
-    enabled: bool = True
-    poll_interval_seconds: float = 300.0
-    activity_page_limit: int = 200
-    max_pages: int = 10
-    dup_lookback: int = 50
-
-
 class MarketsConfig(_Section):
     """Cadence + toggles for the market-snapshot collector."""
 
@@ -132,8 +115,9 @@ class SubgraphTradeCollectorConfig(_Section):
     """Tunables for the live SubgraphTradeCollector (#152).
 
     Polls the Polymarket V2 subgraph for trades by watchlisted wallets and
-    emits ``subgraph_copy`` alerts. Coexists with the ``/activity``-based
-    ``TradeCollector`` — both run independently.
+    emits ``subgraph_copy`` alerts. Sole live trade collector — the REST
+    ``/activity``-based ``TradeCollector`` was removed in PR 5 of the dead-
+    code cleanup wave.
     """
 
     enabled: bool = False
@@ -206,8 +190,6 @@ class Config(BaseModel):
 
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
     ratelimit: RatelimitConfig = Field(default_factory=RatelimitConfig)
-    positions: PositionsConfig = Field(default_factory=PositionsConfig)
-    activity: ActivityConfig = Field(default_factory=ActivityConfig)
     markets: MarketsConfig = Field(default_factory=MarketsConfig)
     events: EventsConfig = Field(default_factory=EventsConfig)
     gate_model: GateModelConfig = Field(default_factory=GateModelConfig)
