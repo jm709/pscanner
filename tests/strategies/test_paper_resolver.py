@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -23,6 +24,19 @@ from pscanner.strategies.paper_resolver import (
 from pscanner.util.clock import FakeClock
 
 _NOW = 1700000000
+
+
+def _async_mocks() -> tuple[AsyncMock, AsyncMock]:
+    """Return (data_client, gamma_client) AsyncMocks suitable for tests
+    whose cache rows are pre-seeded ``active=False`` (refresh never fires).
+
+    ``get_market_slug_by_condition_id`` returns ``None`` as the safe default
+    so that if the refresh path fires unexpectedly it exits early rather
+    than crashing on an upsert with a mock object.
+    """
+    data = AsyncMock()
+    data.get_market_slug_by_condition_id.return_value = None
+    return data, AsyncMock()
 
 
 def _cache_market(
@@ -138,10 +152,13 @@ async def test_resolver_books_winning_exit(tmp_db) -> None:
     _open_position(paper, outcome="yes", cost_usd=10.0, shares=20.0)
     sink = AlertSink(AlertsRepo(tmp_db))
     clock = FakeClock(start=float(_NOW + 100))
+    data, gamma = _async_mocks()
     resolver = PaperResolver(
         config=cfg,
         market_cache=cache,
         paper_trades=paper,
+        data_client=data,
+        gamma_client=gamma,
         clock=clock,
     )
     await resolver._scan(sink)
@@ -159,10 +176,13 @@ async def test_resolver_books_losing_exit(tmp_db) -> None:
     _open_position(paper, outcome="yes", cost_usd=10.0, shares=20.0)
     sink = AlertSink(AlertsRepo(tmp_db))
     clock = FakeClock(start=float(_NOW + 100))
+    data, gamma = _async_mocks()
     resolver = PaperResolver(
         config=cfg,
         market_cache=cache,
         paper_trades=paper,
+        data_client=data,
+        gamma_client=gamma,
         clock=clock,
     )
     await resolver._scan(sink)
@@ -179,10 +199,13 @@ async def test_resolver_skips_unresolved(tmp_db) -> None:
     _cache_market(cache, active=True, outcome_prices=[0.6, 0.4])
     _open_position(paper)
     clock = FakeClock(start=float(_NOW + 100))
+    data, gamma = _async_mocks()
     resolver = PaperResolver(
         config=cfg,
         market_cache=cache,
         paper_trades=paper,
+        data_client=data,
+        gamma_client=gamma,
         clock=clock,
     )
     await resolver._scan(AlertSink(AlertsRepo(tmp_db)))
@@ -211,10 +234,13 @@ async def test_resolver_books_multiple_in_one_scan(tmp_db) -> None:
     _open_position(paper, condition_id="0xcond-1", asset_id="a-y1", outcome="yes")
     _open_position(paper, condition_id="0xcond-2", asset_id="a-y2", outcome="yes")
     clock = FakeClock(start=float(_NOW + 100))
+    data, gamma = _async_mocks()
     resolver = PaperResolver(
         config=cfg,
         market_cache=cache,
         paper_trades=paper,
+        data_client=data,
+        gamma_client=gamma,
         clock=clock,
     )
     await resolver._scan(AlertSink(AlertsRepo(tmp_db)))
@@ -227,6 +253,8 @@ def test_resolver_interval_from_config(tmp_db) -> None:
         config=cfg,
         market_cache=MarketCacheRepo(tmp_db),
         paper_trades=PaperTradesRepo(tmp_db),
+        data_client=AsyncMock(),
+        gamma_client=AsyncMock(),
     )
     assert resolver._interval_seconds() == 120.0
 
@@ -245,10 +273,13 @@ async def test_resolver_keeps_position_open_when_insert_exit_raises(tmp_db, monk
 
     monkeypatch.setattr(paper, "insert_exit", boom)
     clock = FakeClock(start=float(_NOW + 100))
+    data, gamma = _async_mocks()
     resolver = PaperResolver(
         config=cfg,
         market_cache=cache,
         paper_trades=paper,
+        data_client=data,
+        gamma_client=gamma,
         clock=clock,
     )
     # Must not raise

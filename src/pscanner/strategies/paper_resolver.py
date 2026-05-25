@@ -12,6 +12,8 @@ import structlog
 from pscanner.alerts.sink import AlertSink
 from pscanner.config import PaperTradingConfig
 from pscanner.detectors.polling import PollingDetector
+from pscanner.poly.data import DataClient
+from pscanner.poly.gamma import GammaClient
 from pscanner.poly.ids import AssetId, ConditionId
 from pscanner.store.repo import (
     MarketCacheRepo,
@@ -67,6 +69,8 @@ class PaperResolver(PollingDetector):
         config: PaperTradingConfig,
         market_cache: MarketCacheRepo,
         paper_trades: PaperTradesRepo,
+        data_client: DataClient,
+        gamma_client: GammaClient,
         clock: Clock | None = None,
     ) -> None:
         """Wire dependencies; see :class:`PollingDetector` for the loop shape.
@@ -75,14 +79,21 @@ class PaperResolver(PollingDetector):
             config: Paper-trading config; supplies the scan interval and the
                 starting bankroll used when stamping ``nav_after_usd`` on
                 exit rows.
-            market_cache: Read-only access to the cached market table.
+            market_cache: Read/write access to the cached market table. The
+                resolver refreshes stale-active rows for open positions
+                before checking resolution (#170).
             paper_trades: Read/write repo for ``paper_trades``.
+            data_client: Used to resolve a market's slug from its
+                ``condition_id`` during refresh.
+            gamma_client: Used to fetch a market by slug during refresh.
             clock: Optional injected :class:`Clock`; defaults to a real clock.
         """
         super().__init__(clock=clock)
         self._config = config
         self._market_cache = market_cache
         self._paper_trades = paper_trades
+        self._data_client = data_client
+        self._gamma_client = gamma_client
 
     def _interval_seconds(self) -> float:
         return self._config.resolver_scan_interval_seconds
