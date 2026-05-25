@@ -28,12 +28,13 @@ _NOW = 1700000000
 
 
 def _async_mocks() -> tuple[AsyncMock, AsyncMock]:
-    """Return (data_client, gamma_client) AsyncMocks suitable for tests
-    whose cache rows are pre-seeded ``active=False`` (refresh never fires).
+    """Return (data_client, gamma_client) AsyncMocks for tests that don't
+    exercise the refresh path.
 
-    ``get_market_slug_by_condition_id`` returns ``None`` as the safe default
-    so that if the refresh path fires unexpectedly it exits early rather
-    than crashing on an upsert with a mock object.
+    ``get_market_slug_by_condition_id`` returns ``None`` so the refresh
+    helper exits before any upsert, whether or not the cache row is
+    ``active``. Tests with ``active=True`` cache rows are safe to use this
+    helper — the refresh fires but falls through cleanly on the slug miss.
     """
     data = AsyncMock()
     data.get_market_slug_by_condition_id.return_value = None
