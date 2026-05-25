@@ -152,20 +152,46 @@ async def test_missing_market_cache_triggers_refresh(tmp_db) -> None:
 
 
 @pytest.mark.asyncio
-async def test_null_event_slug_triggers_refresh(tmp_db) -> None:
-    """Cache rows with event_slug=NULL still trigger a refresh attempt."""
-    collector, _cache, _tag_cache, paper, data, gamma = _make_collector(tmp_db)
+async def test_null_event_slug_triggers_asset_id_refresh(tmp_db) -> None:
+    """Cache rows with event_slug=NULL hit the token-id refresh path, not the slug path.
+
+    The token-id response includes the events array that the Market model's
+    _hoist_event_fields validator uses to populate event_slug. The slug
+    response sometimes omits it for recurring/date-rolled markets.
+    """
+    collector, cache, _tag_cache, paper, data, gamma = _make_collector(tmp_db)
     _seed_paper_entry(paper, condition_id="0xcond-2")
-    _seed_cached_market(_cache, condition_id="0xcond-2", event_slug=None)
-    data.get_market_slug_by_condition_id.return_value = "mkt-slug-2"
-    gamma.get_market_by_slug.return_value = _build_market(
-        condition_id="0xcond-2", slug="mkt-slug-2"
+    _seed_cached_market(cache, condition_id="0xcond-2", event_slug=None)
+    # The seeded paper entry's asset_id is "asset-0xcond-2" (see _seed_paper_entry).
+    # Build a Market whose clob_token_ids include that asset_id.
+    market = Market.model_validate(
+        {
+            # Same market_id as the seeded row so upsert hits the same PK
+            # (would otherwise create a second row, leaving the seeded null
+            # row to win get_by_condition_id's LIMIT 1).
+            "id": "mkt-0xcond-2",
+            "conditionId": "0xcond-2",
+            "question": "Test",
+            "slug": "mkt-slug-2",
+            "outcomes": ["Yes", "No"],
+            "outcomePrices": ["0.5", "0.5"],
+            "clobTokenIds": ["asset-0xcond-2", "asset-other"],
+            "active": True,
+            "closed": False,
+            "events": [{"id": "evt-1", "slug": "evt-recurring"}],
+        },
     )
-    gamma.get_event_by_slug.return_value = _build_event()
+    gamma.list_markets.return_value = [market]
+    gamma.get_event_by_slug.return_value = _build_event(slug="evt-recurring")
 
     await collector.poll_once()
 
-    data.get_market_slug_by_condition_id.assert_awaited_once()
+    # Token-id path, not slug path.
+    data.get_market_slug_by_condition_id.assert_not_awaited()
+    gamma.list_markets.assert_awaited_once_with(clob_token_ids="asset-0xcond-2", limit=5)
+    cached = cache.get_by_condition_id(ConditionId("0xcond-2"))
+    assert cached is not None
+    assert str(cached.event_slug) == "evt-recurring"
 
 
 @pytest.mark.asyncio

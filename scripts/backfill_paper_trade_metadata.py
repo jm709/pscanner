@@ -40,9 +40,12 @@ from pathlib import Path
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
 from pscanner.poly.http import PolyHttpClient
-from pscanner.poly.ids import ConditionId, EventSlug
+from pscanner.poly.ids import AssetId, ConditionId, EventSlug
 from pscanner.store.repo import EventTagCacheRepo, MarketCacheRepo
-from pscanner.strategies.market_cache_refresh import refresh_market_cache_row
+from pscanner.strategies.market_cache_refresh import (
+    refresh_market_cache_by_asset_id,
+    refresh_market_cache_row,
+)
 
 _GAMMA_BASE_URL = "https://gamma-api.polymarket.com"
 _DATA_BASE_URL = "https://data-api.polymarket.com"
@@ -74,6 +77,26 @@ def _condition_ids_missing_market_cache(db: sqlite3.Connection) -> list[Conditio
         """,
     ).fetchall()
     return [ConditionId(r[0]) for r in rows]
+
+
+def _asset_ids_needing_event_slug(db: sqlite3.Connection) -> list[AssetId]:
+    """One asset_id per paper-trade condition_id whose market_cache has event_slug=NULL.
+
+    Used by the token-id refresh path. Gamma's slug response sometimes
+    omits event nesting for recurring/date-rolled markets (Iran-themed,
+    MicroStrategy, etc.); the token-id response reliably includes it.
+    """
+    rows = db.execute(
+        """
+        SELECT MIN(e.asset_id) AS asset_id
+          FROM paper_trades e
+          JOIN market_cache mc ON mc.condition_id = e.condition_id
+         WHERE e.trade_kind = 'entry'
+           AND mc.event_slug IS NULL
+         GROUP BY e.condition_id
+        """,
+    ).fetchall()
+    return [AssetId(r["asset_id"]) for r in rows if r["asset_id"]]
 
 
 def _event_slugs_missing_tag_cache(db: sqlite3.Connection) -> list[EventSlug]:
@@ -116,6 +139,37 @@ async def _backfill_market_cache(
             fail += 1
         if (ok + fail) % _PROGRESS_EVERY == 0:
             print(f"  market_cache progress: {i}/{total} ({ok} ok / {fail} fail)", flush=True)
+    return ok, fail
+
+
+async def _backfill_market_cache_by_asset_id(
+    *,
+    market_cache: MarketCacheRepo,
+    gamma: GammaClient,
+    asset_ids: list[AssetId],
+) -> tuple[int, int]:
+    """Re-fetch via token-id path for markets where slug path didn't populate event_slug.
+
+    Returns ``(ok, fail)``.
+    """
+    ok = 0
+    fail = 0
+    total = len(asset_ids)
+    for i, asset_id in enumerate(asset_ids, start=1):
+        result = await refresh_market_cache_by_asset_id(
+            gamma_client=gamma,
+            market_cache=market_cache,
+            asset_id=asset_id,
+        )
+        if result:
+            ok += 1
+        else:
+            fail += 1
+        if (ok + fail) % _PROGRESS_EVERY == 0:
+            print(
+                f"  market_cache (asset-id) progress: {i}/{total} ({ok} ok / {fail} fail)",
+                flush=True,
+            )
     return ok, fail
 
 
@@ -175,14 +229,28 @@ async def _amain() -> int:
             )
             return 0
 
-        print("\n=== phase 1: backfill market_cache ===", flush=True)
+        print("\n=== phase 1a: backfill market_cache via slug ===", flush=True)
         mc_ok, mc_fail = await _backfill_market_cache(
             market_cache=market_cache,
             data=data,
             gamma=gamma,
             cond_ids=missing_cids,
         )
-        print(f"market_cache complete: {mc_ok} ok / {mc_fail} fail", flush=True)
+        print(f"phase 1a complete: {mc_ok} ok / {mc_fail} fail", flush=True)
+
+        # Phase 1b: token-id fallback for rows that have a market_cache row but
+        # no event_slug (gamma's slug response sometimes omits event nesting).
+        missing_asset_ids = _asset_ids_needing_event_slug(db)
+        print(
+            f"\n=== phase 1b: backfill via asset_id (n={len(missing_asset_ids)}) ===",
+            flush=True,
+        )
+        mc2_ok, mc2_fail = await _backfill_market_cache_by_asset_id(
+            market_cache=market_cache,
+            gamma=gamma,
+            asset_ids=missing_asset_ids,
+        )
+        print(f"phase 1b complete: {mc2_ok} ok / {mc2_fail} fail", flush=True)
 
         # Re-derive after market_cache is filled — fresh rows expose new event_slugs.
         missing_slugs = _event_slugs_missing_tag_cache(db)

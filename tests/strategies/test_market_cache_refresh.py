@@ -1,4 +1,4 @@
-"""Tests for refresh_market_cache_row."""
+"""Tests for refresh_market_cache_row and refresh_market_cache_by_asset_id."""
 
 from __future__ import annotations
 
@@ -7,10 +7,13 @@ from unittest.mock import AsyncMock
 import pytest
 from structlog.testing import capture_logs
 
-from pscanner.poly.ids import ConditionId
+from pscanner.poly.ids import AssetId, ConditionId
 from pscanner.poly.models import Market
 from pscanner.store.repo import MarketCacheRepo
-from pscanner.strategies.market_cache_refresh import refresh_market_cache_row
+from pscanner.strategies.market_cache_refresh import (
+    refresh_market_cache_by_asset_id,
+    refresh_market_cache_row,
+)
 
 _RESOLVED_MARKET = Market.model_validate(
     {
@@ -105,5 +108,101 @@ async def test_exception_logged_and_swallowed(tmp_db) -> None:
     assert ok is False
     assert any(
         entry["event"] == "market_cache.refresh.failed" and entry.get("log_level") == "warning"
+        for entry in logs
+    )
+
+
+_MARKET_WITH_EVENT = Market.model_validate(
+    {
+        "id": "mkt-rec",
+        "conditionId": "0xcond-rec",
+        "question": "Iran closes its airspace by May 24?",
+        "slug": "iran-closes-its-airspace-by-may-24",
+        "outcomes": ["Yes", "No"],
+        "outcomePrices": ["0.5", "0.5"],
+        "clobTokenIds": ["asset-y", "asset-n"],
+        "active": True,
+        "closed": False,
+        "events": [{"id": "evt-iran", "slug": "iran-closes-its-airspace-by"}],
+    },
+)
+
+
+@pytest.mark.asyncio
+async def test_by_asset_id_happy_path(tmp_db) -> None:
+    cache = MarketCacheRepo(tmp_db)
+    gamma_client = AsyncMock()
+    gamma_client.list_markets.return_value = [_MARKET_WITH_EVENT]
+
+    ok = await refresh_market_cache_by_asset_id(
+        gamma_client=gamma_client,
+        market_cache=cache,
+        asset_id=AssetId("asset-y"),
+    )
+
+    assert ok is True
+    gamma_client.list_markets.assert_awaited_once_with(clob_token_ids="asset-y", limit=5)
+    cached = cache.get_by_condition_id(ConditionId("0xcond-rec"))
+    assert cached is not None
+    # The validator hoisted event_slug from events[0].slug.
+    assert str(cached.event_slug) == "iran-closes-its-airspace-by"
+
+
+@pytest.mark.asyncio
+async def test_by_asset_id_no_matches_returns_false(tmp_db) -> None:
+    cache = MarketCacheRepo(tmp_db)
+    gamma_client = AsyncMock()
+    gamma_client.list_markets.return_value = []
+
+    ok = await refresh_market_cache_by_asset_id(
+        gamma_client=gamma_client,
+        market_cache=cache,
+        asset_id=AssetId("asset-unknown"),
+    )
+
+    assert ok is False
+    assert cache.get_by_condition_id(ConditionId("0xcond-rec")) is None
+
+
+@pytest.mark.asyncio
+async def test_by_asset_id_indexing_drift_no_upsert(tmp_db) -> None:
+    """Gamma sometimes returns a market whose clob_token_ids don't include the queried token."""
+    cache = MarketCacheRepo(tmp_db)
+    gamma_client = AsyncMock()
+    gamma_client.list_markets.return_value = [_MARKET_WITH_EVENT]  # has asset-y / asset-n
+
+    with capture_logs() as logs:
+        ok = await refresh_market_cache_by_asset_id(
+            gamma_client=gamma_client,
+            market_cache=cache,
+            asset_id=AssetId("asset-other"),  # NOT in the returned market
+        )
+
+    assert ok is False
+    assert cache.get_by_condition_id(ConditionId("0xcond-rec")) is None
+    assert any(
+        entry["event"] == "market_cache.refresh_by_asset.indexing_drift"
+        and entry.get("log_level") == "warning"
+        for entry in logs
+    )
+
+
+@pytest.mark.asyncio
+async def test_by_asset_id_exception_swallowed(tmp_db) -> None:
+    cache = MarketCacheRepo(tmp_db)
+    gamma_client = AsyncMock()
+    gamma_client.list_markets.side_effect = RuntimeError("boom")
+
+    with capture_logs() as logs:
+        ok = await refresh_market_cache_by_asset_id(
+            gamma_client=gamma_client,
+            market_cache=cache,
+            asset_id=AssetId("asset-y"),
+        )
+
+    assert ok is False
+    assert any(
+        entry["event"] == "market_cache.refresh_by_asset.failed"
+        and entry.get("log_level") == "warning"
         for entry in logs
     )

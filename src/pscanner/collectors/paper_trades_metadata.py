@@ -29,9 +29,12 @@ import structlog
 from pscanner.collectors.base import PollingCollector
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
-from pscanner.poly.ids import ConditionId, EventSlug
+from pscanner.poly.ids import AssetId, ConditionId, EventSlug
 from pscanner.store.repo import EventTagCacheRepo, MarketCacheRepo
-from pscanner.strategies.market_cache_refresh import refresh_market_cache_row
+from pscanner.strategies.market_cache_refresh import (
+    refresh_market_cache_by_asset_id,
+    refresh_market_cache_row,
+)
 
 _LOG = structlog.get_logger(__name__)
 
@@ -92,19 +95,31 @@ class PaperTradesMetadataCollector(PollingCollector):
     async def _backfill_market_cache_phase(self) -> tuple[int, int]:
         """Phase 1: refresh market_cache rows that are missing or slug-less.
 
-        Returns ``(ok, fail)`` count for this cycle.
+        Uses the slug-based 2-hop for condition_ids with no cache row at
+        all. For cache rows that exist but have ``event_slug IS NULL``
+        (gamma's slug response sometimes omits event nesting), falls back
+        to the token-id path via an example ``asset_id`` from
+        ``paper_trades`` — that response reliably includes the events
+        array. Returns ``(ok, fail)``.
         """
-        cond_ids = self._cids_needing_market_cache_refresh()
         ok = 0
         fail = 0
-        for cid in cond_ids:
-            result = await refresh_market_cache_row(
+        for cid in self._cids_with_no_market_cache_row():
+            if await refresh_market_cache_row(
                 data_client=self._data_client,
                 gamma_client=self._gamma_client,
                 market_cache=self._market_cache,
                 condition_id=cid,
-            )
-            if result:
+            ):
+                ok += 1
+            else:
+                fail += 1
+        for asset_id in self._asset_ids_needing_event_slug():
+            if await refresh_market_cache_by_asset_id(
+                gamma_client=self._gamma_client,
+                market_cache=self._market_cache,
+                asset_id=asset_id,
+            ):
                 ok += 1
             else:
                 fail += 1
@@ -142,18 +157,37 @@ class PaperTradesMetadataCollector(PollingCollector):
             ok += 1
         return ok, fail
 
-    def _cids_needing_market_cache_refresh(self) -> list[ConditionId]:
-        """Distinct paper_trades condition_ids with no row or no event_slug."""
+    def _cids_with_no_market_cache_row(self) -> list[ConditionId]:
+        """Distinct paper_trades condition_ids that have no market_cache row at all."""
         rows = self._db.execute(
             """
             SELECT DISTINCT e.condition_id
               FROM paper_trades e
               LEFT JOIN market_cache mc ON mc.condition_id = e.condition_id
              WHERE e.trade_kind = 'entry'
-               AND (mc.condition_id IS NULL OR mc.event_slug IS NULL)
+               AND mc.condition_id IS NULL
             """,
         ).fetchall()
         return [ConditionId(r[0]) for r in rows]
+
+    def _asset_ids_needing_event_slug(self) -> list[AssetId]:
+        """One asset_id per condition_id whose market_cache row has event_slug=NULL.
+
+        Used by the token-id refresh path. Gamma's slug response sometimes
+        omits the events array for recurring/date-rolled markets; the
+        token-id path includes it.
+        """
+        rows = self._db.execute(
+            """
+            SELECT MIN(e.asset_id) AS asset_id
+              FROM paper_trades e
+              JOIN market_cache mc ON mc.condition_id = e.condition_id
+             WHERE e.trade_kind = 'entry'
+               AND mc.event_slug IS NULL
+             GROUP BY e.condition_id
+            """,
+        ).fetchall()
+        return [AssetId(r["asset_id"]) for r in rows if r["asset_id"]]
 
     def _slugs_needing_tag_cache(self) -> list[EventSlug]:
         """Distinct event_slugs referenced by paper-trade markets, not yet cached."""
