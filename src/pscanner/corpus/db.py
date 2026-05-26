@@ -161,6 +161,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
       tags_json TEXT NOT NULL DEFAULT '[]',
       categories_json TEXT NOT NULL DEFAULT '[]',
       outcome_side_backfilled_at INTEGER,
+      v1_history_pending INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (platform, condition_id)
     )
     """,
@@ -331,6 +332,14 @@ _MIGRATIONS: tuple[str, ...] = (
         "  price, size, notional_usd"
         ")"
     ),
+    # V1 subgraph fill-in queue (issue #193). 1 = this market has pre-V2
+    # trade history that the current V2 subgraph cannot reach (the
+    # Polymarket V1 contract was indexed by `7fu2DWYK…` only through
+    # 2026-04-28, then re-deployed with a different schema). Set by
+    # `walk_market` when truncated_at_offset_cap=1 AND the oldest
+    # corpus_trades.ts for the market is < V2_START (1775220779,
+    # 2026-04-03). Cleared by the future V1 adapter.
+    "ALTER TABLE corpus_markets ADD COLUMN v1_history_pending INTEGER NOT NULL DEFAULT 0",
 )
 
 

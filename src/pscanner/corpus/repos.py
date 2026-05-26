@@ -14,6 +14,16 @@ from typing import Final
 
 from pscanner.corpus.db import TRAINING_EXAMPLES_COLUMNS
 
+_V2_SUBGRAPH_START_TS: Final[int] = 1775220779
+"""Earliest event timestamp in the V2 Polymarket Orderbook subgraph (2026-04-03 UTC).
+
+Markets whose oldest ``corpus_trades.ts`` predates this timestamp have
+history in the V1 subgraph (``7fu2DWYK…``) that V2 cannot reach. When
+they are also truncated by the ``/trades`` REST offset cap,
+``mark_complete`` sets ``corpus_markets.v1_history_pending=1`` so the
+future V1 adapter (issue #193) has a clean work queue.
+"""
+
 
 @dataclass(frozen=True)
 class CorpusMarket:
@@ -250,6 +260,10 @@ class CorpusMarketsRepo:
         downstream ``temporal_split`` collapses to a hash split. Falls back
         to leaving ``closed_at`` unchanged if the market has no observed
         trades (shouldn't happen given the $1M volume gate, but guarded).
+
+        Sets ``v1_history_pending=1`` iff ``truncated`` AND the market's
+        oldest trade predates the V2 subgraph window — those markets need
+        a future V1-adapter pass to be fully filled (see issue #193).
         """
         self._conn.execute(
             """
@@ -262,7 +276,14 @@ class CorpusMarketsRepo:
                     (SELECT MAX(ts) FROM corpus_trades
                      WHERE platform = ? AND condition_id = ?),
                     closed_at
-                )
+                ),
+                v1_history_pending = CASE
+                  WHEN ? = 1
+                   AND (SELECT MIN(ts) FROM corpus_trades
+                          WHERE platform = ? AND condition_id = ?) < ?
+                  THEN 1
+                  ELSE 0
+                END
             WHERE platform = ? AND condition_id = ?
             """,
             (
@@ -270,6 +291,10 @@ class CorpusMarketsRepo:
                 1 if truncated else 0,
                 platform,
                 condition_id,
+                1 if truncated else 0,
+                platform,
+                condition_id,
+                _V2_SUBGRAPH_START_TS,
                 platform,
                 condition_id,
             ),

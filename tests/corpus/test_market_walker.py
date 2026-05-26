@@ -10,6 +10,7 @@ import pytest
 
 from pscanner.corpus.market_walker import walk_market
 from pscanner.corpus.repos import (
+    AssetIndexRepo,
     CorpusMarket,
     CorpusMarketsRepo,
     CorpusTradesRepo,
@@ -92,6 +93,7 @@ async def test_walk_inserts_trades_and_marks_complete(
 ) -> None:
     markets = CorpusMarketsRepo(tmp_corpus_db)
     trades = CorpusTradesRepo(tmp_corpus_db)
+    assets = AssetIndexRepo(tmp_corpus_db)
     _seed_market(markets, "cond1")
 
     fake_data = _fake_data_with_slug(
@@ -104,6 +106,7 @@ async def test_walk_inserts_trades_and_marks_complete(
         gamma=fake_gamma,
         markets_repo=markets,
         trades_repo=trades,
+        asset_repo=assets,
         now_ts=1_500,
     )
     rows = tmp_corpus_db.execute(
@@ -123,6 +126,7 @@ async def test_walk_normalizes_wallet_lowercases(
 ) -> None:
     markets = CorpusMarketsRepo(tmp_corpus_db)
     trades = CorpusTradesRepo(tmp_corpus_db)
+    assets = AssetIndexRepo(tmp_corpus_db)
     _seed_market(markets, "cond1")
     fake_data = _fake_data_with_slug(pages=[[_trade_dict(proxyWallet="0xMIXED")]])
     fake_gamma = _fake_gamma_returning(_make_market())
@@ -132,6 +136,7 @@ async def test_walk_normalizes_wallet_lowercases(
         gamma=fake_gamma,
         markets_repo=markets,
         trades_repo=trades,
+        asset_repo=assets,
         now_ts=1_500,
     )
     row = tmp_corpus_db.execute("SELECT wallet_address FROM corpus_trades").fetchone()
@@ -144,6 +149,7 @@ async def test_walk_filters_below_notional_floor(
 ) -> None:
     markets = CorpusMarketsRepo(tmp_corpus_db)
     trades = CorpusTradesRepo(tmp_corpus_db)
+    assets = AssetIndexRepo(tmp_corpus_db)
     _seed_market(markets, "cond1")
     fake_data = _fake_data_with_slug(
         pages=[
@@ -160,6 +166,7 @@ async def test_walk_filters_below_notional_floor(
         gamma=fake_gamma,
         markets_repo=markets,
         trades_repo=trades,
+        asset_repo=assets,
         now_ts=1_500,
     )
     rows = tmp_corpus_db.execute("SELECT tx_hash FROM corpus_trades").fetchall()
@@ -172,6 +179,7 @@ async def test_walk_truncates_at_offset_cap(
 ) -> None:
     markets = CorpusMarketsRepo(tmp_corpus_db)
     trades = CorpusTradesRepo(tmp_corpus_db)
+    assets = AssetIndexRepo(tmp_corpus_db)
     _seed_market(markets, "cond1")
     fake_data = AsyncMock()
     fake_data.get_market_slug_by_condition_id = AsyncMock(return_value="slug-cond1")
@@ -191,6 +199,7 @@ async def test_walk_truncates_at_offset_cap(
         gamma=fake_gamma,
         markets_repo=markets,
         trades_repo=trades,
+        asset_repo=assets,
         now_ts=1_500,
     )
     row = tmp_corpus_db.execute(
@@ -211,6 +220,7 @@ async def test_walk_resolves_team_name_outcomes_via_clob_token_ids(
     """
     markets = CorpusMarketsRepo(tmp_corpus_db)
     trades = CorpusTradesRepo(tmp_corpus_db)
+    assets = AssetIndexRepo(tmp_corpus_db)
     _seed_market(markets, "cond1")
     fake_data = _fake_data_with_slug(
         pages=[
@@ -244,6 +254,7 @@ async def test_walk_resolves_team_name_outcomes_via_clob_token_ids(
         gamma=fake_gamma,
         markets_repo=markets,
         trades_repo=trades,
+        asset_repo=assets,
         now_ts=1_500,
     )
     rows = tmp_corpus_db.execute(
@@ -261,6 +272,7 @@ async def test_walk_falls_back_to_outcome_name_on_gamma_failure(
     legacy outcome-name heuristic and still completes successfully."""
     markets = CorpusMarketsRepo(tmp_corpus_db)
     trades = CorpusTradesRepo(tmp_corpus_db)
+    assets = AssetIndexRepo(tmp_corpus_db)
     _seed_market(markets, "cond1")
     fake_data = _fake_data_with_slug(
         pages=[[_trade_dict(transactionHash="0xa", outcome="Yes")]],
@@ -272,12 +284,51 @@ async def test_walk_falls_back_to_outcome_name_on_gamma_failure(
         gamma=fake_gamma,
         markets_repo=markets,
         trades_repo=trades,
+        asset_repo=assets,
         now_ts=1_500,
     )
     row = tmp_corpus_db.execute(
         "SELECT outcome_side FROM corpus_trades WHERE tx_hash='0xa'"
     ).fetchone()
     assert row["outcome_side"] == "YES"  # outcome.lower() == "yes" fallback path
+
+
+@pytest.mark.asyncio
+async def test_walk_populates_asset_index(
+    tmp_corpus_db: sqlite3.Connection,
+) -> None:
+    """Regression: walk_market must upsert asset_index for both legs.
+
+    Previously walk_market built outcome_side_by_asset_id for parsing but
+    never wrote it; markets ingested after the last manual run of
+    AssetIndexRepo.backfill_from_corpus_trades had empty asset_index,
+    breaking subgraph backfill's _load_market_asset_ids.
+    """
+    markets = CorpusMarketsRepo(tmp_corpus_db)
+    trades = CorpusTradesRepo(tmp_corpus_db)
+    assets = AssetIndexRepo(tmp_corpus_db)
+    _seed_market(markets, "cond1")
+    fake_data = _fake_data_with_slug(pages=[[_trade_dict(transactionHash="0xa")]])
+    fake_gamma = _fake_gamma_returning(
+        _make_market(clob_token_ids=("token-yes", "token-no")),
+    )
+    await walk_market(
+        condition_id="cond1",
+        data=fake_data,
+        gamma=fake_gamma,
+        markets_repo=markets,
+        trades_repo=trades,
+        asset_repo=assets,
+        now_ts=1_500,
+    )
+    rows = tmp_corpus_db.execute(
+        "SELECT asset_id, outcome_side, outcome_index FROM asset_index "
+        "WHERE condition_id='cond1' ORDER BY outcome_index"
+    ).fetchall()
+    assert [(r["asset_id"], r["outcome_side"], r["outcome_index"]) for r in rows] == [
+        ("token-yes", "YES", 0),
+        ("token-no", "NO", 1),
+    ]
 
 
 @pytest.mark.asyncio
@@ -288,6 +339,7 @@ async def test_walk_skips_resolution_for_non_binary_market(
     fall back to the legacy heuristic (preserves prior behavior)."""
     markets = CorpusMarketsRepo(tmp_corpus_db)
     trades = CorpusTradesRepo(tmp_corpus_db)
+    assets = AssetIndexRepo(tmp_corpus_db)
     _seed_market(markets, "cond1")
     fake_data = _fake_data_with_slug(
         pages=[[_trade_dict(transactionHash="0xa", outcome="OptionA", asset="token-a")]],
@@ -313,6 +365,7 @@ async def test_walk_skips_resolution_for_non_binary_market(
         gamma=fake_gamma,
         markets_repo=markets,
         trades_repo=trades,
+        asset_repo=assets,
         now_ts=1_500,
     )
     row = tmp_corpus_db.execute(
