@@ -14,6 +14,8 @@ import structlog
 
 from pscanner.corpus.outcome_resolver import resolve_binary_outcome_map
 from pscanner.corpus.repos import (
+    AssetEntry,
+    AssetIndexRepo,
     CorpusMarketsRepo,
     CorpusTrade,
     CorpusTradesRepo,
@@ -28,22 +30,37 @@ _OFFSET_CAP: Final[int] = (
 )
 
 
-async def _resolve_outcome_side_index(
+async def _resolve_outcome_side_and_persist(
     condition_id: str,
     *,
     data: DataClient,
     gamma: GammaClient,
+    asset_repo: AssetIndexRepo,
 ) -> dict[str, str]:
-    """Build ``{asset_id: "YES" | "NO"}`` from the market's ``clob_token_ids``.
+    """Resolve ``{asset_id: "YES" | "NO"}`` and persist both legs to ``asset_index``.
 
-    Thin shim over :func:`pscanner.corpus.outcome_resolver.resolve_binary_outcome_map`
-    that narrows the shared `(side, index)` tuple to just the side. Returns
-    an empty mapping when the resolver yields ``None`` so the caller can
-    fall back to the legacy outcome-name heuristic.
+    Calls :func:`pscanner.corpus.outcome_resolver.resolve_binary_outcome_map`
+    once, upserts the resulting ``(asset_id, condition_id, side, index)``
+    tuples into ``asset_index`` so downstream consumers (notably the
+    subgraph backfill's ``_load_market_asset_ids``) can find this market's
+    asset ids, and returns the narrowed mapping for ``_parse_trade``.
+
+    An empty return value means resolution failed (non-binary market or
+    gamma lookup miss); callers fall back to the legacy outcome-name
+    heuristic and skip the asset_index write.
     """
     mapping = await resolve_binary_outcome_map(condition_id, data=data, gamma=gamma)
     if mapping is None:
         return {}
+    for token_id, (side, index) in mapping.items():
+        asset_repo.upsert(
+            AssetEntry(
+                asset_id=token_id,
+                condition_id=condition_id,
+                outcome_side=side,
+                outcome_index=index,
+            )
+        )
     return {token_id: side for token_id, (side, _index) in mapping.items()}
 
 
@@ -110,6 +127,7 @@ async def walk_market(
     gamma: GammaClient,
     markets_repo: CorpusMarketsRepo,
     trades_repo: CorpusTradesRepo,
+    asset_repo: AssetIndexRepo,
     now_ts: int,
 ) -> int:
     """Pull every trade on ``condition_id``; record progress and final state.
@@ -126,6 +144,9 @@ async def walk_market(
         gamma: Gamma client used to fetch ``clob_token_ids`` once.
         markets_repo: Markets repo to update progress/state on.
         trades_repo: Trades repo for inserts.
+        asset_repo: Asset-index repo for upserting (asset_id, condition_id,
+            side, index) so downstream subgraph backfill can find this
+            market's asset ids.
         now_ts: Unix seconds for state-machine timestamps.
 
     Returns:
@@ -136,8 +157,8 @@ async def walk_market(
     total_inserted = 0
     truncated = False
 
-    outcome_side_by_asset_id = await _resolve_outcome_side_index(
-        condition_id, data=data, gamma=gamma
+    outcome_side_by_asset_id = await _resolve_outcome_side_and_persist(
+        condition_id, data=data, gamma=gamma, asset_repo=asset_repo
     )
 
     try:

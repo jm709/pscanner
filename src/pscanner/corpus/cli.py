@@ -34,6 +34,7 @@ from pscanner.corpus.manifold_walker import walk_manifold_market
 from pscanner.corpus.market_walker import walk_market
 from pscanner.corpus.outcome_side_backfill import run_backfill as _run_outcome_side_backfill
 from pscanner.corpus.repos import (
+    AssetIndexRepo,
     CorpusMarketsRepo,
     CorpusStateRepo,
     CorpusTradesRepo,
@@ -250,6 +251,7 @@ async def _drain_pending(*, conn: sqlite3.Connection, data: DataClient, gamma: G
     """Drain `corpus_markets` work queue, walking each pending market once."""
     markets_repo = CorpusMarketsRepo(conn)
     trades_repo = CorpusTradesRepo(conn)
+    asset_repo = AssetIndexRepo(conn)
     total = 0
     while True:
         batch = markets_repo.next_pending(limit=10)
@@ -263,6 +265,7 @@ async def _drain_pending(*, conn: sqlite3.Connection, data: DataClient, gamma: G
                     gamma=gamma,
                     markets_repo=markets_repo,
                     trades_repo=trades_repo,
+                    asset_repo=asset_repo,
                     now_ts=int(time.time()),
                 )
                 total += inserted
