@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from pscanner.corpus import cli as corpus_cli
 from pscanner.corpus.cli import (
@@ -363,8 +364,25 @@ def test_subgraph_backfill_help_lists_version_flags() -> None:
 def test_subgraph_backfill_subgraph_id_alias_maps_to_v2() -> None:
     parser = build_corpus_parser()
     args = parser.parse_args(["subgraph-backfill", "--subgraph-id", "deprecated-id-value"])
-    resolved = _resolve_subgraph_flags(args)
+    with capture_logs() as logs:
+        resolved = _resolve_subgraph_flags(args)
     assert resolved.v2_subgraph_id == "deprecated-id-value"
+    assert any(
+        entry.get("event") == "subgraph.cli.deprecated_flag"
+        and entry.get("flag") == "--subgraph-id"
+        for entry in logs
+    ), f"deprecation warning not emitted; saw events: {[e.get('event') for e in logs]}"
+
+
+def test_subgraph_backfill_no_deprecation_warning_when_alias_unused() -> None:
+    parser = build_corpus_parser()
+    args = parser.parse_args(["subgraph-backfill", "--v2-subgraph-id", "explicit-v2"])
+    with capture_logs() as logs:
+        resolved = _resolve_subgraph_flags(args)
+    assert resolved.v2_subgraph_id == "explicit-v2"
+    assert not any(
+        entry.get("event") == "subgraph.cli.deprecated_flag" for entry in logs
+    )
 
 
 def test_subgraph_backfill_default_version_is_both() -> None:
