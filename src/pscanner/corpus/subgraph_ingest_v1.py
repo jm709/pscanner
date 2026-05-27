@@ -15,11 +15,24 @@ Verified against `tests/corpus/fixtures/v1_v2_overlap.json` (Stage 1).
 
 from __future__ import annotations
 
+import sqlite3
+import time
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
+import structlog
+
+from pscanner.corpus.repos import AssetIndexRepo, CorpusTrade, CorpusTradesRepo
 from pscanner.poly.onchain import OrderFilledEvent
+from pscanner.poly.onchain_ingest import (
+    UnresolvableAsset,
+    UnsupportedFill,
+    event_to_corpus_trade,
+)
 from pscanner.poly.subgraph import SubgraphClient
+
+_LOG = structlog.get_logger(__name__)
 
 
 def _parse_int(key: str, raw: object) -> int:
@@ -207,3 +220,230 @@ async def iter_v1_market_trades(
         page_size=page_size,
     ):
         yield ev, ts
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class V1SubgraphRunSummary:
+    """Aggregate counts returned by ``run_v1_subgraph_backfill``."""
+
+    markets_processed: int
+    markets_failed: int
+    markets_zero_events: int
+    events_decoded: int
+    trades_inserted: int
+    skipped_unsupported: int
+    skipped_unresolvable: int
+    dups_dropped: int
+
+
+@dataclass(frozen=True)
+class _PendingV1Market:
+    condition_id: str
+    market_slug: str
+    total_volume_usd: float
+
+
+def _load_pending_v1_markets(
+    conn: sqlite3.Connection, *, limit: int | None
+) -> list[_PendingV1Market]:
+    """Return v1_history_pending markets not yet processed, ordered by volume desc."""
+    sql = """
+        SELECT condition_id,
+               COALESCE(market_slug, '') AS market_slug,
+               total_volume_usd
+        FROM corpus_markets
+        WHERE platform = 'polymarket'
+          AND v1_history_pending = 1
+          AND onchain_v1_processed_at IS NULL
+        ORDER BY total_volume_usd DESC
+    """
+    if limit is not None:
+        sql += f" LIMIT {int(limit)}"
+    rows = conn.execute(sql).fetchall()
+    return [
+        _PendingV1Market(
+            condition_id=r["condition_id"],
+            market_slug=r["market_slug"],
+            total_volume_usd=float(r["total_volume_usd"]),
+        )
+        for r in rows
+    ]
+
+
+def _load_asset_ids_for_market(conn: sqlite3.Connection, condition_id: str) -> list[str]:
+    """Return every asset_id mapped to condition_id in asset_index."""
+    rows = conn.execute(
+        "SELECT asset_id FROM asset_index WHERE condition_id = ?",
+        (condition_id,),
+    ).fetchall()
+    return [r["asset_id"] for r in rows]
+
+
+def _mark_v1_processed(conn: sqlite3.Connection, condition_id: str, *, now_ts: int) -> None:
+    """Stamp onchain_v1_processed_at and clear v1_history_pending for one market."""
+    conn.execute(
+        """
+        UPDATE corpus_markets
+        SET onchain_v1_processed_at = ?,
+            v1_history_pending = 0
+        WHERE platform = 'polymarket' AND condition_id = ?
+        """,
+        (now_ts, condition_id),
+    )
+    conn.commit()
+
+
+async def _backfill_one_v1_market(
+    *,
+    conn: sqlite3.Connection,
+    client: SubgraphClient,
+    condition_id: str,
+    page_size: int,
+) -> tuple[int, int, int, int, int]:
+    """Drain one V1-pending market. Returns (events, inserted, unsup, unres, dups).
+
+    Returns (0, 0, 0, 0, 0) without querying the subgraph when asset_index
+    has no rows for this condition_id.
+    """
+    asset_ids = _load_asset_ids_for_market(conn, condition_id)
+    if not asset_ids:
+        _LOG.warning("subgraph.v1.no_asset_index", condition_id=condition_id)
+        return 0, 0, 0, 0, 0
+
+    asset_repo = AssetIndexRepo(conn)
+    trades_repo = CorpusTradesRepo(conn)
+    events_decoded = 0
+    skipped_unsupported = 0
+    skipped_unresolvable = 0
+    pending: list[CorpusTrade] = []
+
+    async for event, ts in iter_v1_market_trades(
+        client=client,
+        asset_ids=asset_ids,
+        page_size=page_size,
+    ):
+        events_decoded += 1
+        try:
+            trade = event_to_corpus_trade(event, asset_repo=asset_repo, ts=ts)
+        except UnsupportedFill:
+            skipped_unsupported += 1
+            continue
+        except UnresolvableAsset:
+            skipped_unresolvable += 1
+            continue
+        if trade.condition_id != condition_id:
+            # Stale asset_index mapping: drop silently (mirrors V2 orchestrator).
+            continue
+        pending.append(trade)
+
+    if not pending:
+        return events_decoded, 0, skipped_unsupported, skipped_unresolvable, 0
+
+    inserted = trades_repo.insert_batch(pending)
+    dups = len(pending) - inserted
+    return events_decoded, inserted, skipped_unsupported, skipped_unresolvable, dups
+
+
+async def run_v1_subgraph_backfill(
+    *,
+    conn: sqlite3.Connection,
+    client: SubgraphClient,
+    page_size: int = _MAX_PAGE_SIZE,
+    limit: int | None = None,
+    now_ts: int | None = None,
+) -> V1SubgraphRunSummary:
+    """Process every v1_history_pending market via the V1 subgraph.
+
+    Stamps ``onchain_v1_processed_at`` and clears ``v1_history_pending``
+    only when ≥1 trade row was inserted. Zero-event drains and per-market
+    exceptions leave both sentinel columns unchanged so re-runs pick up
+    the market again.
+
+    Args:
+        conn: Open corpus DB connection.
+        client: Open ``SubgraphClient`` pointed at the V1 subgraph.
+        page_size: GraphQL ``first:`` per query page (max 1000).
+        limit: Process at most ``N`` markets per run.
+        now_ts: Timestamp to stamp on processed markets. Defaults to
+            ``int(time.time())`` at each market's completion.
+    """
+    pending = _load_pending_v1_markets(conn, limit=limit)
+    _LOG.info("subgraph.v1.start", markets=len(pending))
+
+    processed = 0
+    failed = 0
+    zero_events = 0
+    total_events = 0
+    total_inserted = 0
+    total_unsupported = 0
+    total_unresolvable = 0
+    total_dups = 0
+
+    for i, market in enumerate(pending, start=1):
+        try:
+            events, inserted, unsup, unres, dups = await _backfill_one_v1_market(
+                conn=conn,
+                client=client,
+                condition_id=market.condition_id,
+                page_size=page_size,
+            )
+        except Exception as exc:
+            failed += 1
+            _LOG.error(
+                "subgraph.v1.market_failed",
+                idx=i,
+                of=len(pending),
+                condition_id=market.condition_id,
+                error=str(exc),
+            )
+            continue
+
+        total_events += events
+        total_inserted += inserted
+        total_unsupported += unsup
+        total_unresolvable += unres
+        total_dups += dups
+
+        if inserted == 0:
+            zero_events += 1
+            _LOG.info(
+                "subgraph.v1.zero_events",
+                idx=i,
+                of=len(pending),
+                condition_id=market.condition_id,
+                slug=market.market_slug[:50],
+            )
+            continue
+
+        _mark_v1_processed(
+            conn, market.condition_id, now_ts=now_ts if now_ts is not None else int(time.time())
+        )
+        processed += 1
+        _LOG.info(
+            "subgraph.v1.market_complete",
+            idx=i,
+            of=len(pending),
+            condition_id=market.condition_id[:14] + "...",
+            slug=market.market_slug[:50],
+            events_decoded=events,
+            trades_inserted=inserted,
+            dups_dropped=dups,
+        )
+
+    summary = V1SubgraphRunSummary(
+        markets_processed=processed,
+        markets_failed=failed,
+        markets_zero_events=zero_events,
+        events_decoded=total_events,
+        trades_inserted=total_inserted,
+        skipped_unsupported=total_unsupported,
+        skipped_unresolvable=total_unresolvable,
+        dups_dropped=total_dups,
+    )
+    _LOG.info("subgraph.v1.run_done", **summary.__dict__)
+    return summary

@@ -288,3 +288,155 @@ async def test_paginator_short_circuits_on_empty_asset_ids():
     out = [x async for x in iter_v1_market_trades(client=client, asset_ids=[], page_size=10)]
     assert out == []
     assert client.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator tests
+# ---------------------------------------------------------------------------
+
+import sqlite3  # noqa: E402
+
+import pytest  # noqa: E402 — already imported above but needed for clarity
+
+from pscanner.corpus.db import init_corpus_db  # noqa: E402
+from pscanner.corpus.repos import (  # noqa: E402
+    AssetEntry,
+    AssetIndexRepo,
+    CorpusMarket,
+    CorpusMarketsRepo,
+)
+from pscanner.corpus.subgraph_ingest_v1 import run_v1_subgraph_backfill  # noqa: E402
+
+
+def _fat_buy_row(idx: int, asset_id: str) -> dict[str, str]:
+    """BUY row with $20 USDC notional — clears the $10 insert floor."""
+    return {
+        "id": f"tx-{idx}_hash-{idx}",
+        "transactionHash": "0x" + str(idx).rjust(64, "0"),
+        "timestamp": str(1_700_000_000 + idx),
+        "orderHash": "0x" + str(idx).rjust(64, "1"),
+        "maker": "0x" + "b" * 40,
+        "taker": "0x" + "c" * 40,
+        "makerAssetId": "0",
+        "takerAssetId": asset_id,
+        "makerAmountFilled": "20000000",  # $20 USDC in 6-decimal base units
+        "takerAmountFilled": "40000000",  # 40 CTF shares → price = 0.5
+        "fee": "0",
+        "side": "buy",
+        "price": "0.5",
+    }
+
+
+def _seed_v1_pending_market(conn: sqlite3.Connection, condition_id: str, asset_id: str) -> None:
+    market = CorpusMarket(
+        condition_id=condition_id,
+        event_slug="test-event",
+        category=None,
+        closed_at=1_700_000_000,
+        total_volume_usd=50_000.0,
+        enumerated_at=1_700_000_000,
+        market_slug="test-market",
+    )
+    CorpusMarketsRepo(conn).insert_pending(market)
+    conn.execute(
+        "UPDATE corpus_markets SET v1_history_pending = 1 WHERE condition_id = ?",
+        (condition_id,),
+    )
+    AssetIndexRepo(conn).upsert(
+        AssetEntry(
+            asset_id=asset_id,
+            condition_id=condition_id,
+            outcome_side="YES",
+            outcome_index=0,
+        )
+    )
+    conn.commit()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_drains_one_market_and_stamps_sentinel(tmp_path: Path):
+    conn = init_corpus_db(tmp_path / "corpus.sqlite3")
+    try:
+        cid = "0x" + "a" * 64
+        aid = "1234567890"
+        _seed_v1_pending_market(conn, cid, aid)
+        rows = [_fat_buy_row(0, aid), _fat_buy_row(1, aid)]
+        client = _FakeSubgraphClient(pages_by_query={"maker": [], "taker": [rows]})
+        summary = await run_v1_subgraph_backfill(
+            conn=conn, client=client, page_size=1000, limit=None, now_ts=1_700_000_999
+        )
+        assert summary.markets_processed == 1
+        assert summary.markets_zero_events == 0
+        assert summary.markets_failed == 0
+        assert summary.events_decoded == 2
+        assert summary.trades_inserted == 2
+        row = conn.execute(
+            "SELECT onchain_v1_processed_at, v1_history_pending FROM corpus_markets"
+            " WHERE condition_id = ?",
+            (cid,),
+        ).fetchone()
+        assert row["onchain_v1_processed_at"] == 1_700_000_999
+        assert row["v1_history_pending"] == 0
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_does_not_stamp_on_zero_events(tmp_path: Path):
+    conn = init_corpus_db(tmp_path / "corpus.sqlite3")
+    try:
+        cid = "0x" + "b" * 64
+        aid = "9999999999"
+        _seed_v1_pending_market(conn, cid, aid)
+        client = _FakeSubgraphClient(pages_by_query={})
+        summary = await run_v1_subgraph_backfill(
+            conn=conn, client=client, page_size=1000, limit=None, now_ts=1_700_000_999
+        )
+        assert summary.markets_zero_events == 1
+        assert summary.markets_processed == 0
+        row = conn.execute(
+            "SELECT onchain_v1_processed_at, v1_history_pending FROM corpus_markets"
+            " WHERE condition_id = ?",
+            (cid,),
+        ).fetchone()
+        assert row["onchain_v1_processed_at"] is None
+        assert row["v1_history_pending"] == 1
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_skips_market_with_empty_asset_index(tmp_path: Path):
+    conn = init_corpus_db(tmp_path / "corpus.sqlite3")
+    try:
+        cid = "0x" + "c" * 64
+        aid = "5555555555"
+        _seed_v1_pending_market(conn, cid, aid)
+        conn.execute("DELETE FROM asset_index WHERE condition_id = ?", (cid,))
+        conn.commit()
+        client = _FakeSubgraphClient(pages_by_query={})
+        summary = await run_v1_subgraph_backfill(
+            conn=conn, client=client, page_size=1000, limit=None, now_ts=1_700_000_999
+        )
+        assert summary.markets_processed == 0
+        assert summary.markets_failed == 0
+        assert client.calls == []
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_respects_limit(tmp_path: Path):
+    conn = init_corpus_db(tmp_path / "corpus.sqlite3")
+    try:
+        for i in range(3):
+            _seed_v1_pending_market(conn, "0x" + chr(0x61 + i) * 64, f"100{i}")
+        client = _FakeSubgraphClient(
+            pages_by_query={"maker": [], "taker": [[_fat_buy_row(0, "1000")]]}
+        )
+        summary = await run_v1_subgraph_backfill(
+            conn=conn, client=client, page_size=1000, limit=1, now_ts=1_700_000_999
+        )
+        assert summary.markets_processed + summary.markets_zero_events == 1
+    finally:
+        conn.close()
