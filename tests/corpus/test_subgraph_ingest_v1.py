@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -12,7 +13,7 @@ from pscanner.corpus.subgraph_ingest_v1 import subgraph_v1_row_to_event
 _FIXTURE = Path(__file__).parent / "fixtures" / "v1_v2_overlap.json"
 
 
-def _load_fixture() -> dict:  # type: ignore[type-arg]
+def _load_fixture() -> dict[str, Any]:
     return json.loads(_FIXTURE.read_text())
 
 
@@ -85,6 +86,8 @@ def test_parser_buy_row_maker_zero():
     assert event.taker == "0x" + "c" * 40
     assert event.tx_hash == "0x" + "a" * 64
     assert event.order_hash == "0x" + "1" * 64
+    assert event.block_number == 0
+    assert event.log_index == 0
 
 
 def test_parser_sell_row_taker_zero():
@@ -110,6 +113,8 @@ def test_parser_sell_row_taker_zero():
     assert event.taking == 600000
     assert event.maker == "0x" + "b" * 40  # normalized
     assert event.fee == 5000
+    assert event.block_number == 0
+    assert event.log_index == 0
 
 
 def test_parser_rejects_both_zero():
