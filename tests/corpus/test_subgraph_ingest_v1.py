@@ -9,7 +9,12 @@ from typing import Any
 
 import pytest
 
-from pscanner.corpus.subgraph_ingest_v1 import subgraph_v1_row_to_event
+from pscanner.corpus.subgraph_ingest_v1 import (
+    _V1_SUBGRAPH_EARLIEST_TS,
+    _count_pre_v1_skipped,
+    _load_pending_v1_markets,
+    subgraph_v1_row_to_event,
+)
 from pscanner.poly.subgraph import SubgraphClient
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "v1_v2_overlap.json"
@@ -336,12 +341,18 @@ def _fat_buy_row(idx: int, asset_id: str) -> dict[str, str]:
     }
 
 
-def _seed_v1_pending_market(conn: sqlite3.Connection, condition_id: str, asset_id: str) -> None:
+def _seed_v1_pending_market(
+    conn: sqlite3.Connection,
+    condition_id: str,
+    asset_id: str,
+    *,
+    closed_at: int = 1_760_000_000,  # 2025-10-09, post-V1-earliest (1744013119)
+) -> None:
     market = CorpusMarket(
         condition_id=condition_id,
         event_slug="test-event",
         category=None,
-        closed_at=1_700_000_000,
+        closed_at=closed_at,
         total_volume_usd=50_000.0,
         enumerated_at=1_700_000_000,
         market_slug="test-market",
@@ -490,5 +501,36 @@ async def test_hybrid_market_sets_both_sentinels(tmp_path: Path):
         assert row["onchain_processed_at"] == 1_600_000_000  # untouched by V1
         assert row["onchain_v1_processed_at"] == 1_700_000_999  # set by V1
         assert row["v1_history_pending"] == 0  # cleared by V1
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_skips_pre_v1_coverage_markets(tmp_path: Path) -> None:
+    """Markets with closed_at < V1 earliest are excluded from the queue (#197).
+
+    The V1 subgraph's earliest indexed event is at 1744013119 (2025-04-07).
+    Markets that closed before that have no V1 history to serve and were
+    wasting ~60-90 sec each on empty `id_gt` scans before this filter.
+    """
+    conn = init_corpus_db(tmp_path / "corpus.sqlite3")
+    try:
+        # 1: pre-V1 market — should be filtered out.
+        _seed_v1_pending_market(
+            conn, "0x" + "a" * 64, "100", closed_at=_V1_SUBGRAPH_EARLIEST_TS - 1
+        )
+        # 2: at V1 earliest — should be included (boundary).
+        _seed_v1_pending_market(
+            conn, "0x" + "b" * 64, "200", closed_at=_V1_SUBGRAPH_EARLIEST_TS
+        )
+        # 3: post-V1 market — should be included.
+        _seed_v1_pending_market(
+            conn, "0x" + "c" * 64, "300", closed_at=_V1_SUBGRAPH_EARLIEST_TS + 86400
+        )
+
+        pending = _load_pending_v1_markets(conn, limit=None)
+        cids = {m.condition_id for m in pending}
+        assert cids == {"0x" + "b" * 64, "0x" + "c" * 64}
+        assert _count_pre_v1_skipped(conn) == 1
     finally:
         conn.close()
