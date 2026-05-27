@@ -45,257 +45,23 @@ schema dump and recovery-rate analysis.
 
 ---
 
-## Task 2: Stage 1 — Overlap-window verification script + fixture
+## Task 2: Stage 1 — V1 invariant verification + fixture
+
+**Status:** ✅ DONE. Committed as `c8c726a` on the worktree branch.
+
+**Pivot from plan v2:** the originally-planned cross-subgraph
+amount-equality assertion turned out to be impossible (V1 and V2
+index different Polygon Exchange contracts; trades exist in exactly
+one subgraph). Task 2 instead committed real V1 BUY/SELL rows from
+production + V2 reference rows for schema-shape documentation. The
+fixture has structure `{condition_id, asset_index,
+cross_subgraph_match: false, v1_buy_rows: [...], v1_sell_rows: [...],
+v2_reference_rows: [...]}`. See the spec's revised Stage 1 section.
 
 **Files:**
-- Create: `scripts/verify_v1_units.py`
-- Create: `tests/corpus/fixtures/v1_v2_overlap.json` (script output, committed)
+- ✅ Created: `scripts/verify_v1_units.py`
+- ✅ Created: `tests/corpus/fixtures/v1_v2_overlap.json`
 
-Stage 1 proves that V1 and V2 produce identical `(maker, taker,
-makerAmountFilled, takerAmountFilled)` for the same
-`(transactionHash, orderHash)` keys. The committed fixture is what
-every adapter unit test in Tasks 4–6 asserts against.
-
-- [ ] **Step 1: Identify an overlap-window candidate market**
-
-Run this SQL to pick a candidate (one that traded across the April
-3–28 overlap):
-
-```bash
-uv run python -c "
-import sqlite3
-conn = sqlite3.connect('/home/macph/projects/polymarketScanner/data/corpus.sqlite3')
-conn.row_factory = sqlite3.Row
-row = conn.execute('''
-  SELECT m.condition_id, m.market_slug, COUNT(t.tx_hash) AS trades,
-         MIN(t.ts) AS first_ts, MAX(t.ts) AS last_ts
-  FROM corpus_markets m JOIN corpus_trades t USING (condition_id)
-  WHERE m.platform = 'polymarket'
-    AND m.v1_history_pending = 1
-    AND m.onchain_processed_at IS NOT NULL
-  GROUP BY m.condition_id
-  HAVING first_ts < 1775220779 AND last_ts > 1775220779
-  ORDER BY trades DESC LIMIT 5
-''').fetchall()
-for r in row: print(dict(r))
-"
-```
-
-Expected: up to 5 candidate condition_ids printed. Record the top one;
-the script will receive it as `--condition-id`. If 0 rows, fall back
-to dropping the `v1_history_pending=1` filter (some hybrid markets may
-not be flagged).
-
-- [ ] **Step 2: Write the verification script**
-
-```python
-# scripts/verify_v1_units.py
-"""Stage 1 of issue #193: verify V1 amounts equal V2 amounts.
-
-Reconciles V1 and V2 `orderFilledEvents` for one shared condition_id,
-row-by-row on (transactionHash, orderHash). Emits the matched pairs as
-`tests/corpus/fixtures/v1_v2_overlap.json` so the V1 adapter unit
-tests have ground truth.
-
-Run:
-    GRAPH_API_KEY=... uv run python scripts/verify_v1_units.py \\
-        --condition-id <hex> --db /home/macph/projects/polymarketScanner/data/corpus.sqlite3
-"""
-
-from __future__ import annotations
-
-import argparse
-import asyncio
-import json
-import os
-import sys
-from pathlib import Path
-
-from pscanner.corpus.db import init_corpus_db
-from pscanner.poly.subgraph import SubgraphClient
-
-_V1 = "7fu2DWYK93ePfzB24c2wrP94S3x4LGHUrQxphhoEypyY"
-_V2 = "B9mm21DKCex8ka4g8cteQU4NQqtviwmcTjQAYLbzQ1eR"
-_GATEWAY = "https://gateway.thegraph.com/api/{key}/subgraphs/id/{id}"
-# April 3 2026 -> April 28 2026 overlap window (Unix seconds).
-_OVERLAP_MIN = 1775220779
-_OVERLAP_MAX = 1777374040
-
-_V1_Q_MAKER = """
-query($ids: [String!]!, $tmin: BigInt!, $tmax: BigInt!, $first: Int!) {
-  orderFilledEvents(
-    where: { makerAssetId_in: $ids, timestamp_gte: $tmin, timestamp_lte: $tmax }
-    first: $first orderBy: timestamp orderDirection: asc
-  ) {
-    id transactionHash timestamp orderHash
-    maker taker makerAssetId takerAssetId
-    makerAmountFilled takerAmountFilled fee side price
-  }
-}
-"""
-
-_V1_Q_TAKER = """
-query($ids: [String!]!, $tmin: BigInt!, $tmax: BigInt!, $first: Int!) {
-  orderFilledEvents(
-    where: { takerAssetId_in: $ids, timestamp_gte: $tmin, timestamp_lte: $tmax }
-    first: $first orderBy: timestamp orderDirection: asc
-  ) {
-    id transactionHash timestamp orderHash
-    maker taker makerAssetId takerAssetId
-    makerAmountFilled takerAmountFilled fee side price
-  }
-}
-"""
-
-_V2_Q = """
-query($ids: [String!]!, $tmin: BigInt!, $tmax: BigInt!, $first: Int!) {
-  orderFilledEvents(
-    where: { market_in: $ids, timestamp_gte: $tmin, timestamp_lte: $tmax }
-    first: $first orderBy: timestamp orderDirection: asc
-  ) {
-    id transactionHash timestamp orderHash
-    maker { id } taker { id } market { id }
-    tokenId side makerAmountFilled takerAmountFilled fee
-  }
-}
-"""
-
-
-async def _amain(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(
-        description="V1/V2 overlap reconciliation (issue #193, Stage 1)"
-    )
-    parser.add_argument("--condition-id", required=True)
-    parser.add_argument(
-        "--db", default="/home/macph/projects/polymarketScanner/data/corpus.sqlite3"
-    )
-    parser.add_argument("--api-key", default=None)
-    parser.add_argument(
-        "--output", default="tests/corpus/fixtures/v1_v2_overlap.json"
-    )
-    parser.add_argument("--per-side", type=int, default=200)
-    args = parser.parse_args(argv)
-    api_key = args.api_key or os.environ.get("GRAPH_API_KEY")
-    if not api_key:
-        sys.stderr.write("error: --api-key or $GRAPH_API_KEY required\n")
-        return 2
-
-    conn = init_corpus_db(Path(args.db))
-    try:
-        asset_rows = conn.execute(
-            "SELECT asset_id, outcome_side FROM asset_index WHERE condition_id = ?",
-            (args.condition_id,),
-        ).fetchall()
-    finally:
-        conn.close()
-    asset_ids = [r["asset_id"] for r in asset_rows]
-    if not asset_ids:
-        sys.stderr.write(f"error: no asset_index rows for {args.condition_id}\n")
-        return 3
-
-    common = {
-        "ids": asset_ids,
-        "tmin": str(_OVERLAP_MIN),
-        "tmax": str(_OVERLAP_MAX),
-        "first": args.per_side,
-    }
-
-    async with (
-        SubgraphClient(url=_GATEWAY.format(key=api_key, id=_V1), rpm=60) as v1,
-        SubgraphClient(url=_GATEWAY.format(key=api_key, id=_V2), rpm=60) as v2,
-    ):
-        v1_maker = (await v1.query(_V1_Q_MAKER, common)).get("orderFilledEvents") or []
-        v1_taker = (await v1.query(_V1_Q_TAKER, common)).get("orderFilledEvents") or []
-        v2_rows = (await v2.query(_V2_Q, common)).get("orderFilledEvents") or []
-
-    v1_by_key: dict[tuple[str, str], dict] = {}
-    for r in v1_maker + v1_taker:
-        key = (r["transactionHash"].lower(), r["orderHash"].lower())
-        v1_by_key.setdefault(key, r)
-
-    by_tx_v2: dict[tuple[str, str], dict] = {
-        (r["transactionHash"].lower(), r["orderHash"].lower()): r for r in v2_rows
-    }
-
-    matched: list[dict] = []
-    for key, v1_row in v1_by_key.items():
-        if key in by_tx_v2:
-            matched.append({"v1": v1_row, "v2": by_tx_v2[key]})
-
-    keep: list[dict] = []
-    seen_sides: set[str] = set()
-    for pair in matched:
-        side = pair["v1"]["side"]
-        if side not in seen_sides or len(keep) < 4:
-            seen_sides.add(side)
-            keep.append(pair)
-        if len(keep) >= 8:
-            break
-
-    failures: list[str] = []
-    for pair in keep:
-        v1_row, v2_row = pair["v1"], pair["v2"]
-        if int(v1_row["makerAmountFilled"]) != int(v2_row["makerAmountFilled"]):
-            failures.append(
-                f"makerAmount mismatch on {v1_row['transactionHash']}: "
-                f"v1={v1_row['makerAmountFilled']} v2={v2_row['makerAmountFilled']}"
-            )
-        if int(v1_row["takerAmountFilled"]) != int(v2_row["takerAmountFilled"]):
-            failures.append(
-                f"takerAmount mismatch on {v1_row['transactionHash']}: "
-                f"v1={v1_row['takerAmountFilled']} v2={v2_row['takerAmountFilled']}"
-            )
-        v1_buy = v1_row["makerAssetId"] == "0"
-        v2_buy = int(v2_row["side"]) == 0
-        if v1_buy != v2_buy:
-            failures.append(
-                f"side mismatch on {v1_row['transactionHash']}: "
-                f"v1_buy={v1_buy} v2_buy={v2_buy}"
-            )
-    if failures:
-        sys.stderr.write("VERIFICATION FAILED:\n  " + "\n  ".join(failures) + "\n")
-        return 4
-
-    out = {
-        "condition_id": args.condition_id,
-        "asset_index": {r["asset_id"]: r["outcome_side"] for r in asset_rows},
-        "pairs": keep,
-    }
-    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.output).write_text(json.dumps(out, indent=2, sort_keys=True))
-    print(f"wrote {args.output}: {len(keep)} matched pairs from {len(matched)} candidates")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(asyncio.run(_amain(sys.argv[1:])))
-```
-
-- [ ] **Step 3: Run the verification script with a candidate condition_id from Step 1**
-
-Run: `GRAPH_API_KEY=9e5231bfb63603ff576b3b0ce1b58913 uv run python scripts/verify_v1_units.py --condition-id <hex from Step 1>`
-Expected: `wrote tests/corpus/fixtures/v1_v2_overlap.json: N matched pairs from M candidates` where `N >= 2` (at least one BUY pair and one SELL pair).
-
-If `N < 2`: try a different candidate from Step 1's list. If no candidate yields ≥ 2 pairs, the overlap-window approach is dead and you should STOP and report BLOCKED.
-
-If the script exits with `VERIFICATION FAILED:` output, the V1 and V2 amount fields are NOT identical — the spec's central assumption is wrong. STOP and report BLOCKED so the controller can re-open the design.
-
-- [ ] **Step 4: Commit the script and fixture**
-
-```bash
-git add scripts/verify_v1_units.py tests/corpus/fixtures/v1_v2_overlap.json
-git commit -m "$(cat <<'EOF'
-feat(corpus): V1/V2 overlap reconciliation + ground-truth fixture (#193, Stage 1)
-
-Verifies V1 makerAmountFilled / takerAmountFilled equal V2's for the
-same (transactionHash, orderHash) keys, and V1 maker-zero pattern
-matches V2 side==0. Downstream adapter unit tests assert against this
-file forever.
-
-Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
-EOF
-)"
-```
 
 ---
 
@@ -420,26 +186,48 @@ def _load_fixture() -> dict:
     return json.loads(_FIXTURE.read_text())
 
 
-def test_parser_matches_v2_amounts_on_overlap_fixture():
-    data = _load_fixture()
-    for pair in data["pairs"]:
-        v1, v2 = pair["v1"], pair["v2"]
-        event = subgraph_v1_row_to_event(v1)
+def test_parser_handles_v1_buy_rows_from_production_fixture():
+    """V1 BUY rows: makerAssetId='0', takerAssetId=<token>, side='buy'.
 
-        v2_side = int(v2["side"])
-        v2_token = int(v2["tokenId"])
-        if v2_side == 0:  # maker BUY: USDC -> CTF
-            assert event.maker_asset_id == 0
-            assert event.taker_asset_id == v2_token
-        else:  # maker SELL: CTF -> USDC
-            assert event.maker_asset_id == v2_token
-            assert event.taker_asset_id == 0
-        assert event.making == int(v2["makerAmountFilled"])
-        assert event.taking == int(v2["takerAmountFilled"])
-        assert event.maker == v2["maker"]["id"].lower()
-        assert event.taker == v2["taker"]["id"].lower()
-        assert event.tx_hash == v2["transactionHash"]
-        assert event.order_hash == v2["orderHash"]
+    The fixture's `v1_buy_rows` are real production rows from the V1
+    Polymarket subgraph (see Task 2's `scripts/verify_v1_units.py`).
+    The adapter must produce an OrderFilledEvent where maker_asset_id=0
+    and taker_asset_id matches the row's takerAssetId.
+    """
+    data = _load_fixture()
+    assert data["cross_subgraph_match"] is False, (
+        "fixture must declare cross_subgraph_match=False — V1/V2 index "
+        "different Polygon contracts and share no transactions"
+    )
+    buys = data["v1_buy_rows"]
+    assert len(buys) >= 1, "fixture must contain at least one V1 BUY row"
+    for row in buys:
+        assert row["makerAssetId"] == "0"
+        assert row["side"] == "buy"
+        event = subgraph_v1_row_to_event(row)
+        assert event.maker_asset_id == 0
+        assert event.taker_asset_id == int(row["takerAssetId"])
+        assert event.making == int(row["makerAmountFilled"])
+        assert event.taking == int(row["takerAmountFilled"])
+        assert event.maker == row["maker"].lower()
+        assert event.taker == row["taker"].lower()
+        assert event.tx_hash == row["transactionHash"]
+        assert event.order_hash == row["orderHash"]
+
+
+def test_parser_handles_v1_sell_rows_from_production_fixture():
+    """V1 SELL rows: takerAssetId='0', makerAssetId=<token>, side='sell'."""
+    data = _load_fixture()
+    sells = data["v1_sell_rows"]
+    assert len(sells) >= 1, "fixture must contain at least one V1 SELL row"
+    for row in sells:
+        assert row["takerAssetId"] == "0"
+        assert row["side"] == "sell"
+        event = subgraph_v1_row_to_event(row)
+        assert event.taker_asset_id == 0
+        assert event.maker_asset_id == int(row["makerAssetId"])
+        assert event.making == int(row["makerAmountFilled"])
+        assert event.taking == int(row["takerAmountFilled"])
 
 
 def test_parser_buy_row_maker_zero():
@@ -1778,60 +1566,94 @@ EOF
 
 ---
 
-## Task 10: Production smoke run + CLAUDE.md update
+## Task 10: Smoke run + CLAUDE.md update
+
+**Production DB is blocked from `init_corpus_db`.** Task 2 surfaced a
+pre-existing partial-PR-A migration plus an orphaned `corpus_trades__new`
+table; the orphan was dropped manually but the migration itself
+(`corpus_trades`/`market_resolutions`/`training_examples`/`asset_index`
+→ platform-column) has not been re-run. Followup tracked as issue
+#195. **Task 10's CLI smoke must therefore run against a tmpdir DB**;
+production V1 backfill is the operator's call to run after #195 lands.
 
 - [ ] **Step 1: Pre-flight check**
 
-Run: `uv run ruff check . && uv run ruff format --check . && uv run ty check && uv run pytest -q`
+Run from the worktree:
+```bash
+uv run ruff check . && uv run ruff format --check . && uv run ty check && uv run pytest -q
+```
+Expected: all green, no warnings.
 
-- [ ] **Step 2: V1-only smoke, small limit**
+- [ ] **Step 2: CLI smoke against a tmpdir DB**
+
+Build a small synthetic corpus with one V1-pending market, then run
+the dispatcher:
 
 ```bash
+SMOKE_DB=$(mktemp -t smoke-corpus-XXXXXX.sqlite3)
+uv run python3 -c "
+import pathlib
+from pscanner.corpus.db import init_corpus_db
+from pscanner.corpus.repos import (
+    AssetIndexEntry, AssetIndexRepo, CorpusMarket, CorpusMarketsRepo,
+)
+conn = init_corpus_db(pathlib.Path('$SMOKE_DB'))
+# Pick a known V1-pending market from production for asset-id realism.
+cid = '0x36e8ca24d2a13435f519f15580d42b45cdbe3bc425fb39a7c2733260357af0fa'
+m = CorpusMarket(
+    condition_id=cid, event_slug='smoke', category=None,
+    closed_at=1775220790, total_volume_usd=10000.0,
+    enumerated_at=1775220790, market_slug='smoke',
+)
+CorpusMarketsRepo(conn).insert_pending(m)
+conn.execute('UPDATE corpus_markets SET v1_history_pending = 1 WHERE condition_id = ?', (cid,))
+AssetIndexRepo(conn).upsert(AssetIndexEntry(
+    asset_id='63586620628756015058616403521099137018911742768824051367331188904593189743777',
+    condition_id=cid, outcome_side='YES', outcome_index=0,
+))
+AssetIndexRepo(conn).upsert(AssetIndexEntry(
+    asset_id='31766935524058663070405983804663917978960087327501512757848582448134393241922',
+    condition_id=cid, outcome_side='NO', outcome_index=1,
+))
+conn.commit()
+print('smoke DB seeded at', '$SMOKE_DB')
+"
+
 GRAPH_API_KEY=9e5231bfb63603ff576b3b0ce1b58913 uv run pscanner corpus subgraph-backfill \
-    --db /home/macph/projects/polymarketScanner/data/corpus.sqlite3 \
+    --db "$SMOKE_DB" \
     --subgraph-version v1 \
     --rpm 50 \
-    --limit 5 2>&1 | tee /tmp/v1-smoke.log
+    --limit 1 2>&1 | tee /tmp/v1-smoke.log
 ```
 
-- [ ] **Step 3: Verify the production DB shows the sentinel + cleared flag**
+Expected output: `subgraph.v1.start markets=1`, then a
+`subgraph.v1.market_complete` event with `trades_inserted > 0` (the
+real production market has thousands of V1 fills), then
+`subgraph.cli_summary` with `v1_trades_inserted > 0`. Exit code 0.
+
+- [ ] **Step 3: Verify the sentinel + cleared flag on the tmpdir DB**
 
 ```bash
-uv run python -c "
+uv run python3 -c "
 import sqlite3
-conn = sqlite3.connect('/home/macph/projects/polymarketScanner/data/corpus.sqlite3')
+conn = sqlite3.connect('$SMOKE_DB')
 conn.row_factory = sqlite3.Row
-rows = conn.execute('''
-  SELECT condition_id, onchain_v1_processed_at, v1_history_pending, market_slug
-  FROM corpus_markets
-  WHERE onchain_v1_processed_at IS NOT NULL
-  ORDER BY onchain_v1_processed_at DESC LIMIT 10
-''').fetchall()
-for r in rows: print(dict(r))
+row = conn.execute('SELECT onchain_v1_processed_at, v1_history_pending, market_slug FROM corpus_markets').fetchone()
+print(dict(row))
+n = conn.execute('SELECT COUNT(*) FROM corpus_trades').fetchone()[0]
+print('inserted trades:', n)
 "
 ```
+Expected: `onchain_v1_processed_at` is a unix timestamp, `v1_history_pending=0`, and `inserted trades > 0`.
 
-- [ ] **Step 4: Spot-check a processed market's trade-count delta**
-
-```bash
-uv run python -c "
-import sqlite3
-conn = sqlite3.connect('/home/macph/projects/polymarketScanner/data/corpus.sqlite3')
-conn.row_factory = sqlite3.Row
-cid = '<paste condition_id>'
-n = conn.execute('SELECT COUNT(*) FROM corpus_trades WHERE condition_id = ?', (cid,)).fetchone()[0]
-min_ts = conn.execute('SELECT MIN(ts) FROM corpus_trades WHERE condition_id = ?', (cid,)).fetchone()[0]
-print(f'trade_count={n} oldest_ts={min_ts}')
-"
-```
-
-- [ ] **Step 5: Update CLAUDE.md**
+- [ ] **Step 4: Update CLAUDE.md**
 
 Edit `CLAUDE.md` to:
 - Correct the V1 schema description: the V1 subgraph still serves the *pre-#151* `OrderFilledEvent` schema (flat addresses, `makerAssetId` + `takerAssetId`, same amount fields). The "re-pushed with an entirely different schema" claim was wrong.
-- Move the entry currently under "Tracked work in flight" → #193 into "Polymarket API quirks" as a shipped-state note.
+- Move the "Tracked work in flight" entry for #193 into the body of "Polymarket API quirks" as a shipped-state note that mentions: V1 adapter via `pscanner corpus subgraph-backfill --subgraph-version v1`, the new `onchain_v1_processed_at` sentinel, and the V1/V2-are-different-contracts gotcha.
+- Add a one-line cross-reference under "Open follow-ups" pointing at issue #195 (PR-A migration completion).
 
-- [ ] **Step 6: Commit the doc update**
+- [ ] **Step 5: Commit the doc update**
 
 ```bash
 git add CLAUDE.md
@@ -1839,23 +1661,33 @@ git commit -m "$(cat <<'EOF'
 docs: record V1 subgraph adapter shipped (#193)
 
 Correct the V1 schema description in CLAUDE.md (V1 still serves the
-pre-#151 OrderFilledEvent shape, not a re-pushed different schema).
+pre-#151 OrderFilledEvent shape, not a re-pushed different schema; and
+V1/V2 index different Polygon contracts and share no transactions).
 Move V1 adapter notes from "Tracked work in flight" into the Polymarket
-API quirks section.
+API quirks section. Cross-reference #195 for the PR-A migration
+completion follow-up.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
 )"
 ```
 
-- [ ] **Step 7: Run the full smoke on the production V1 queue (operator-optional)**
+- [ ] **Step 6: Production smoke (operator-only, deferred)**
+
+Production smoke against `/home/macph/projects/polymarketScanner/data/corpus.sqlite3`
+is blocked until issue #195 lands and the PR-A migration completes on
+that DB. After that, the operator can run:
 
 ```bash
-GRAPH_API_KEY=9e5231bfb63603ff576b3b0ce1b58913 uv run pscanner corpus subgraph-backfill \
+GRAPH_API_KEY=... uv run pscanner corpus subgraph-backfill \
     --db /home/macph/projects/polymarketScanner/data/corpus.sqlite3 \
     --subgraph-version v1 \
     --rpm 50 2>&1 | tee /tmp/v1-full.log
 ```
+
+This is **not** required to mark Task 10 complete — the tmpdir smoke
+in Steps 2-3 covers the dispatcher + CLI + adapter against real V1
+data.
 
 ---
 

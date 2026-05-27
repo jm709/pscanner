@@ -29,10 +29,13 @@ In:
   carry both sentinels independently.
 - CLI extension: `--subgraph-version v1|v2|both` (default `both`) and
   per-version subgraph-id flags.
-- Stage 1 overlap-window verification — for one market that traded
-  during the April 3 – April 28 overlap, confirm V1 and V2 produce
-  identical `(maker, taker, makerAmountFilled, takerAmountFilled)` for
-  the same `(transactionHash, orderHash)` keys.
+- Stage 1 invariant verification — for one V1-pending market that
+  traded across the April overlap, confirm the V1 row invariants the
+  adapter depends on (BUY rows have `makerAssetId="0"` and
+  `side="buy"`; SELL rows have `takerAssetId="0"` and `side="sell"`;
+  both shapes present in the sample). Cross-subgraph amount
+  reconciliation was originally planned but proven impossible — V1
+  and V2 index different Polygon contracts and share no transactions.
 
 Out:
 
@@ -69,8 +72,11 @@ flat-address rows into `OrderFilledEvent`, and the maker-POV BUY/SELL
 derivation falls out of `makerAssetId=="0"` (BUY) vs `takerAssetId=="0"`
 (SELL) — the same logic V2 uses.
 
-The overlap window (April 3 – April 28) is real and has fills indexed
-by both subgraphs. Stage 1 uses it for verification.
+The overlap window (April 3 – April 28) is *temporal*, not
+transactional — both subgraphs were running concurrently but indexed
+disjoint sets of transactions from disjoint Polygon Exchange contracts.
+Stage 1 uses the window to sample real V1 production data for the
+fixture, but cannot use it for cross-subgraph reconciliation.
 
 The pre-#151 V1 module in git history (`a809378^:src/pscanner/corpus/
 subgraph_ingest.py`) is the direct ancestor of the V1 adapter we need
@@ -91,31 +97,50 @@ against the local `asset_index`. Output at
 `scripts/v1_investigation_report.md`. Key findings recorded in the
 "Background" section above.
 
-### Stage 1 — Overlap-window verification (~30m)
+### Stage 1 — Invariant verification on real V1 data (revised post-Task-2)
 
-`scripts/verify_v1_units.py`.
+`scripts/verify_v1_units.py` (committed as `c8c726a` on the worktree branch).
 
-1. Find a market that closed in or after April 2026 but had its first
-   fill before April 3, 2026 (V2 start). Cross-reference
-   `corpus_trades.ts` against `_V2_SUBGRAPH_START_TS` to pick one.
-2. Pull a small page of that market's fills from BOTH subgraphs,
-   restricting to `timestamp >= 1775220779 AND timestamp <= 1777374040`
-   (the April 3–28 overlap window).
-3. Reconcile row-by-row on `(transactionHash, orderHash)`. For each
-   matched pair, assert:
-   - `int(v1.makerAmountFilled) == int(v2.makerAmountFilled)`
-   - `int(v1.takerAmountFilled) == int(v2.takerAmountFilled)`
-   - `v1.maker.lower() == v2.maker["id"].lower()`
-   - `v1.taker.lower() == v2.taker["id"].lower()`
-   - V1's maker-vs-taker zero pattern matches V2's `side` enum (V2
-     `side==0` ⇔ V1 `makerAssetId=="0"`; V2 `side==1` ⇔ V1
-     `takerAssetId=="0"`).
-4. Commit the matched pairs as `tests/corpus/fixtures/v1_v2_overlap.json`
-   so the parser unit test asserts against ground truth forever.
+**Background note:** the originally-spec'd verification — find the same
+`(transactionHash, orderHash)` in both V1 and V2, assert identical
+amounts — turned out to be impossible. V1 (`7fu2DWYK…`) and V2
+(`B9mm21DK…`) index *different* Polygon Exchange contracts. A trade
+exists in exactly one subgraph, never both. Empirically verified: 200
+V1 tx hashes checked against V2 → 0 intersection. The
+"overlap window" is temporal (both subgraphs were running 2026-04-03
+through 2026-04-28), not transactional.
 
-If reconciliation fails on any pair, the spec is wrong and the design
-needs revision. If all matches pass, the V1 adapter is essentially a
-flat-address variant of the existing V2 path.
+The revised Stage 1 instead proves the **invariants** the adapter
+depends on, on real production V1 data:
+
+1. Find a candidate market that traded across the overlap window via
+   the local `corpus_trades` (a market with both pre-V2 and post-V2
+   trades).
+2. Pull ~200 V1 BUY rows (server-side filter `makerAssetId_in:
+   <market's asset_ids>`) and ~200 V1 SELL rows (filter
+   `takerAssetId_in: ...`) from the overlap window.
+3. Pick representative samples (≥2 BUY, ≥2 SELL) and assert:
+   - Every BUY row has `makerAssetId == "0"` and `side == "buy"`.
+   - Every SELL row has `takerAssetId == "0"` and `side == "sell"`.
+   - Both BUY and SELL shapes are represented in the kept sample.
+4. Also commit a small set of V2 reference rows (different market —
+   one V2 indexes — same overlap window) so the fixture documents the
+   schema-shape delta the adapter must bridge (flat `maker`/`taker`
+   vs nested `Account { id }`, `makerAssetId` + `takerAssetId` vs
+   `tokenId` + `side`).
+5. Commit as `tests/corpus/fixtures/v1_v2_overlap.json` with the
+   structure `{condition_id, asset_index, cross_subgraph_match: false,
+   v1_buy_rows: [...], v1_sell_rows: [...], v2_reference_rows: [...]}`.
+
+The downstream Task 4 parser test asserts that the adapter, fed each
+`v1_buy_rows` entry, produces an `OrderFilledEvent` with
+`maker_asset_id == 0` and the correct `taker_asset_id`, and analogously
+for `v1_sell_rows`. The V2 reference rows are used to document — not
+assert against — the cross-schema shape difference.
+
+If the V1 fixture's invariants fail (e.g. a BUY row has non-`"0"`
+makerAssetId), the design needs revision. They held when Task 2 ran on
+production V1 data (commit `c8c726a`).
 
 ### Stage 2 — Adapter, orchestrator, dispatcher
 
@@ -299,9 +324,14 @@ summary.
 
 - `tests/corpus/test_subgraph_ingest_v1.py`:
   - Adapter unit tests: maker-zero (BUY) row, taker-zero (SELL) row.
-    Use the `v1_v2_overlap.json` fixture from Stage 1 to assert
-    maker-POV parity with V2 (V1-derived `(maker_asset_id,
-    taker_asset_id, making, taking)` matches V2's).
+    The Stage 1 fixture (`v1_v2_overlap.json`) carries `v1_buy_rows`
+    and `v1_sell_rows` from production V1; the test feeds each into
+    the adapter and asserts the derived `(maker_asset_id,
+    taker_asset_id)` pair matches the row's `(makerAssetId,
+    takerAssetId)`, and `making`/`taking` equal `makerAmountFilled`/
+    `takerAmountFilled`. (Cross-subgraph amount equality cannot be
+    asserted — the fixture's `v2_reference_rows` are present for
+    schema-shape documentation only.)
   - Sentinel hygiene: 0-row drain leaves columns unchanged; successful
     drain stamps both `onchain_v1_processed_at` and
     `v1_history_pending`.
@@ -361,10 +391,19 @@ Out of scope for the test suite (covered elsewhere):
 
 - 2026-05-26 v1: original draft (assumed `OrderFill` entity, `marketId`
   + `outcomeIndex`, BigInt `price × size`).
-- 2026-05-26 v2 (current): rewritten after Stage 0 investigation
-  proved the V1 schema is the pre-#151 `OrderFilledEvent` shape.
+- 2026-05-26 v2: rewritten after Stage 0 investigation proved the V1
+  schema is the pre-#151 `OrderFilledEvent` shape.
   Dropped `marketId="0"` scope; dropped `price × size` unit-conversion
   concern; simplified Stage 1 verification to amount equality on
   matched `(tx_hash, orderHash)` pairs; switched the query plan from
   one `marketId_in` query to two `makerAssetId_in` / `takerAssetId_in`
-  queries (matching the pre-#151 pattern).
+  queries.
+- 2026-05-26 v3 (current): Task 2 proved V1 and V2 index *different*
+  Polygon Exchange contracts and share no transactions. Replaced
+  Stage 1's cross-subgraph amount-equality assertion with on-V1
+  invariant checks (BUY rows have `makerAssetId="0" + side="buy"`;
+  SELL rows have `takerAssetId="0" + side="sell"`). Updated the
+  fixture structure to `{v1_buy_rows, v1_sell_rows,
+  v2_reference_rows, cross_subgraph_match: false}` and the
+  downstream parser test to assert against `v1_buy_rows`/`v1_sell_rows`
+  instead of an impossible `pairs` list.
