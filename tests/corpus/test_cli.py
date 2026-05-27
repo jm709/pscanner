@@ -380,9 +380,7 @@ def test_subgraph_backfill_no_deprecation_warning_when_alias_unused() -> None:
     with capture_logs() as logs:
         resolved = _resolve_subgraph_flags(args)
     assert resolved.v2_subgraph_id == "explicit-v2"
-    assert not any(
-        entry.get("event") == "subgraph.cli.deprecated_flag" for entry in logs
-    )
+    assert not any(entry.get("event") == "subgraph.cli.deprecated_flag" for entry in logs)
 
 
 def test_subgraph_backfill_default_version_is_both() -> None:

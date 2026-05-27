@@ -505,9 +505,7 @@ async def run_subgraph_backfill(
                 error=str(exc),
             )
 
-    cleared = (
-        _clear_truncation_flags(conn, threshold=truncation_threshold) if processed > 0 else 0
-    )
+    cleared = _clear_truncation_flags(conn, threshold=truncation_threshold) if processed > 0 else 0
 
     summary = SubgraphRunSummary(
         markets_processed=processed,
