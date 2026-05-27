@@ -306,7 +306,7 @@ async def _amain(argv: list[str]) -> int:
     }
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     Path(args.output).write_text(  # noqa: ASYNC240 -- standalone script, not a daemon
-        json.dumps(out, indent=2, sort_keys=True)
+        json.dumps(out, indent=2, sort_keys=True) + "\n"
     )
     print(  # noqa: T201 -- operator output
         f"wrote {args.output}: {len(v1_buy_rows)} V1 BUY rows, "
