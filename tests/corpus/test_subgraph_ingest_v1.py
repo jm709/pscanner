@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from pscanner.corpus.subgraph_ingest_v1 import subgraph_v1_row_to_event
+from pscanner.poly.subgraph import SubgraphClient
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "v1_v2_overlap.json"
 
@@ -165,18 +167,25 @@ def test_parser_rejects_both_nonzero():
 from pscanner.corpus.subgraph_ingest_v1 import iter_v1_market_trades  # noqa: E402
 
 
-class _FakeSubgraphClient:
+class _FakeSubgraphClient(SubgraphClient):
     """Records every query() invocation and yields canned responses in order.
+
+    Subclasses SubgraphClient (without calling super().__init__()) so it
+    satisfies the parameter type at call sites. Never opens a real httpx
+    client.
 
     `pages_by_query` is keyed by 'maker' (queries containing
     'makerAssetId_in') or 'taker' (queries containing 'takerAssetId_in').
     """
 
     def __init__(self, pages_by_query: dict[str, list[list[dict[str, Any]]]]) -> None:
+        # NOTE: deliberately not calling super().__init__() — we don't want
+        # to construct the underlying RateLimitedHttpClient. ty accepts the
+        # subclass as a valid SubgraphClient regardless of init state.
         self._pages = pages_by_query
         self.calls: list[dict[str, Any]] = []
 
-    async def query(self, graphql: str, variables: dict[str, Any]) -> dict[str, Any]:
+    async def query(self, graphql: str, variables: Mapping[str, Any]) -> dict[str, Any]:
         side = "maker" if "makerAssetId_in" in graphql else "taker"
         self.calls.append({"side": side, "variables": dict(variables)})
         pages = self._pages.get(side, [])
@@ -465,7 +474,7 @@ async def test_hybrid_market_sets_both_sentinels(tmp_path: Path):
         client = _FakeSubgraphClient(pages_by_query={"maker": [], "taker": [rows]})
         await run_v1_subgraph_backfill(
             conn=conn,
-            client=client,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+            client=client,
             page_size=1000,
             limit=None,
             now_ts=1_700_000_999,

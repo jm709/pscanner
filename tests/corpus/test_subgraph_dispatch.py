@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -12,10 +13,24 @@ from pscanner.corpus.subgraph_dispatch import (
     DispatchedRunSummary,
     run_subgraph_backfill_dispatched,
 )
+from pscanner.poly.subgraph import SubgraphClient
 
 
-class _NoopClient:
-    async def query(self, graphql: str, variables: dict[str, Any]) -> dict[str, Any]:
+class _NoopClient(SubgraphClient):
+    """Test stub that returns empty results for every query.
+
+    Subclasses SubgraphClient (without calling super().__init__()) so it
+    satisfies the parameter type at call sites. Never opens a real httpx
+    client.
+    """
+
+    def __init__(self) -> None:
+        # NOTE: deliberately not calling super().__init__() — we don't want
+        # to construct the underlying RateLimitedHttpClient. ty accepts the
+        # subclass as a valid SubgraphClient regardless of init state.
+        pass
+
+    async def query(self, graphql: str, variables: Mapping[str, Any]) -> dict[str, Any]:
         return {"orderFilledEvents": []}
 
 

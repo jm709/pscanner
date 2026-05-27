@@ -353,7 +353,8 @@ def test_subgraph_backfill_help_lists_version_flags() -> None:
     sub_actions = [a for a in parser._actions if hasattr(a, "_name_parser_map")]
     assert sub_actions, "no subparser found"
     subparsers = sub_actions[0].choices
-    sg = subparsers["subgraph-backfill"]
+    assert subparsers is not None, "subparser choices must not be None"
+    sg = subparsers["subgraph-backfill"]  # type: ignore[index]  # ty:ignore[not-subscriptable]
     help_text = sg.format_help()
     assert "--subgraph-version" in help_text
     assert "--v1-subgraph-id" in help_text
