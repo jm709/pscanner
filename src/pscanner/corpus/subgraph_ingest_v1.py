@@ -19,7 +19,7 @@ import sqlite3
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 import structlog
 
@@ -31,6 +31,16 @@ from pscanner.poly.onchain_ingest import (
     event_to_corpus_trade,
 )
 from pscanner.poly.subgraph import SubgraphClient
+
+# Earliest Unix-second timestamp the V1 Polymarket Orderbook subgraph
+# (`7fu2DWYK93ePfzB24c2wrP94S3x4LGHUrQxphhoEypyY`) has ever indexed an
+# OrderFilledEvent for. Verified by Stage 0 investigation (commit
+# `e430e54`). Markets that closed before this date have no V1 history
+# the subgraph can serve, so backfilling them is wasted gamma quota
+# AND wall time (The Graph's indexer is slow to return empty results
+# on wide id_gt scans — ~60-90s per market observed in the 2026-05-27
+# production run before this filter was added).
+_V1_SUBGRAPH_EARLIEST_TS: Final[int] = 1744013119  # 2025-04-07 UTC
 
 _LOG = structlog.get_logger(__name__)
 
@@ -259,7 +269,14 @@ class _PendingV1Market:
 def _load_pending_v1_markets(
     conn: sqlite3.Connection, *, limit: int | None
 ) -> list[_PendingV1Market]:
-    """Return v1_history_pending markets not yet processed, ordered by volume desc."""
+    """Return v1_history_pending markets not yet processed, ordered by volume desc.
+
+    Markets that closed before the V1 subgraph's earliest indexed event
+    (``_V1_SUBGRAPH_EARLIEST_TS``) are excluded — V1 has nothing for
+    them and confirming that round-trips slow indexer queries. They
+    keep their ``v1_history_pending=1`` flag (still pending in a
+    literal sense — there is just no upstream that can serve them).
+    """
     sql = """
         SELECT condition_id,
                COALESCE(market_slug, '') AS market_slug,
@@ -268,11 +285,12 @@ def _load_pending_v1_markets(
         WHERE platform = 'polymarket'
           AND v1_history_pending = 1
           AND onchain_v1_processed_at IS NULL
+          AND closed_at >= ?
         ORDER BY total_volume_usd DESC
     """
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
-    rows = conn.execute(sql).fetchall()
+    rows = conn.execute(sql, (_V1_SUBGRAPH_EARLIEST_TS,)).fetchall()
     return [
         _PendingV1Market(
             condition_id=r["condition_id"],
@@ -281,6 +299,21 @@ def _load_pending_v1_markets(
         )
         for r in rows
     ]
+
+
+def _count_pre_v1_skipped(conn: sqlite3.Connection) -> int:
+    """Count v1_history_pending markets excluded by the pre-V1-coverage filter."""
+    row = conn.execute(
+        """
+        SELECT COUNT(*) FROM corpus_markets
+        WHERE platform = 'polymarket'
+          AND v1_history_pending = 1
+          AND onchain_v1_processed_at IS NULL
+          AND closed_at < ?
+        """,
+        (_V1_SUBGRAPH_EARLIEST_TS,),
+    ).fetchone()
+    return int(row[0])
 
 
 def _load_asset_ids_for_market(conn: sqlite3.Connection, condition_id: str) -> list[str]:
@@ -381,7 +414,13 @@ async def run_v1_subgraph_backfill(
             ``int(time.time())`` at each market's completion.
     """
     pending = _load_pending_v1_markets(conn, limit=limit)
-    _LOG.info("subgraph.v1.start", markets=len(pending))
+    skipped_pre_v1 = _count_pre_v1_skipped(conn)
+    _LOG.info(
+        "subgraph.v1.start",
+        markets=len(pending),
+        skipped_pre_v1=skipped_pre_v1,
+        v1_earliest_ts=_V1_SUBGRAPH_EARLIEST_TS,
+    )
 
     processed = 0
     failed = 0
