@@ -155,3 +155,133 @@ def test_parser_rejects_both_nonzero():
     }
     with pytest.raises(ValueError, match="both-zero or both-non-zero"):
         subgraph_v1_row_to_event(row)
+
+
+# ---------------------------------------------------------------------------
+# Paginator + iterator tests
+# ---------------------------------------------------------------------------
+
+
+from pscanner.corpus.subgraph_ingest_v1 import iter_v1_market_trades  # noqa: E402
+
+
+class _FakeSubgraphClient:
+    """Records every query() invocation and yields canned responses in order.
+
+    `pages_by_query` is keyed by 'maker' (queries containing
+    'makerAssetId_in') or 'taker' (queries containing 'takerAssetId_in').
+    """
+
+    def __init__(self, pages_by_query: dict[str, list[list[dict[str, Any]]]]) -> None:
+        self._pages = pages_by_query
+        self.calls: list[dict[str, Any]] = []
+
+    async def query(self, graphql: str, variables: dict[str, Any]) -> dict[str, Any]:
+        side = "maker" if "makerAssetId_in" in graphql else "taker"
+        self.calls.append({"side": side, "variables": dict(variables)})
+        pages = self._pages.get(side, [])
+        if not pages:
+            return {"orderFilledEvents": []}
+        return {"orderFilledEvents": pages.pop(0)}
+
+
+def _buy_row(idx: int, asset_id: str) -> dict[str, str]:
+    return {
+        "id": f"tx-{idx}_hash-{idx}",
+        "transactionHash": "0x" + str(idx).rjust(64, "0"),
+        "timestamp": str(1_700_000_000 + idx),
+        "orderHash": "0x" + str(idx).rjust(64, "1"),
+        "maker": "0x" + "b" * 40,
+        "taker": "0x" + "c" * 40,
+        "makerAssetId": "0",
+        "takerAssetId": asset_id,
+        "makerAmountFilled": "500000",
+        "takerAmountFilled": "1000000",
+        "fee": "0",
+        "side": "buy",
+        "price": "0.5",
+    }
+
+
+def _sell_row(idx: int, asset_id: str) -> dict[str, str]:
+    return {
+        "id": f"tx-{idx}_hash-{idx}",
+        "transactionHash": "0x" + str(idx).rjust(64, "0"),
+        "timestamp": str(1_700_000_000 + idx),
+        "orderHash": "0x" + str(idx).rjust(64, "1"),
+        "maker": "0x" + "b" * 40,
+        "taker": "0x" + "c" * 40,
+        "makerAssetId": asset_id,
+        "takerAssetId": "0",
+        "makerAmountFilled": "1000000",
+        "takerAmountFilled": "300000",
+        "fee": "0",
+        "side": "sell",
+        "price": "0.3",
+    }
+
+
+@pytest.mark.asyncio
+async def test_paginator_returns_empty_on_no_rows():
+    client = _FakeSubgraphClient(pages_by_query={})
+    out = [
+        (ev, ts)
+        async for ev, ts in iter_v1_market_trades(client=client, asset_ids=["100"], page_size=2)
+    ]
+    assert out == []
+    sides = {c["side"] for c in client.calls}
+    assert sides == {"maker", "taker"}
+
+
+@pytest.mark.asyncio
+async def test_paginator_yields_union_of_buy_and_sell_passes():
+    buys = [_buy_row(i, "100") for i in range(3)]
+    sells = [_sell_row(10 + i, "100") for i in range(2)]
+    client = _FakeSubgraphClient(
+        pages_by_query={
+            "maker": [sells],  # maker query catches SELL rows (maker holds CTF)
+            "taker": [buys],  # taker query catches BUY rows (taker holds CTF)
+        }
+    )
+    out = [
+        (ev, ts)
+        async for ev, ts in iter_v1_market_trades(client=client, asset_ids=["100"], page_size=10)
+    ]
+    assert len(out) == 5
+
+
+@pytest.mark.asyncio
+async def test_paginator_advances_cursor_per_side():
+    buys = [_buy_row(i, "100") for i in range(5)]
+    client = _FakeSubgraphClient(
+        pages_by_query={
+            "maker": [],
+            "taker": [buys[0:2], buys[2:4], buys[4:5]],
+        }
+    )
+    out = [
+        (ev, ts)
+        async for ev, ts in iter_v1_market_trades(client=client, asset_ids=["100"], page_size=2)
+    ]
+    assert len(out) == 5
+    taker_calls = [c for c in client.calls if c["side"] == "taker"]
+    assert len(taker_calls) == 3
+    assert taker_calls[0]["variables"]["cursor"] == ""
+    assert taker_calls[1]["variables"]["cursor"] == "tx-1_hash-1"
+    assert taker_calls[2]["variables"]["cursor"] == "tx-3_hash-3"
+
+
+@pytest.mark.asyncio
+async def test_paginator_rejects_invalid_page_size():
+    client = _FakeSubgraphClient(pages_by_query={})
+    with pytest.raises(ValueError, match="page_size"):
+        async for _ in iter_v1_market_trades(client=client, asset_ids=["100"], page_size=0):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_paginator_short_circuits_on_empty_asset_ids():
+    client = _FakeSubgraphClient(pages_by_query={})
+    out = [x async for x in iter_v1_market_trades(client=client, asset_ids=[], page_size=10)]
+    assert out == []
+    assert client.calls == []

@@ -5,7 +5,7 @@ The V1 Polymarket Orderbook subgraph (`7fu2DWYK…`) emits the pre-#151
 `makerAssetId`/`takerAssetId` (one is `"0"` for USDC), and
 `makerAmountFilled`/`takerAmountFilled` in 6-decimal base units —
 identical to V2's amount conventions. This module owns the V1-specific
-row adapter. The paginator and orchestrator land in later tasks.
+row adapter and paginator. The orchestrator lands in a later task.
 
 The adapter emits the same `OrderFilledEvent` dataclass V2 produces so
 the downstream `event_to_corpus_trade` insert path is shared verbatim.
@@ -15,9 +15,11 @@ Verified against `tests/corpus/fixtures/v1_v2_overlap.json` (Stage 1).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
+from typing import Any
 
 from pscanner.poly.onchain import OrderFilledEvent
+from pscanner.poly.subgraph import SubgraphClient
 
 
 def _parse_int(key: str, raw: object) -> int:
@@ -80,3 +82,128 @@ def subgraph_v1_row_to_event(row: Mapping[str, object]) -> OrderFilledEvent:
         block_number=0,
         log_index=0,
     )
+
+
+# ---------------------------------------------------------------------------
+# Paginator + iterator
+# ---------------------------------------------------------------------------
+
+_MAX_PAGE_SIZE = 1000
+
+_V1_QUERY_MAKER_SIDE = """
+query($assets: [String!]!, $cursor: String!, $first: Int!) {
+  orderFilledEvents(
+    where: { makerAssetId_in: $assets, id_gt: $cursor }
+    first: $first
+    orderBy: id
+    orderDirection: asc
+  ) {
+    id transactionHash timestamp orderHash
+    maker taker makerAssetId takerAssetId
+    makerAmountFilled takerAmountFilled fee
+  }
+}
+"""
+
+_V1_QUERY_TAKER_SIDE = """
+query($assets: [String!]!, $cursor: String!, $first: Int!) {
+  orderFilledEvents(
+    where: { takerAssetId_in: $assets, id_gt: $cursor }
+    first: $first
+    orderBy: id
+    orderDirection: asc
+  ) {
+    id transactionHash timestamp orderHash
+    maker taker makerAssetId takerAssetId
+    makerAmountFilled takerAmountFilled fee
+  }
+}
+"""
+
+
+async def _paginate_v1_side(
+    *,
+    client: SubgraphClient,
+    graphql: str,
+    asset_ids: Sequence[str],
+    page_size: int,
+) -> AsyncGenerator[tuple[OrderFilledEvent, int]]:
+    """Yield decoded events from one V1 query (maker or taker side).
+
+    Args:
+        client: Open ``SubgraphClient``.
+        graphql: GraphQL query string (``_V1_QUERY_MAKER_SIDE`` or
+            ``_V1_QUERY_TAKER_SIDE``).
+        asset_ids: CTF token ids (as decimal strings) to filter on.
+        page_size: Rows per query page (≤ ``_MAX_PAGE_SIZE``).
+
+    Yields:
+        ``(event, ts)`` tuples where ``ts`` is the Unix timestamp integer
+        from the subgraph ``timestamp`` field.
+    """
+    cursor = ""
+    while True:
+        result = await client.query(
+            graphql,
+            {"assets": list(asset_ids), "cursor": cursor, "first": page_size},
+        )
+        rows: list[dict[str, Any]] = result.get("orderFilledEvents") or []
+        if not rows:
+            return
+        for row in rows:
+            event = subgraph_v1_row_to_event(row)
+            ts = int(str(row["timestamp"]))
+            yield event, ts
+        if len(rows) < page_size:
+            return
+        cursor = str(rows[-1]["id"])
+
+
+async def iter_v1_market_trades(
+    *,
+    client: SubgraphClient,
+    asset_ids: Sequence[str],
+    page_size: int = _MAX_PAGE_SIZE,
+) -> AsyncIterator[tuple[OrderFilledEvent, int]]:
+    """Yield every V1 fill involving any of ``asset_ids``.
+
+    V1's schema has no ``_or`` operator, so two separate paginated passes
+    are required: one on ``makerAssetId_in`` (catches SELL rows where the
+    maker held a CTF token) and one on ``takerAssetId_in`` (catches BUY
+    rows where the taker held a CTF token). The two passes are disjoint for
+    valid CTF↔USDC fills; the downstream ``CorpusTradesRepo.insert_batch``
+    ``INSERT OR IGNORE`` absorbs any accidental overlap.
+
+    Empty ``asset_ids`` short-circuits to an empty iterator (no query).
+
+    Args:
+        client: Open ``SubgraphClient``.
+        asset_ids: CTF token ids (as bare decimal strings) belonging to one
+            condition. Pass both YES and NO token ids for a binary market.
+        page_size: Rows per query, capped at ``_MAX_PAGE_SIZE`` (1000).
+            Reduce for lower memory pressure during tests.
+
+    Yields:
+        ``(event, ts)`` tuples.
+
+    Raises:
+        ValueError: ``page_size`` is out of the ``1.._MAX_PAGE_SIZE`` range.
+    """
+    if page_size <= 0 or page_size > _MAX_PAGE_SIZE:
+        raise ValueError(f"page_size must be in 1..{_MAX_PAGE_SIZE}, got {page_size}")
+    if not asset_ids:
+        return
+    async for ev, ts in _paginate_v1_side(
+        client=client,
+        graphql=_V1_QUERY_MAKER_SIDE,
+        asset_ids=asset_ids,
+        page_size=page_size,
+    ):
+        yield ev, ts
+    async for ev, ts in _paginate_v1_side(
+        client=client,
+        graphql=_V1_QUERY_TAKER_SIDE,
+        asset_ids=asset_ids,
+        page_size=page_size,
+    ):
+        yield ev, ts
