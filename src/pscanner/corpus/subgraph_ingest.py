@@ -37,8 +37,9 @@ def _clear_truncation_flags(conn: sqlite3.Connection, *, threshold: int = 3000) 
     truncation flag iff the count is at or above `threshold` (default
     3000 = the REST `/trades` offset cap).
 
-    Inlined from the deleted ``pscanner.corpus.onchain_backfill`` module;
-    ``run_subgraph_backfill`` is the only remaining caller.
+    Inlined from the deleted ``pscanner.corpus.onchain_backfill`` module.
+    Called by ``run_subgraph_backfill`` and by
+    ``pscanner.corpus.subgraph_dispatch.run_subgraph_backfill_dispatched``.
     """
     rows = conn.execute(
         """
@@ -504,7 +505,9 @@ async def run_subgraph_backfill(
                 error=str(exc),
             )
 
-    cleared = _clear_truncation_flags(conn) if processed > 0 else 0
+    cleared = (
+        _clear_truncation_flags(conn, threshold=truncation_threshold) if processed > 0 else 0
+    )
 
     summary = SubgraphRunSummary(
         markets_processed=processed,

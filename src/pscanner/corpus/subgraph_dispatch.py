@@ -17,6 +17,11 @@ import structlog
 
 from pscanner.corpus.subgraph_ingest import (
     SubgraphRunSummary,
+    # `_clear_truncation_flags` is module-private but shared deliberately —
+    # both the V2 orchestrator and this dispatcher need it as the post-run
+    # cleanup primitive. Promoting it to the public API would invite ad-hoc
+    # callers; keeping it private + cross-imported keeps the call sites
+    # explicit and greppable.
     _clear_truncation_flags,
     run_subgraph_backfill,
 )
