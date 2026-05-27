@@ -158,6 +158,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
       market_slug TEXT,
       onchain_trades_count INTEGER,
       onchain_processed_at INTEGER,
+      onchain_v1_processed_at INTEGER,
       tags_json TEXT NOT NULL DEFAULT '[]',
       categories_json TEXT NOT NULL DEFAULT '[]',
       outcome_side_backfilled_at INTEGER,
@@ -340,6 +341,11 @@ _MIGRATIONS: tuple[str, ...] = (
     # corpus_trades.ts for the market is < V2_START (1775220779,
     # 2026-04-03). Cleared by the future V1 adapter.
     "ALTER TABLE corpus_markets ADD COLUMN v1_history_pending INTEGER NOT NULL DEFAULT 0",
+    # V1 adapter sentinel (issue #193). Stamped by `run_v1_subgraph_backfill`
+    # when a market's V1 pages have been successfully drained. Separate
+    # column from `onchain_processed_at` so hybrid markets (V2 + V1 both
+    # ran) carry both sentinels independently.
+    "ALTER TABLE corpus_markets ADD COLUMN onchain_v1_processed_at INTEGER",
 )
 
 
