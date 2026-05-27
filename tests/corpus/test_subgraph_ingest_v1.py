@@ -440,3 +440,46 @@ async def test_orchestrator_respects_limit(tmp_path: Path):
         assert summary.markets_processed + summary.markets_zero_events == 1
     finally:
         conn.close()
+
+
+@pytest.mark.asyncio
+async def test_hybrid_market_sets_both_sentinels(tmp_path: Path):
+    """V2 ran first (sets onchain_processed_at), then V1 runs (sets _v1 column).
+
+    Both sentinels end up populated; v1_history_pending flips to 0; V2's
+    sentinel value is unchanged.
+    """
+    conn = init_corpus_db(tmp_path / "corpus.sqlite3")
+    try:
+        cid = "0x" + "f" * 64
+        aid = "7777777777"
+        _seed_v1_pending_market(conn, cid, aid)
+        # Simulate V2 already having processed this market.
+        conn.execute(
+            "UPDATE corpus_markets SET onchain_processed_at = ? WHERE condition_id = ?",
+            (1_600_000_000, cid),
+        )
+        conn.commit()
+
+        rows = [_fat_buy_row(0, aid)]
+        client = _FakeSubgraphClient(pages_by_query={"maker": [], "taker": [rows]})
+        await run_v1_subgraph_backfill(
+            conn=conn,
+            client=client,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+            page_size=1000,
+            limit=None,
+            now_ts=1_700_000_999,
+        )
+
+        row = conn.execute(
+            """
+            SELECT onchain_processed_at, onchain_v1_processed_at, v1_history_pending
+            FROM corpus_markets WHERE condition_id = ?
+            """,
+            (cid,),
+        ).fetchone()
+        assert row["onchain_processed_at"] == 1_600_000_000  # untouched by V1
+        assert row["onchain_v1_processed_at"] == 1_700_000_999  # set by V1
+        assert row["v1_history_pending"] == 0  # cleared by V1
+    finally:
+        conn.close()
