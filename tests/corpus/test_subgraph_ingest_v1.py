@@ -375,7 +375,7 @@ async def test_orchestrator_drains_one_market_and_stamps_sentinel(tmp_path: Path
             conn=conn, client=client, page_size=1000, limit=None, now_ts=1_700_000_999
         )
         assert summary.markets_processed == 1
-        assert summary.markets_zero_events == 0
+        assert summary.markets_no_new_trades == 0
         assert summary.markets_failed == 0
         assert summary.events_decoded == 2
         assert summary.trades_inserted == 2
@@ -401,7 +401,7 @@ async def test_orchestrator_does_not_stamp_on_zero_events(tmp_path: Path):
         summary = await run_v1_subgraph_backfill(
             conn=conn, client=client, page_size=1000, limit=None, now_ts=1_700_000_999
         )
-        assert summary.markets_zero_events == 1
+        assert summary.markets_no_new_trades == 1
         assert summary.markets_processed == 0
         row = conn.execute(
             "SELECT onchain_v1_processed_at, v1_history_pending FROM corpus_markets"
@@ -446,7 +446,7 @@ async def test_orchestrator_respects_limit(tmp_path: Path):
         summary = await run_v1_subgraph_backfill(
             conn=conn, client=client, page_size=1000, limit=1, now_ts=1_700_000_999
         )
-        assert summary.markets_processed + summary.markets_zero_events == 1
+        assert summary.markets_processed + summary.markets_no_new_trades == 1
     finally:
         conn.close()
 

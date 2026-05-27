@@ -229,11 +229,19 @@ async def iter_v1_market_trades(
 
 @dataclass(frozen=True)
 class V1SubgraphRunSummary:
-    """Aggregate counts returned by ``run_v1_subgraph_backfill``."""
+    """Aggregate counts returned by ``run_v1_subgraph_backfill``.
+
+    ``markets_no_new_trades`` covers any market where the drain produced
+    zero inserted rows. That includes both genuine zero-event responses
+    AND markets where every decoded event was filtered out (sub-floor
+    notional, dup against existing ``corpus_trades``, or
+    ``UnsupportedFill``/``UnresolvableAsset`` per row). The sentinel is
+    not written in any of these cases so re-runs pick up the market again.
+    """
 
     markets_processed: int
     markets_failed: int
-    markets_zero_events: int
+    markets_no_new_trades: int
     events_decoded: int
     trades_inserted: int
     skipped_unsupported: int
@@ -377,7 +385,7 @@ async def run_v1_subgraph_backfill(
 
     processed = 0
     failed = 0
-    zero_events = 0
+    no_new_trades = 0
     total_events = 0
     total_inserted = 0
     total_unsupported = 0
@@ -410,9 +418,9 @@ async def run_v1_subgraph_backfill(
         total_dups += dups
 
         if inserted == 0:
-            zero_events += 1
+            no_new_trades += 1
             _LOG.info(
-                "subgraph.v1.zero_events",
+                "subgraph.v1.no_new_trades",
                 idx=i,
                 of=len(pending),
                 condition_id=market.condition_id,
@@ -438,7 +446,7 @@ async def run_v1_subgraph_backfill(
     summary = V1SubgraphRunSummary(
         markets_processed=processed,
         markets_failed=failed,
-        markets_zero_events=zero_events,
+        markets_no_new_trades=no_new_trades,
         events_decoded=total_events,
         trades_inserted=total_inserted,
         skipped_unsupported=total_unsupported,

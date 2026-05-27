@@ -710,10 +710,18 @@ async def _cmd_subgraph_backfill(args: argparse.Namespace) -> int:
                 summary.v1_summary.markets_processed if summary.v1_summary else None
             ),
             v1_trades_inserted=(summary.v1_summary.trades_inserted if summary.v1_summary else None),
-            v1_markets_zero_events=(
-                summary.v1_summary.markets_zero_events if summary.v1_summary else None
+            v1_markets_no_new_trades=(
+                summary.v1_summary.markets_no_new_trades if summary.v1_summary else None
             ),
             v1_dups_dropped=(summary.v1_summary.dups_dropped if summary.v1_summary else None),
+            # V2's internal _clear_truncation_flags call (inside
+            # run_subgraph_backfill) is what actually clears markets that V2
+            # filled — the dispatcher's post-run call typically reports 0
+            # because the work was already done. Surface both so the operator
+            # sees the real V2 clearance count.
+            v2_truncation_flags_cleared=(
+                summary.v2_summary.truncation_flags_cleared if summary.v2_summary else None
+            ),
             truncation_flags_cleared=summary.truncation_flags_cleared,
         )
         return 0
