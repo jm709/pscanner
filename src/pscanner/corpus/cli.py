@@ -45,7 +45,7 @@ from pscanner.corpus.resolutions import (
     record_manifold_resolutions,
     record_resolutions,
 )
-from pscanner.corpus.subgraph_ingest import run_subgraph_backfill
+from pscanner.corpus.subgraph_dispatch import SubgraphVersion, run_subgraph_backfill_dispatched
 from pscanner.kalshi.client import KalshiClient
 from pscanner.kalshi.ids import KalshiMarketTicker
 from pscanner.manifold.client import ManifoldClient
@@ -63,6 +63,10 @@ _DEFAULT_SUBGRAPH_PAGE_SIZE = 1000
 # "Polymarket Orderbook" and both Exchange + NegRiskExchange contracts write
 # into the same OrderFilledEvent entity.
 _DEFAULT_SUBGRAPH_ID = "B9mm21DKCex8ka4g8cteQU4NQqtviwmcTjQAYLbzQ1eR"
+# Pre-#151 V1 subgraph (old schema: OrderFill entity, marketId/outcomeIndex
+# filter, BigInt price x size). Indexes events from before 2026-04-03 that the
+# V2 subgraph cannot cover.
+_DEFAULT_V1_SUBGRAPH_ID = "7fu2DWYK93ePfzB24c2wrP94S3x4LGHUrQxphhoEypyY"
 _GATEWAY_URL_TEMPLATE = "https://gateway.thegraph.com/api/{api_key}/subgraphs/id/{subgraph_id}"
 
 
@@ -158,13 +162,29 @@ def build_corpus_parser() -> argparse.ArgumentParser:
         help="Graph Studio API key. Falls back to $GRAPH_API_KEY.",
     )
     sg.add_argument(
-        "--subgraph-id",
+        "--subgraph-version",
+        type=str,
+        default="both",
+        choices=("v1", "v2", "both"),
+        help="Which subgraph(s) to backfill from (default: both).",
+    )
+    sg.add_argument(
+        "--v2-subgraph-id",
         type=str,
         default=_DEFAULT_SUBGRAPH_ID,
-        help=(
-            "Subgraph deployment id. The default is the verified Polymarket "
-            "Orderbook subgraph on The Graph."
-        ),
+        help=("V2 subgraph deployment id (default: verified Polymarket Orderbook subgraph)."),
+    )
+    sg.add_argument(
+        "--v1-subgraph-id",
+        type=str,
+        default=_DEFAULT_V1_SUBGRAPH_ID,
+        help=("V1 subgraph deployment id (default: pre-#151 Polymarket V1 Orderbook subgraph)."),
+    )
+    sg.add_argument(
+        "--subgraph-id",
+        type=str,
+        default=None,
+        help=("DEPRECATED: alias for --v2-subgraph-id. Will be removed in a future release."),
     )
     sg.add_argument(
         "--rpm",
@@ -213,6 +233,40 @@ def build_corpus_parser() -> argparse.ArgumentParser:
     sp_backfill_outcome.add_argument("--limit", type=int, default=None)
     sp_backfill_outcome.add_argument("--dry-run", action="store_true")
     return parser
+
+
+@dataclass(frozen=True)
+class _ResolvedSubgraphFlags:
+    """Materialized subgraph flags after deprecation-alias resolution."""
+
+    v2_subgraph_id: str
+    v1_subgraph_id: str
+    versions: tuple[SubgraphVersion, ...]
+
+
+def _resolve_subgraph_flags(args: argparse.Namespace) -> _ResolvedSubgraphFlags:
+    """Apply the ``--subgraph-id`` deprecation alias and version selection.
+
+    Logs ``subgraph.cli.deprecated_flag`` when the alias is used so the
+    operator gets one notice per invocation.
+    """
+    v2_id = args.v2_subgraph_id
+    if args.subgraph_id is not None:
+        _log.warning(
+            "subgraph.cli.deprecated_flag",
+            flag="--subgraph-id",
+            replacement="--v2-subgraph-id",
+        )
+        v2_id = args.subgraph_id
+    if args.subgraph_version == "both":
+        versions: tuple[SubgraphVersion, ...] = ("v2", "v1")
+    else:
+        versions = (args.subgraph_version,)
+    return _ResolvedSubgraphFlags(
+        v2_subgraph_id=v2_id,
+        v1_subgraph_id=args.v1_subgraph_id,
+        versions=versions,
+    )
 
 
 _GammaOrDataClient = GammaClient | DataClient
@@ -625,28 +679,49 @@ def _default_duckdb_memory() -> str:
 
 
 async def _cmd_subgraph_backfill(args: argparse.Namespace) -> int:
-    """Run the subgraph-driven per-market backfill."""
+    """Run the subgraph-driven per-market backfill (V1+V2 dispatcher)."""
     api_key = args.api_key or os.environ.get("GRAPH_API_KEY")
     if not api_key:
         raise SystemExit("subgraph-backfill requires --api-key or $GRAPH_API_KEY")
-    url = _GATEWAY_URL_TEMPLATE.format(api_key=api_key, subgraph_id=args.subgraph_id)
+    resolved = _resolve_subgraph_flags(args)
+    v2_url = _GATEWAY_URL_TEMPLATE.format(api_key=api_key, subgraph_id=resolved.v2_subgraph_id)
+    v1_url = _GATEWAY_URL_TEMPLATE.format(api_key=api_key, subgraph_id=resolved.v1_subgraph_id)
     conn = init_corpus_db(Path(args.db))
     try:
-        async with SubgraphClient(url=url, rpm=args.rpm) as client:
-            summary = await run_subgraph_backfill(
+        async with (
+            SubgraphClient(url=v2_url, rpm=args.rpm) as v2_client,
+            SubgraphClient(url=v1_url, rpm=args.rpm) as v1_client,
+        ):
+            summary = await run_subgraph_backfill_dispatched(
                 conn=conn,
-                client=client,
+                v1_client=v1_client,
+                v2_client=v2_client,
+                versions=resolved.versions,
                 page_size=args.page_size,
                 limit=args.limit,
             )
         _log.info(
             "subgraph.cli_summary",
-            markets_processed=summary.markets_processed,
-            markets_failed=summary.markets_failed,
-            events_decoded=summary.events_decoded,
-            trades_inserted=summary.trades_inserted,
-            skipped_unsupported=summary.skipped_unsupported,
-            skipped_unresolvable=summary.skipped_unresolvable,
+            v2_markets_processed=(
+                summary.v2_summary.markets_processed if summary.v2_summary else None
+            ),
+            v2_trades_inserted=(summary.v2_summary.trades_inserted if summary.v2_summary else None),
+            v1_markets_processed=(
+                summary.v1_summary.markets_processed if summary.v1_summary else None
+            ),
+            v1_trades_inserted=(summary.v1_summary.trades_inserted if summary.v1_summary else None),
+            v1_markets_no_new_trades=(
+                summary.v1_summary.markets_no_new_trades if summary.v1_summary else None
+            ),
+            v1_dups_dropped=(summary.v1_summary.dups_dropped if summary.v1_summary else None),
+            # V2's internal _clear_truncation_flags call (inside
+            # run_subgraph_backfill) is what actually clears markets that V2
+            # filled — the dispatcher's post-run call typically reports 0
+            # because the work was already done. Surface both so the operator
+            # sees the real V2 clearance count.
+            v2_truncation_flags_cleared=(
+                summary.v2_summary.truncation_flags_cleared if summary.v2_summary else None
+            ),
             truncation_flags_cleared=summary.truncation_flags_cleared,
         )
         return 0

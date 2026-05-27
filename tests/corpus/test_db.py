@@ -731,3 +731,23 @@ def test_cross_platform_rows_coexist() -> None:
         assert [r["platform"] for r in rows] == ["kalshi", "manifold", "polymarket"]
     finally:
         conn.close()
+
+
+def test_corpus_markets_has_onchain_v1_processed_at_column(tmp_path: Path) -> None:
+    conn = init_corpus_db(tmp_path / "corpus.sqlite3")
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(corpus_markets)").fetchall()}
+        assert "onchain_v1_processed_at" in cols
+    finally:
+        conn.close()
+
+
+def test_corpus_markets_migration_is_idempotent_for_v1_column(tmp_path: Path) -> None:
+    db = tmp_path / "corpus.sqlite3"
+    init_corpus_db(db).close()
+    conn = init_corpus_db(db)
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(corpus_markets)").fetchall()}
+        assert "onchain_v1_processed_at" in cols
+    finally:
+        conn.close()

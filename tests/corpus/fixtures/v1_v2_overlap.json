@@ -1,0 +1,114 @@
+{
+  "asset_index": {
+    "31766935524058663070405983804663917978960087327501512757848582448134393241922": "NO",
+    "63586620628756015058616403521099137018911742768824051367331188904593189743777": "YES"
+  },
+  "condition_id": "0x36e8ca24d2a13435f519f15580d42b45cdbe3bc425fb39a7c2733260357af0fa",
+  "cross_subgraph_match": false,
+  "v1_buy_rows": [
+    {
+      "fee": "0",
+      "id": "0x80bb0394752d606ff7290917cb6026566e8b2f786744762d2da011c0aeda9323_0x6cc984ebca9883e44255f96b697a7bdbf974c41459c95fb42f62dcaa47bdb357",
+      "maker": "0x655edb18bbb3761f4bc298f0909f1b9f6e741ab3",
+      "makerAmountFilled": "37316000",
+      "makerAssetId": "0",
+      "orderHash": "0x6cc984ebca9883e44255f96b697a7bdbf974c41459c95fb42f62dcaa47bdb357",
+      "price": "1.018329938900203665987780040733198",
+      "side": "buy",
+      "taker": "0x9b9ff79cdc3c6dc3abbc494b06ea577567bea26a",
+      "takerAmountFilled": "38000000",
+      "takerAssetId": "63586620628756015058616403521099137018911742768824051367331188904593189743777",
+      "timestamp": "1775220781",
+      "transactionHash": "0x80bb0394752d606ff7290917cb6026566e8b2f786744762d2da011c0aeda9323"
+    },
+    {
+      "fee": "0",
+      "id": "0x80bb0394752d606ff7290917cb6026566e8b2f786744762d2da011c0aeda9323_0xfe36673b14f2b3a47c2f6935740b9b30346f3c673e572b11b85ca73228a414e1",
+      "maker": "0x9b9ff79cdc3c6dc3abbc494b06ea577567bea26a",
+      "makerAmountFilled": "684000",
+      "makerAssetId": "0",
+      "orderHash": "0xfe36673b14f2b3a47c2f6935740b9b30346f3c673e572b11b85ca73228a414e1",
+      "price": "55.55555555555555555555555555555556",
+      "side": "buy",
+      "taker": "0xc5d563a36ae78145c45a50134d48a1215220f80a",
+      "takerAmountFilled": "38000000",
+      "takerAssetId": "31766935524058663070405983804663917978960087327501512757848582448134393241922",
+      "timestamp": "1775220781",
+      "transactionHash": "0x80bb0394752d606ff7290917cb6026566e8b2f786744762d2da011c0aeda9323"
+    }
+  ],
+  "v1_sell_rows": [
+    {
+      "fee": "0",
+      "id": "0x2cc1c0b49cf201a56faed5f40f54dfdfe54b6502af303920a006991a3573877c_0xf46ea3a449e937eaeba50c15cd80250e1081d84bd1e5c7790844b58b2aafdd7d",
+      "maker": "0xd6c2222ae00d99e97acd234f49ef164ab23ba53d",
+      "makerAmountFilled": "7000000",
+      "makerAssetId": "63586620628756015058616403521099137018911742768824051367331188904593189743777",
+      "orderHash": "0xf46ea3a449e937eaeba50c15cd80250e1081d84bd1e5c7790844b58b2aafdd7d",
+      "price": "0.982",
+      "side": "sell",
+      "taker": "0xc5d563a36ae78145c45a50134d48a1215220f80a",
+      "takerAmountFilled": "6874000",
+      "takerAssetId": "0",
+      "timestamp": "1775221071",
+      "transactionHash": "0x2cc1c0b49cf201a56faed5f40f54dfdfe54b6502af303920a006991a3573877c"
+    },
+    {
+      "fee": "0",
+      "id": "0x4b5c718007b3b9c15e7e19a4e7c151c7dede005871f094de9fec195c3d4cee3f_0x9b5616828a6895ef30b1d7cbdc4f1c176e36b0798bf488cab4b47fd0f3c8b02d",
+      "maker": "0xb414bd8d17c921cdaf49023f653710c2b5324cd5",
+      "makerAmountFilled": "10000000",
+      "makerAssetId": "63586620628756015058616403521099137018911742768824051367331188904593189743777",
+      "orderHash": "0x9b5616828a6895ef30b1d7cbdc4f1c176e36b0798bf488cab4b47fd0f3c8b02d",
+      "price": "0.983",
+      "side": "sell",
+      "taker": "0x306ffa189839bdd6e2ae85b59e230c84cc8a1972",
+      "takerAmountFilled": "9830000",
+      "takerAssetId": "0",
+      "timestamp": "1775221155",
+      "transactionHash": "0x4b5c718007b3b9c15e7e19a4e7c151c7dede005871f094de9fec195c3d4cee3f"
+    }
+  ],
+  "v2_reference_rows": [
+    {
+      "fee": "0",
+      "id": "0x5a829009714d1e2b8e17383078b18f64ef195da5ccd056107ecf01c5a4737ed1-255",
+      "maker": {
+        "id": "0x6e0c80c90ea6c15917308f820eac91ce2724b5b5"
+      },
+      "makerAmountFilled": "2500000",
+      "market": {
+        "id": "102936224134271070189104847090829839924697394514566827387181305960175107677216"
+      },
+      "orderHash": "0xe6fb5cb4d88c728f34ebc10ba8a641fc646a1baf99e74d89192614973c1af784",
+      "side": 0,
+      "taker": {
+        "id": "0xd74b83e161d23ef17c6247d4b2f6be07160ced75"
+      },
+      "takerAmountFilled": "5000000",
+      "timestamp": "1775220779",
+      "tokenId": "102936224134271070189104847090829839924697394514566827387181305960175107677216",
+      "transactionHash": "0x5a829009714d1e2b8e17383078b18f64ef195da5ccd056107ecf01c5a4737ed1"
+    },
+    {
+      "fee": "0",
+      "id": "0x5a829009714d1e2b8e17383078b18f64ef195da5ccd056107ecf01c5a4737ed1-257",
+      "maker": {
+        "id": "0xd74b83e161d23ef17c6247d4b2f6be07160ced75"
+      },
+      "makerAmountFilled": "2500000",
+      "market": {
+        "id": "45763018441764333771124945243746174684578244015331389396782339063349542289693"
+      },
+      "orderHash": "0x0c970e909e59bc0632c4687337ae0c1b9a45ac8caa18d18d776d7d692a51b206",
+      "side": 0,
+      "taker": {
+        "id": "0xe111180000d2663c0091e4f400237545b87b996b"
+      },
+      "takerAmountFilled": "5000000",
+      "timestamp": "1775220779",
+      "tokenId": "45763018441764333771124945243746174684578244015331389396782339063349542289693",
+      "transactionHash": "0x5a829009714d1e2b8e17383078b18f64ef195da5ccd056107ecf01c5a4737ed1"
+    }
+  ]
+}

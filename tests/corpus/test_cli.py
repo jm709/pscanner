@@ -7,18 +7,22 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from pscanner.corpus import cli as corpus_cli
 from pscanner.corpus.cli import (
     _DEFAULT_SUBGRAPH_ID,
     _HANDLERS,
     _register_missing_polymarket_resolutions,
+    _resolve_subgraph_flags,
     build_corpus_parser,
     run_corpus_command,
 )
 from pscanner.corpus.db import apply_read_pragmas, init_corpus_db
 from pscanner.corpus.repos import CorpusMarket, CorpusMarketsRepo
+from pscanner.corpus.subgraph_dispatch import DispatchedRunSummary
 from pscanner.corpus.subgraph_ingest import SubgraphRunSummary
+from pscanner.corpus.subgraph_ingest_v1 import V1SubgraphRunSummary
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
 
@@ -105,21 +109,30 @@ async def test_build_features_command_smokes(tmp_path: Path) -> None:
 async def test_subgraph_backfill_subcommand_dispatches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`pscanner corpus subgraph-backfill --db ... --api-key X` dispatches the handler."""
+    """`pscanner corpus subgraph-backfill` calls the V1+V2 dispatcher."""
     db_path = tmp_path / "c.sqlite3"
 
     captured: dict[str, object] = {}
 
-    async def fake_run(*, conn, client, page_size, limit, truncation_threshold=3000):  # type: ignore[no-untyped-def]
-        captured["conn"] = conn
-        captured["client_url"] = client.url
-        captured["client_rpm"] = client.rpm
+    _fake_v2_summary = SubgraphRunSummary(0, 0, 0, 0, 0, 0, 0)
+    _fake_v1_summary = V1SubgraphRunSummary(0, 0, 0, 0, 0, 0, 0, 0)
+
+    async def fake_dispatched(  # type: ignore[no-untyped-def]
+        *, conn, v1_client, v2_client, versions, page_size, limit, **kwargs
+    ):
+        captured["v2_url"] = v2_client.url
+        captured["v1_url"] = v1_client.url
+        captured["v2_rpm"] = v2_client.rpm
         captured["page_size"] = page_size
         captured["limit"] = limit
-        captured["truncation_threshold"] = truncation_threshold
-        return SubgraphRunSummary(0, 0, 0, 0, 0, 0, 0)
+        captured["versions"] = versions
+        return DispatchedRunSummary(
+            v2_summary=_fake_v2_summary,
+            v1_summary=_fake_v1_summary,
+            truncation_flags_cleared=0,
+        )
 
-    monkeypatch.setattr(corpus_cli, "run_subgraph_backfill", fake_run)
+    monkeypatch.setattr(corpus_cli, "run_subgraph_backfill_dispatched", fake_dispatched)
 
     rc = await corpus_cli.run_corpus_command(
         [
@@ -128,7 +141,7 @@ async def test_subgraph_backfill_subcommand_dispatches(
             str(db_path),
             "--api-key",
             "test-key",
-            "--subgraph-id",
+            "--subgraph-id",  # deprecated alias — should map to V2 URL
             "abc123",
             "--rpm",
             "120",
@@ -137,12 +150,11 @@ async def test_subgraph_backfill_subcommand_dispatches(
         ]
     )
     assert rc == 0
-    assert "test-key" in str(captured["client_url"])
-    assert "abc123" in str(captured["client_url"])
-    assert captured["client_rpm"] == 120
+    assert "test-key" in str(captured["v2_url"])
+    assert "abc123" in str(captured["v2_url"])
+    assert captured["v2_rpm"] == 120
     assert captured["limit"] == 5
     assert captured["page_size"] == 1000  # default _DEFAULT_SUBGRAPH_PAGE_SIZE
-    assert captured["truncation_threshold"] == 3000  # orchestrator default
 
 
 @pytest.mark.asyncio
@@ -334,3 +346,53 @@ def test_backfill_gamma_tags_default_rpm_is_50() -> None:
     parser = build_corpus_parser()
     args = parser.parse_args(["backfill-gamma-tags", "--db", "x.sqlite3"])
     assert args.rpm == 50
+
+
+def test_subgraph_backfill_help_lists_version_flags() -> None:
+    parser = build_corpus_parser()
+    sub_actions = [a for a in parser._actions if hasattr(a, "_name_parser_map")]
+    assert sub_actions, "no subparser found"
+    subparsers = sub_actions[0].choices
+    assert subparsers is not None, "subparser choices must not be None"
+    sg = subparsers["subgraph-backfill"]  # type: ignore[index]  # ty:ignore[not-subscriptable]
+    help_text = sg.format_help()
+    assert "--subgraph-version" in help_text
+    assert "--v1-subgraph-id" in help_text
+    assert "--v2-subgraph-id" in help_text
+    assert "--subgraph-id" in help_text  # deprecated alias preserved
+
+
+def test_subgraph_backfill_subgraph_id_alias_maps_to_v2() -> None:
+    parser = build_corpus_parser()
+    args = parser.parse_args(["subgraph-backfill", "--subgraph-id", "deprecated-id-value"])
+    with capture_logs() as logs:
+        resolved = _resolve_subgraph_flags(args)
+    assert resolved.v2_subgraph_id == "deprecated-id-value"
+    assert any(
+        entry.get("event") == "subgraph.cli.deprecated_flag"
+        and entry.get("flag") == "--subgraph-id"
+        for entry in logs
+    ), f"deprecation warning not emitted; saw events: {[e.get('event') for e in logs]}"
+
+
+def test_subgraph_backfill_no_deprecation_warning_when_alias_unused() -> None:
+    parser = build_corpus_parser()
+    args = parser.parse_args(["subgraph-backfill", "--v2-subgraph-id", "explicit-v2"])
+    with capture_logs() as logs:
+        resolved = _resolve_subgraph_flags(args)
+    assert resolved.v2_subgraph_id == "explicit-v2"
+    assert not any(entry.get("event") == "subgraph.cli.deprecated_flag" for entry in logs)
+
+
+def test_subgraph_backfill_default_version_is_both() -> None:
+    parser = build_corpus_parser()
+    args = parser.parse_args(["subgraph-backfill"])
+    resolved = _resolve_subgraph_flags(args)
+    assert resolved.versions == ("v2", "v1")
+
+
+def test_subgraph_backfill_version_v1_only() -> None:
+    parser = build_corpus_parser()
+    args = parser.parse_args(["subgraph-backfill", "--subgraph-version", "v1"])
+    resolved = _resolve_subgraph_flags(args)
+    assert resolved.versions == ("v1",)
