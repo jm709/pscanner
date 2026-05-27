@@ -36,6 +36,8 @@ _GATEWAY = "https://gateway.thegraph.com/api/{key}/subgraphs/id/{id}"
 _OVERLAP_MIN = 1775220779
 _OVERLAP_MAX = 1777374040
 _MAX_RETRIES = 3
+# Spec: "Pick representative samples (>=2 BUY, >=2 SELL)".
+_MIN_SAMPLE_PER_SIDE = 2
 
 _V1_Q_MAKER = """
 query($ids: [String!]!, $tmin: BigInt!, $tmax: BigInt!, $first: Int!) {
@@ -103,6 +105,53 @@ def _load_asset_ids(db: str, condition_id: str) -> tuple[list[str], list[dict]]:
     finally:
         conn.close()
     return [r["asset_id"] for r in rows], [dict(r) for r in rows]
+
+
+def _filter_v1_sides(
+    v1_maker: list[dict],
+    v1_taker: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    """Filter V1 raw query results to CTF<->USDC fills only, with drop diagnostics.
+
+    V1 maker-side query (``makerAssetId_in``) returns all events where the maker
+    held a CTF token, including CTF<->CTF split/merge events.  Valid BUY fills
+    have ``takerAssetId=="0"`` (USDC).  Mirror logic applies for taker-side.
+
+    Args:
+        v1_maker: Raw rows from the ``makerAssetId_in`` query (SELL side).
+        v1_taker: Raw rows from the ``takerAssetId_in`` query (BUY side).
+
+    Returns:
+        Tuple of (v1_buy_rows, v1_sell_rows) containing only CTF<->USDC fills.
+    """
+    # BUY: taker held the CTF token; for a valid CTF<->USDC fill the maker pays
+    # USDC so makerAssetId must be "0".
+    v1_buy_rows: list[dict] = []
+    buy_drops = 0
+    for r in v1_taker:
+        if r.get("makerAssetId") == "0":
+            v1_buy_rows.append(r)
+        else:
+            buy_drops += 1
+
+    # SELL: maker held the CTF token; for a valid CTF<->USDC fill the taker
+    # receives USDC so takerAssetId must be "0".
+    v1_sell_rows: list[dict] = []
+    sell_drops = 0
+    for r in v1_maker:
+        if r.get("takerAssetId") == "0":
+            v1_sell_rows.append(r)
+        else:
+            sell_drops += 1
+
+    if buy_drops or sell_drops:
+        sys.stderr.write(
+            f"dropped {buy_drops} split/merge rows from V1 BUY query, "
+            f"{sell_drops} from SELL query (these are CTF<->CTF fills, "
+            "not CTF<->USDC trades)\n"
+        )
+
+    return v1_buy_rows, v1_sell_rows
 
 
 def _check_v1_sanity(buy_rows: list[dict], sell_rows: list[dict]) -> list[str]:
@@ -227,15 +276,13 @@ async def _amain(argv: list[str]) -> int:
         sys.stderr.write(f"error: {exc}\n")
         return 5
 
-    # SELL from maker's POV: maker holds CTF token, takerAssetId=="0".
-    v1_sell_rows = [r for r in v1_maker if r.get("takerAssetId") == "0"]
-    # BUY from maker's POV: maker pays USDC, makerAssetId=="0".
-    v1_buy_rows = [r for r in v1_taker if r.get("makerAssetId") == "0"]
+    v1_buy_rows, v1_sell_rows = _filter_v1_sides(v1_maker, v1_taker)
 
-    if len(v1_sell_rows) < 1 or len(v1_buy_rows) < 1:
+    if len(v1_sell_rows) < _MIN_SAMPLE_PER_SIDE or len(v1_buy_rows) < _MIN_SAMPLE_PER_SIDE:
         sys.stderr.write(
             f"INSUFFICIENT V1 ROWS: {len(v1_buy_rows)} BUY, "
-            f"{len(v1_sell_rows)} SELL rows for {args.condition_id}\n"
+            f"{len(v1_sell_rows)} SELL rows for {args.condition_id} "
+            f"(need >={_MIN_SAMPLE_PER_SIDE} of each)\n"
         )
         return 4
 
