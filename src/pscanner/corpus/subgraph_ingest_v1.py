@@ -399,7 +399,7 @@ async def run_v1_subgraph_backfill(
                 idx=i,
                 of=len(pending),
                 condition_id=market.condition_id,
-                error=str(exc),
+                error=repr(exc),
             )
             continue
 
