@@ -277,6 +277,9 @@ async def test_paginator_rejects_invalid_page_size():
     with pytest.raises(ValueError, match="page_size"):
         async for _ in iter_v1_market_trades(client=client, asset_ids=["100"], page_size=0):
             pass
+    with pytest.raises(ValueError, match="page_size"):
+        async for _ in iter_v1_market_trades(client=client, asset_ids=["100"], page_size=1001):
+            pass
 
 
 @pytest.mark.asyncio
