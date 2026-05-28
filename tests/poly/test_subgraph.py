@@ -8,9 +8,10 @@ import httpx
 import pytest
 import respx
 
-from pscanner.poly.subgraph import SubgraphClient
+from pscanner.poly.subgraph import SubgraphClient, SubgraphQuotaExhaustedError
 
 _URL = "https://gateway.example.test/api/key/subgraphs/id/abc"
+_FALLBACK_URL = "https://gateway.example.test/api/key2/subgraphs/id/abc"
 
 
 @pytest.fixture
@@ -70,6 +71,76 @@ async def test_graphql_errors_surface_as_runtime_error(client: SubgraphClient) -
     try:
         with pytest.raises(RuntimeError, match="GraphQL errors"):
             await client.query("{ broken }", {})
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_payment_required_raises_quota_exhausted(client: SubgraphClient) -> None:
+    respx.post(_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={"errors": [{"message": "auth error: payment required for subsequent requests"}]},
+        )
+    )
+    try:
+        with pytest.raises(SubgraphQuotaExhaustedError):
+            await client.query("{ x }", {})
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_fallback_url_swaps_on_quota_and_retries() -> None:
+    client = SubgraphClient(url=_URL, rpm=600, fallback_url=_FALLBACK_URL)
+    respx.post(_URL).mock(
+        return_value=httpx.Response(
+            200, json={"errors": [{"message": "auth error: payment required"}]}
+        )
+    )
+    fallback_route = respx.post(_FALLBACK_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"ok": True}})
+    )
+    try:
+        result = await client.query("{ ok }", {})
+    finally:
+        await client.aclose()
+    assert result == {"ok": True}
+    assert fallback_route.called
+    assert client.url == _FALLBACK_URL  # one-shot swap is permanent
+
+
+@respx.mock
+async def test_fallback_url_double_quota_exhaustion_propagates() -> None:
+    client = SubgraphClient(url=_URL, rpm=600, fallback_url=_FALLBACK_URL)
+    respx.post(_URL).mock(
+        return_value=httpx.Response(
+            200, json={"errors": [{"message": "auth error: payment required"}]}
+        )
+    )
+    respx.post(_FALLBACK_URL).mock(
+        return_value=httpx.Response(
+            200, json={"errors": [{"message": "auth error: payment required"}]}
+        )
+    )
+    try:
+        with pytest.raises(SubgraphQuotaExhaustedError):
+            await client.query("{ x }", {})
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_no_fallback_propagates_quota_error() -> None:
+    client = SubgraphClient(url=_URL, rpm=600)
+    respx.post(_URL).mock(
+        return_value=httpx.Response(
+            200, json={"errors": [{"message": "auth error: payment required"}]}
+        )
+    )
+    try:
+        with pytest.raises(SubgraphQuotaExhaustedError):
+            await client.query("{ x }", {})
     finally:
         await client.aclose()
 

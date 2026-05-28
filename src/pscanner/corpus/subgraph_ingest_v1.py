@@ -30,7 +30,7 @@ from pscanner.poly.onchain_ingest import (
     UnsupportedFill,
     event_to_corpus_trade,
 )
-from pscanner.poly.subgraph import SubgraphClient
+from pscanner.poly.subgraph import SubgraphClient, SubgraphQuotaExhaustedError
 
 # Earliest Unix-second timestamp the V1 Polymarket Orderbook subgraph
 # (`7fu2DWYK93ePfzB24c2wrP94S3x4LGHUrQxphhoEypyY`) has ever indexed an
@@ -439,6 +439,14 @@ async def run_v1_subgraph_backfill(
                 condition_id=market.condition_id,
                 page_size=page_size,
             )
+        except SubgraphQuotaExhaustedError:
+            _LOG.error(
+                "subgraph.v1.quota_exhausted",
+                idx=i,
+                of=len(pending),
+                condition_id=market.condition_id,
+            )
+            raise
         except Exception as exc:
             failed += 1
             _LOG.error(

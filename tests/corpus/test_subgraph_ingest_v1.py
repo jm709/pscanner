@@ -15,7 +15,7 @@ from pscanner.corpus.subgraph_ingest_v1 import (
     _load_pending_v1_markets,
     subgraph_v1_row_to_event,
 )
-from pscanner.poly.subgraph import SubgraphClient
+from pscanner.poly.subgraph import SubgraphClient, SubgraphQuotaExhaustedError
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "v1_v2_overlap.json"
 
@@ -520,9 +520,7 @@ async def test_orchestrator_skips_pre_v1_coverage_markets(tmp_path: Path) -> Non
             conn, "0x" + "a" * 64, "100", closed_at=_V1_SUBGRAPH_EARLIEST_TS - 1
         )
         # 2: at V1 earliest — should be included (boundary).
-        _seed_v1_pending_market(
-            conn, "0x" + "b" * 64, "200", closed_at=_V1_SUBGRAPH_EARLIEST_TS
-        )
+        _seed_v1_pending_market(conn, "0x" + "b" * 64, "200", closed_at=_V1_SUBGRAPH_EARLIEST_TS)
         # 3: post-V1 market — should be included.
         _seed_v1_pending_market(
             conn, "0x" + "c" * 64, "300", closed_at=_V1_SUBGRAPH_EARLIEST_TS + 86400
@@ -532,5 +530,44 @@ async def test_orchestrator_skips_pre_v1_coverage_markets(tmp_path: Path) -> Non
         cids = {m.condition_id for m in pending}
         assert cids == {"0x" + "b" * 64, "0x" + "c" * 64}
         assert _count_pre_v1_skipped(conn) == 1
+    finally:
+        conn.close()
+
+
+class _QuotaExhaustedClient(SubgraphClient):
+    """Subgraph client that always raises SubgraphQuotaExhaustedError on query."""
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    async def query(self, graphql: str, variables: Mapping[str, Any]) -> dict[str, Any]:
+        self.call_count += 1
+        raise SubgraphQuotaExhaustedError("GraphQL quota exhausted: stub")
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_reraises_on_quota_exhausted(tmp_path: Path) -> None:
+    """Quota exhaustion mid-run must short-circuit the loop, not be swallowed.
+
+    Without this, an exhausted key produces 1,800 identical `market_failed`
+    log lines and burns wall time on guaranteed-fail markets.
+    """
+    conn = init_corpus_db(tmp_path / "corpus.sqlite3")
+    try:
+        cid_a = "0x" + "a" * 64
+        cid_b = "0x" + "b" * 64
+        _seed_v1_pending_market(conn, cid_a, "100")
+        _seed_v1_pending_market(conn, cid_b, "200")
+        client = _QuotaExhaustedClient()
+        with pytest.raises(SubgraphQuotaExhaustedError):
+            await run_v1_subgraph_backfill(
+                conn=conn,
+                client=client,
+                page_size=1000,
+                limit=None,
+                now_ts=1_700_000_999,
+            )
+        # only the first market triggers a query before short-circuit
+        assert client.call_count <= 2  # one or two passes for cid_a, then bail
     finally:
         conn.close()
