@@ -15,6 +15,7 @@ from scripts.backtest_copy_sizing import (
     TradeEvent,
     load_event_stream,
     load_watchlist,
+    render_report,
 )
 
 
@@ -196,6 +197,63 @@ def test_load_event_stream_skips_unresolved_markets(tmp_path: Path) -> None:
         for e in events
     }
     assert cids == {"0xM1"}
+
+
+def test_render_report_includes_all_scheme_rows() -> None:
+    schemes = [EqualWeight(position_fraction=0.01)]
+    sim = Simulator(schemes=schemes, bankroll=10_000.0)
+    sim.on_trade(
+        Trade(
+            wallet="0xa",
+            condition_id="0xM1",
+            outcome_side="YES",
+            price=0.5,
+            notional_usd=1_000.0,
+            ts=100,
+        )
+    )
+    sim.on_resolution(
+        Resolution(condition_id="0xM1", winning_side="YES", resolved_at=200)
+    )
+    report = render_report(sim, schemes=schemes, bankroll=10_000.0)
+    assert "equal_weight" in report
+    assert "PnL" in report
+    assert "Win rate" in report
+    assert "100.00%" in report or "100.0%" in report
+    assert "$100" in report
+
+
+def test_render_report_includes_quarterly_grid_and_unresolved_count() -> None:
+    schemes = [EqualWeight(position_fraction=0.01)]
+    sim = Simulator(schemes=schemes, bankroll=10_000.0)
+    sim.on_trade(
+        Trade(
+            wallet="0xa",
+            condition_id="0xM1",
+            outcome_side="YES",
+            price=0.5,
+            notional_usd=1_000.0,
+            ts=1_700_000_000,
+        )
+    )
+    sim.on_trade(
+        Trade(
+            wallet="0xa",
+            condition_id="0xM2",
+            outcome_side="YES",
+            price=0.5,
+            notional_usd=1_000.0,
+            ts=1_700_000_100,
+        )
+    )
+    sim.on_resolution(
+        Resolution(
+            condition_id="0xM1", winning_side="YES", resolved_at=1_700_000_500
+        )
+    )
+    report = render_report(sim, schemes=schemes, bankroll=10_000.0)
+    assert "Unresolved" in report
+    assert "Quarterly" in report or "quarter" in report.lower()
 
 
 def test_simulator_initializes_per_scheme_state() -> None:
