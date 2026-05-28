@@ -25,6 +25,7 @@ from pscanner.corpus.subgraph_ingest import SubgraphRunSummary
 from pscanner.corpus.subgraph_ingest_v1 import V1SubgraphRunSummary
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
+from pscanner.poly.subgraph import SubgraphQuotaExhaustedError
 
 
 def test_parser_recognises_all_subcommands() -> None:
@@ -155,6 +156,116 @@ async def test_subgraph_backfill_subcommand_dispatches(
     assert captured["v2_rpm"] == 120
     assert captured["limit"] == 5
     assert captured["page_size"] == 1000  # default _DEFAULT_SUBGRAPH_PAGE_SIZE
+
+
+@pytest.mark.asyncio
+async def test_subgraph_backfill_passes_backup_key_as_fallback_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`GRAPH_API_KEY_BACKUP` env var becomes the fallback URL on both clients."""
+    db_path = tmp_path / "c.sqlite3"
+    monkeypatch.setenv("GRAPH_API_KEY_BACKUP", "backup-key")
+
+    captured: dict[str, object] = {}
+
+    async def fake_dispatched(  # type: ignore[no-untyped-def]
+        *, conn, v1_client, v2_client, versions, page_size, limit, **kwargs
+    ):
+        captured["v1_fallback"] = v1_client._fallback_url
+        captured["v2_fallback"] = v2_client._fallback_url
+        return DispatchedRunSummary(
+            v2_summary=SubgraphRunSummary(0, 0, 0, 0, 0, 0, 0),
+            v1_summary=V1SubgraphRunSummary(0, 0, 0, 0, 0, 0, 0, 0),
+            truncation_flags_cleared=0,
+        )
+
+    monkeypatch.setattr(corpus_cli, "run_subgraph_backfill_dispatched", fake_dispatched)
+    monkeypatch.setattr(corpus_cli, "_preflight_subgraph_quota", AsyncMock(return_value=None))
+
+    rc = await corpus_cli.run_corpus_command(
+        [
+            "subgraph-backfill",
+            "--db",
+            str(db_path),
+            "--api-key",
+            "primary-key",
+            "--subgraph-id",
+            "v2id",
+        ]
+    )
+    assert rc == 0
+    assert "backup-key" in str(captured["v1_fallback"])
+    assert "backup-key" in str(captured["v2_fallback"])
+
+
+@pytest.mark.asyncio
+async def test_subgraph_backfill_no_backup_env_yields_no_fallback_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No `GRAPH_API_KEY_BACKUP` env → fallback_url is None on both clients."""
+    monkeypatch.delenv("GRAPH_API_KEY_BACKUP", raising=False)
+
+    captured: dict[str, object] = {}
+
+    async def fake_dispatched(  # type: ignore[no-untyped-def]
+        *, conn, v1_client, v2_client, versions, page_size, limit, **kwargs
+    ):
+        captured["v1_fallback"] = v1_client._fallback_url
+        captured["v2_fallback"] = v2_client._fallback_url
+        return DispatchedRunSummary(
+            v2_summary=SubgraphRunSummary(0, 0, 0, 0, 0, 0, 0),
+            v1_summary=V1SubgraphRunSummary(0, 0, 0, 0, 0, 0, 0, 0),
+            truncation_flags_cleared=0,
+        )
+
+    monkeypatch.setattr(corpus_cli, "run_subgraph_backfill_dispatched", fake_dispatched)
+    monkeypatch.setattr(corpus_cli, "_preflight_subgraph_quota", AsyncMock(return_value=None))
+
+    rc = await corpus_cli.run_corpus_command(
+        [
+            "subgraph-backfill",
+            "--db",
+            str(tmp_path / "c.sqlite3"),
+            "--api-key",
+            "primary-key",
+            "--subgraph-id",
+            "v2id",
+        ]
+    )
+    assert rc == 0
+    assert captured["v1_fallback"] is None
+    assert captured["v2_fallback"] is None
+
+
+@pytest.mark.asyncio
+async def test_subgraph_backfill_exits_when_preflight_reports_quota_exhausted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Preflight raising `SubgraphQuotaExhaustedError` short-circuits to a clear SystemExit."""
+
+    async def raise_quota(_client: object) -> None:
+        raise SubgraphQuotaExhaustedError("GraphQL quota exhausted: stub")
+
+    monkeypatch.setattr(corpus_cli, "_preflight_subgraph_quota", raise_quota)
+    # Dispatcher must not be reached.
+    monkeypatch.setattr(
+        corpus_cli,
+        "run_subgraph_backfill_dispatched",
+        AsyncMock(side_effect=AssertionError("dispatcher should not be reached")),
+    )
+
+    with pytest.raises(SystemExit, match="quota exhausted"):
+        await corpus_cli.run_corpus_command(
+            [
+                "subgraph-backfill",
+                "--db",
+                str(tmp_path / "c.sqlite3"),
+                "--api-key",
+                "exhausted-key",
+                "--subgraph-id",
+                "v2id",
+            ]
+        )
 
 
 @pytest.mark.asyncio

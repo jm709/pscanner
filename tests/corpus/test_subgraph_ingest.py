@@ -28,7 +28,7 @@ from pscanner.corpus.subgraph_ingest import (
     subgraph_row_to_event,
 )
 from pscanner.poly.onchain import OrderFilledEvent
-from pscanner.poly.subgraph import SubgraphClient
+from pscanner.poly.subgraph import SubgraphClient, SubgraphQuotaExhaustedError
 
 _GATEWAY_URL = "https://gateway.example.test/api/k/subgraphs/id/abc"
 
@@ -615,3 +615,44 @@ async def test_run_subgraph_backfill_records_market_failure_and_continues(
         ("0xMARKET_B",),
     ).fetchone()
     assert row_b["onchain_processed_at"] is not None
+
+
+@respx.mock
+async def test_run_subgraph_backfill_reraises_on_quota_exhausted(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Quota exhaustion mid-run must short-circuit, not be swallowed."""
+    CorpusMarketsRepo(conn).insert_pending(
+        CorpusMarket(
+            condition_id="0xMARKET_B",
+            event_slug="event-b",
+            category=None,
+            closed_at=1_700_001_000,
+            total_volume_usd=10_000.0,
+            enumerated_at=1_700_000_000,
+            market_slug="market-b",
+        )
+    )
+    conn.execute(
+        "UPDATE corpus_markets SET truncated_at_offset_cap = 1, backfill_state = 'complete' "
+        "WHERE condition_id = ?",
+        ("0xMARKET_B",),
+    )
+    conn.commit()
+    AssetIndexRepo(conn).upsert(
+        AssetEntry(asset_id="333", condition_id="0xMARKET_B", outcome_side="YES", outcome_index=0)
+    )
+
+    async def quota_iter(**kwargs: object):  # type: ignore[no-untyped-def]
+        raise SubgraphQuotaExhaustedError("GraphQL quota exhausted: stub")
+        if False:
+            yield None  # pragma: no cover
+
+    monkeypatch.setattr("pscanner.corpus.subgraph_ingest.iter_market_trades", quota_iter)
+
+    client = SubgraphClient(url=_GATEWAY_URL, rpm=600)
+    try:
+        with pytest.raises(SubgraphQuotaExhaustedError):
+            await run_subgraph_backfill(conn=conn, client=client)
+    finally:
+        await client.aclose()

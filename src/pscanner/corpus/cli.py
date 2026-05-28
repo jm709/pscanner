@@ -52,7 +52,7 @@ from pscanner.manifold.client import ManifoldClient
 from pscanner.manifold.ids import ManifoldMarketId
 from pscanner.poly.data import DataClient
 from pscanner.poly.gamma import GammaClient
-from pscanner.poly.subgraph import SubgraphClient
+from pscanner.poly.subgraph import SubgraphClient, SubgraphQuotaExhaustedError
 
 _log = structlog.get_logger(__name__)
 
@@ -678,20 +678,65 @@ def _default_duckdb_memory() -> str:
     )
 
 
+async def _preflight_subgraph_quota(client: SubgraphClient) -> None:
+    """Probe a subgraph endpoint with a tiny ``_meta`` query.
+
+    On :class:`SubgraphQuotaExhaustedError` (which has already attempted
+    failover internally if a backup URL is configured), let the caller
+    translate it into a clear operator-facing ``SystemExit``. Other
+    errors are swallowed — the dispatcher's own per-market error handling
+    will surface them in a more useful context.
+
+    Args:
+        client: A ``SubgraphClient`` whose URL points at the gateway
+            endpoint to probe.
+    """
+    try:
+        await client.query("{ _meta { block { number } } }", {})
+    except SubgraphQuotaExhaustedError:
+        raise
+    except Exception as exc:
+        # Non-quota errors are not preflight's concern; the per-market
+        # dispatcher path surfaces them in better context.
+        _log.debug("subgraph.preflight_non_quota_error", error=repr(exc))
+
+
 async def _cmd_subgraph_backfill(args: argparse.Namespace) -> int:
     """Run the subgraph-driven per-market backfill (V1+V2 dispatcher)."""
     api_key = args.api_key or os.environ.get("GRAPH_API_KEY")
     if not api_key:
         raise SystemExit("subgraph-backfill requires --api-key or $GRAPH_API_KEY")
+    backup_api_key = os.environ.get("GRAPH_API_KEY_BACKUP")
     resolved = _resolve_subgraph_flags(args)
     v2_url = _GATEWAY_URL_TEMPLATE.format(api_key=api_key, subgraph_id=resolved.v2_subgraph_id)
     v1_url = _GATEWAY_URL_TEMPLATE.format(api_key=api_key, subgraph_id=resolved.v1_subgraph_id)
+    v2_fallback_url = (
+        _GATEWAY_URL_TEMPLATE.format(api_key=backup_api_key, subgraph_id=resolved.v2_subgraph_id)
+        if backup_api_key
+        else None
+    )
+    v1_fallback_url = (
+        _GATEWAY_URL_TEMPLATE.format(api_key=backup_api_key, subgraph_id=resolved.v1_subgraph_id)
+        if backup_api_key
+        else None
+    )
     conn = init_corpus_db(Path(args.db))
     try:
         async with (
-            SubgraphClient(url=v2_url, rpm=args.rpm) as v2_client,
-            SubgraphClient(url=v1_url, rpm=args.rpm) as v1_client,
+            SubgraphClient(url=v2_url, rpm=args.rpm, fallback_url=v2_fallback_url) as v2_client,
+            SubgraphClient(url=v1_url, rpm=args.rpm, fallback_url=v1_fallback_url) as v1_client,
         ):
+            try:
+                # V1 burns ~2x the quota per market vs V2 — probing the V1
+                # endpoint surfaces exhaustion before either dispatcher runs.
+                await _preflight_subgraph_quota(v1_client)
+            except SubgraphQuotaExhaustedError:
+                msg = (
+                    "Graph API key quota exhausted"
+                    + (" (backup also exhausted)" if backup_api_key else "")
+                    + ". Set $GRAPH_API_KEY_BACKUP or wait for the monthly reset."
+                )
+                raise SystemExit(msg) from None
             summary = await run_subgraph_backfill_dispatched(
                 conn=conn,
                 v1_client=v1_client,

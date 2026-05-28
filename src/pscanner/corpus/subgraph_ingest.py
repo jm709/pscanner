@@ -24,7 +24,7 @@ from pscanner.poly.onchain_ingest import (
     UnsupportedFill,
     event_to_corpus_trade,
 )
-from pscanner.poly.subgraph import SubgraphClient
+from pscanner.poly.subgraph import SubgraphClient, SubgraphQuotaExhaustedError
 
 _LOG = structlog.get_logger(__name__)
 
@@ -495,6 +495,14 @@ async def run_subgraph_backfill(
                 trades_inserted=inserted,
                 trade_count=count,
             )
+        except SubgraphQuotaExhaustedError:
+            _LOG.error(
+                "subgraph.quota_exhausted",
+                idx=i,
+                of=len(pending),
+                condition_id=market.condition_id,
+            )
+            raise
         except Exception as exc:
             failed += 1
             _LOG.error(
