@@ -241,7 +241,65 @@ class Simulator:
             )
             for s in schemes
         }
+        self._next_trade_id = 0
 
     def state_for(self, scheme: SizingScheme) -> BacktestState:
         """Return the mutable :class:`BacktestState` owned by ``scheme``."""
         return self._states[scheme.name]
+
+    def on_trade(self, trade: Trade) -> None:
+        """Size the trade and open a position for every scheme."""
+        for scheme in self._schemes:
+            state = self._states[scheme.name]
+            cost = scheme.compute(trade, self._bankroll)
+            shares = cost / trade.price if trade.price > 0 else 0.0
+            state.open_positions[self._next_trade_id] = OpenPos(
+                trade_id=self._next_trade_id,
+                wallet=trade.wallet,
+                condition_id=trade.condition_id,
+                outcome_side=trade.outcome_side,
+                shares=shares,
+                cost=cost,
+                ts=trade.ts,
+                price=trade.price,
+            )
+        self._next_trade_id += 1
+
+    def on_resolution(self, resolution: Resolution) -> None:
+        """Close every open position whose market matches, per scheme."""
+        for scheme in self._schemes:
+            state = self._states[scheme.name]
+            closing = [
+                tid
+                for tid, pos in state.open_positions.items()
+                if pos.condition_id == resolution.condition_id
+            ]
+            for tid in closing:
+                pos = state.open_positions.pop(tid)
+                payout = 1.0 if resolution.winning_side == pos.outcome_side else 0.0
+                proceeds = pos.shares * payout
+                pnl = proceeds - pos.cost
+                state.resolved_trades.append(
+                    ResolvedTradeRecord(
+                        open_pos=pos,
+                        payout=payout,
+                        proceeds=proceeds,
+                        pnl=pnl,
+                        resolved_at=resolution.resolved_at,
+                    )
+                )
+                state.cumulative_pnl += pnl
+                scheme.observe_resolution(
+                    Trade(
+                        wallet=pos.wallet,
+                        condition_id=pos.condition_id,
+                        outcome_side=pos.outcome_side,
+                        price=pos.price,
+                        notional_usd=pos.cost,
+                        ts=pos.ts,
+                    ),
+                    payout=payout,
+                )
+                state.nav_series.append(
+                    (resolution.resolved_at, state.cumulative_pnl)
+                )
