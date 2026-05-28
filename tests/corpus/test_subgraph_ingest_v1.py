@@ -402,7 +402,11 @@ async def test_orchestrator_drains_one_market_and_stamps_sentinel(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_does_not_stamp_on_zero_events(tmp_path: Path):
+async def test_orchestrator_stamps_sentinel_on_zero_events(tmp_path: Path):
+    """V1 subgraph is immutable historical data: zero events means the market
+    has no V1 history, not "indexer is still catching up". Stamp the sentinel
+    so the queue drains and we don't waste 60-90 sec re-querying it next run.
+    """
     conn = init_corpus_db(tmp_path / "corpus.sqlite3")
     try:
         cid = "0x" + "b" * 64
@@ -413,14 +417,59 @@ async def test_orchestrator_does_not_stamp_on_zero_events(tmp_path: Path):
             conn=conn, client=client, page_size=1000, limit=None, now_ts=1_700_000_999
         )
         assert summary.markets_no_new_trades == 1
-        assert summary.markets_processed == 0
+        assert summary.markets_processed == 1  # stamped, not skipped
         row = conn.execute(
             "SELECT onchain_v1_processed_at, v1_history_pending FROM corpus_markets"
             " WHERE condition_id = ?",
             (cid,),
         ).fetchone()
-        assert row["onchain_v1_processed_at"] is None
-        assert row["v1_history_pending"] == 1
+        assert row["onchain_v1_processed_at"] == 1_700_000_999
+        assert row["v1_history_pending"] == 0
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_stamps_sentinel_on_all_dup_events(tmp_path: Path):
+    """V1 returned events but all of them duplicated existing corpus_trades.
+
+    This happens when V2 (or a prior V1 run) already inserted these rows.
+    The market's V1 history IS in the corpus — stamp the sentinel.
+    """
+    conn = init_corpus_db(tmp_path / "corpus.sqlite3")
+    try:
+        cid = "0x" + "e" * 64
+        aid = "8888888888"
+        _seed_v1_pending_market(conn, cid, aid)
+        # Pre-insert a trade row so the next subgraph fetch produces a dup.
+        rows = [_fat_buy_row(0, aid)]
+        pre_client = _FakeSubgraphClient(pages_by_query={"maker": [], "taker": [rows]})
+        await run_v1_subgraph_backfill(
+            conn=conn, client=pre_client, page_size=1000, limit=None, now_ts=1_700_000_500
+        )
+        # Re-flag the market so we can run a second backfill pass on it.
+        conn.execute(
+            "UPDATE corpus_markets SET v1_history_pending = 1,"
+            " onchain_v1_processed_at = NULL WHERE condition_id = ?",
+            (cid,),
+        )
+        conn.commit()
+
+        # Second pass: same rows come back, all dups.
+        client = _FakeSubgraphClient(pages_by_query={"maker": [], "taker": [rows]})
+        summary = await run_v1_subgraph_backfill(
+            conn=conn, client=client, page_size=1000, limit=None, now_ts=1_700_000_999
+        )
+        assert summary.trades_inserted == 0
+        assert summary.dups_dropped == 1
+        assert summary.markets_processed == 1  # stamped despite zero inserts
+        row = conn.execute(
+            "SELECT onchain_v1_processed_at, v1_history_pending FROM corpus_markets"
+            " WHERE condition_id = ?",
+            (cid,),
+        ).fetchone()
+        assert row["onchain_v1_processed_at"] == 1_700_000_999
+        assert row["v1_history_pending"] == 0
     finally:
         conn.close()
 

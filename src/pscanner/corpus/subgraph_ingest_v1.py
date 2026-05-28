@@ -345,16 +345,18 @@ async def _backfill_one_v1_market(
     client: SubgraphClient,
     condition_id: str,
     page_size: int,
-) -> tuple[int, int, int, int, int]:
+) -> tuple[int, int, int, int, int] | None:
     """Drain one V1-pending market. Returns (events, inserted, unsup, unres, dups).
 
-    Returns (0, 0, 0, 0, 0) without querying the subgraph when asset_index
-    has no rows for this condition_id.
+    Returns ``None`` without querying the subgraph when ``asset_index``
+    has no rows for this condition_id; the orchestrator treats that as
+    a skip (no sentinel stamp) so the market is retried after
+    ``asset_index`` is populated.
     """
     asset_ids = _load_asset_ids_for_market(conn, condition_id)
     if not asset_ids:
         _LOG.warning("subgraph.v1.no_asset_index", condition_id=condition_id)
-        return 0, 0, 0, 0, 0
+        return None
 
     asset_repo = AssetIndexRepo(conn)
     trades_repo = CorpusTradesRepo(conn)
@@ -401,9 +403,15 @@ async def run_v1_subgraph_backfill(
     """Process every v1_history_pending market via the V1 subgraph.
 
     Stamps ``onchain_v1_processed_at`` and clears ``v1_history_pending``
-    only when ≥1 trade row was inserted. Zero-event drains and per-market
-    exceptions leave both sentinel columns unchanged so re-runs pick up
-    the market again.
+    after every market whose subgraph fetch completed without exception,
+    regardless of how many trades were inserted. The V1 Polymarket
+    Orderbook subgraph is an immutable historical indexer: a successful
+    response with zero new rows means "this market has no further V1
+    history to backfill" (either no V1 activity at all, or every event
+    was already in ``corpus_trades`` from a prior V2/V1 pass). Re-querying
+    burns ~60-90 s per market via The Graph's slow empty-result scans.
+    Per-market exceptions still leave both sentinel columns unchanged so
+    transient failures are retried on the next run.
 
     Args:
         conn: Open corpus DB connection.
@@ -433,7 +441,7 @@ async def run_v1_subgraph_backfill(
 
     for i, market in enumerate(pending, start=1):
         try:
-            events, inserted, unsup, unres, dups = await _backfill_one_v1_market(
+            result = await _backfill_one_v1_market(
                 conn=conn,
                 client=client,
                 condition_id=market.condition_id,
@@ -458,12 +466,22 @@ async def run_v1_subgraph_backfill(
             )
             continue
 
+        if result is None:
+            # asset_index empty for this market — already logged by
+            # _backfill_one_v1_market. Skip without stamping so a later
+            # asset_index repair lets this market be re-attempted.
+            continue
+        events, inserted, unsup, unres, dups = result
         total_events += events
         total_inserted += inserted
         total_unsupported += unsup
         total_unresolvable += unres
         total_dups += dups
 
+        _mark_v1_processed(
+            conn, market.condition_id, now_ts=now_ts if now_ts is not None else int(time.time())
+        )
+        processed += 1
         if inserted == 0:
             no_new_trades += 1
             _LOG.info(
@@ -472,23 +490,20 @@ async def run_v1_subgraph_backfill(
                 of=len(pending),
                 condition_id=market.condition_id,
                 slug=market.market_slug[:50],
+                events_decoded=events,
+                dups_dropped=dups,
             )
-            continue
-
-        _mark_v1_processed(
-            conn, market.condition_id, now_ts=now_ts if now_ts is not None else int(time.time())
-        )
-        processed += 1
-        _LOG.info(
-            "subgraph.v1.market_complete",
-            idx=i,
-            of=len(pending),
-            condition_id=market.condition_id[:14] + "...",
-            slug=market.market_slug[:50],
-            events_decoded=events,
-            trades_inserted=inserted,
-            dups_dropped=dups,
-        )
+        else:
+            _LOG.info(
+                "subgraph.v1.market_complete",
+                idx=i,
+                of=len(pending),
+                condition_id=market.condition_id[:14] + "...",
+                slug=market.market_slug[:50],
+                events_decoded=events,
+                trades_inserted=inserted,
+                dups_dropped=dups,
+            )
 
     summary = V1SubgraphRunSummary(
         markets_processed=processed,
