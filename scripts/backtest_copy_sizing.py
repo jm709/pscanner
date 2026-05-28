@@ -82,3 +82,23 @@ class ConcentrationCapped:
     def observe_resolution(self, trade: Trade, payout: float) -> None:
         """Record resolution outcome (no-op; concentration ignores outcomes)."""
         del trade, payout
+
+
+class FollowSeedSize:
+    """cost = min(trade.notional_usd * scale_factor, max_cost_per_trade)."""
+
+    name = "follow_seed_size"
+
+    def __init__(self, *, scale_factor: float, max_cost_per_trade: float) -> None:
+        """Initialize follow-seed-size sizing scheme."""
+        self._scale_factor = scale_factor
+        self._max_cost = max_cost_per_trade
+
+    def compute(self, trade: Trade, bankroll: float) -> float:
+        """Return notional * scale, capped at max_cost_per_trade."""
+        del bankroll
+        return min(trade.notional_usd * self._scale_factor, self._max_cost)
+
+    def observe_resolution(self, trade: Trade, payout: float) -> None:
+        """Record resolution outcome (no-op; stateless scheme)."""
+        del trade, payout

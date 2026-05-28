@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import pytest
-from scripts.backtest_copy_sizing import ConcentrationCapped, EqualWeight, Trade
+from scripts.backtest_copy_sizing import (
+    ConcentrationCapped,
+    EqualWeight,
+    FollowSeedSize,
+    Trade,
+)
 
 
 def _trade(
@@ -65,3 +70,22 @@ def test_concentration_capped_floors_at_min_multiplier() -> None:
         scheme.compute(_trade(wallet="0xA"), bankroll=10_000.0)
     cost = scheme.compute(_trade(wallet="0xA"), bankroll=10_000.0)
     assert cost == pytest.approx(10_000.0 * 0.01 * 0.25)
+
+
+def test_follow_seed_size_scales_with_notional() -> None:
+    scheme = FollowSeedSize(scale_factor=0.01, max_cost_per_trade=1_000.0)
+    cost = scheme.compute(_trade(notional_usd=5_000.0), bankroll=10_000.0)
+    assert cost == 50.0
+
+
+def test_follow_seed_size_caps_at_max_cost_per_trade() -> None:
+    scheme = FollowSeedSize(scale_factor=0.01, max_cost_per_trade=1_000.0)
+    cost = scheme.compute(_trade(notional_usd=500_000.0), bankroll=10_000.0)
+    assert cost == 1_000.0
+
+
+def test_follow_seed_size_ignores_bankroll() -> None:
+    scheme = FollowSeedSize(scale_factor=0.01, max_cost_per_trade=1_000.0)
+    cost_a = scheme.compute(_trade(notional_usd=2_000.0), bankroll=100.0)
+    cost_b = scheme.compute(_trade(notional_usd=2_000.0), bankroll=1_000_000.0)
+    assert cost_a == cost_b == 20.0
