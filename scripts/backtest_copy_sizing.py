@@ -8,11 +8,15 @@ their realized PnL, ROI, win rate, drawdown, and quarterly P&L.
 
 Spec: docs/superpowers/specs/2026-05-28-backtest-copy-sizing-design.md
 """
+# ruff: noqa: T201  # script prints diagnostics to stdout by design
 
 from __future__ import annotations
 
+import argparse
+import csv as _csv
 import datetime as dt
 import math
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -586,3 +590,112 @@ def render_report(
         + "\n## Top contributors (best-PnL scheme)\n"
         + _render_top_contributors(sim, schemes)
     )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser with the documented defaults."""
+    p = argparse.ArgumentParser(
+        description=(
+            "Backtest copy-trading sizing schemes against the historical"
+            " trade stream of the daemon's current watchlist."
+        )
+    )
+    p.add_argument("--db", default="data/corpus.sqlite3")
+    p.add_argument("--watchlist-db", default="data/pscanner.sqlite3")
+    p.add_argument("--starting-bankroll-usd", type=float, default=10_000.0)
+    p.add_argument("--position-fraction", type=float, default=0.01)
+    p.add_argument("--min-multiplier", type=float, default=0.10)
+    p.add_argument("--scale-factor", type=float, default=0.01)
+    p.add_argument("--max-cost-per-trade", type=float, default=1_000.0)
+    p.add_argument("--edge-scale", type=float, default=5.0)
+    p.add_argument("--max-multiplier", type=float, default=3.0)
+    p.add_argument("--min-trades-for-edge", type=int, default=10)
+    p.add_argument("--platform", default="polymarket")
+    p.add_argument("--start-ts", type=int, default=None)
+    p.add_argument("--end-ts", type=int, default=None)
+    p.add_argument(
+        "--csv",
+        default=None,
+        help="Optional path to dump per-trade per-scheme rows.",
+    )
+    return p
+
+
+def _write_csv(sim: Simulator, schemes: list[SizingScheme], path: str) -> None:
+    """Dump per-trade per-scheme rows to ``path`` for downstream analysis."""
+    with Path(path).open("w", newline="") as fh:
+        w = _csv.writer(fh)
+        w.writerow(
+            [
+                "scheme", "wallet", "condition_id", "outcome_side", "price",
+                "shares", "cost", "payout", "proceeds", "pnl",
+                "trade_ts", "resolved_at",
+            ]
+        )
+        for scheme in schemes:
+            state = sim.state_for(scheme)
+            for r in state.resolved_trades:
+                pos = r.open_pos
+                w.writerow(
+                    [
+                        scheme.name, pos.wallet, pos.condition_id, pos.outcome_side,
+                        f"{pos.price}", f"{pos.shares}", f"{pos.cost}",
+                        f"{r.payout}", f"{r.proceeds}", f"{r.pnl}",
+                        pos.ts, r.resolved_at,
+                    ]
+                )
+
+
+def _build_schemes(
+    args: argparse.Namespace, watchlist_size: int
+) -> list[SizingScheme]:
+    """Instantiate the four sizing schemes from CLI args."""
+    return [
+        EqualWeight(position_fraction=args.position_fraction),
+        ConcentrationCapped(
+            position_fraction=args.position_fraction,
+            min_multiplier=args.min_multiplier,
+            watchlist_size=watchlist_size,
+        ),
+        FollowSeedSize(
+            scale_factor=args.scale_factor,
+            max_cost_per_trade=args.max_cost_per_trade,
+        ),
+        EdgeWeightedCausal(
+            position_fraction=args.position_fraction,
+            edge_scale=args.edge_scale,
+            min_multiplier=max(args.min_multiplier, 0.25),
+            max_multiplier=args.max_multiplier,
+            min_trades_for_edge=args.min_trades_for_edge,
+        ),
+    ]
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the backtest end-to-end against the corpus and print the report."""
+    args = build_parser().parse_args(argv)
+    watchlist = load_watchlist(Path(args.watchlist_db))
+    if not watchlist:
+        print("Watchlist is empty; nothing to backtest.", file=sys.stderr)
+        return 1
+    schemes = _build_schemes(args, len(watchlist))
+    sim = Simulator(schemes=schemes, bankroll=args.starting_bankroll_usd)
+    for event in load_event_stream(
+        Path(args.db),
+        watchlist=watchlist,
+        platform=args.platform,
+        start_ts=args.start_ts,
+        end_ts=args.end_ts,
+    ):
+        if isinstance(event, TradeEvent):
+            sim.on_trade(event.trade)
+        else:
+            sim.on_resolution(event.resolution)
+    print(render_report(sim, schemes=schemes, bankroll=args.starting_bankroll_usd))
+    if args.csv:
+        _write_csv(sim, schemes, args.csv)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

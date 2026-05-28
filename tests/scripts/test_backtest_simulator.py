@@ -13,6 +13,7 @@ from scripts.backtest_copy_sizing import (
     Simulator,
     Trade,
     TradeEvent,
+    build_parser,
     load_event_stream,
     load_watchlist,
     render_report,
@@ -254,6 +255,29 @@ def test_render_report_includes_quarterly_grid_and_unresolved_count() -> None:
     report = render_report(sim, schemes=schemes, bankroll=10_000.0)
     assert "Unresolved" in report
     assert "Quarterly" in report or "quarter" in report.lower()
+
+
+def test_build_parser_has_expected_defaults() -> None:
+    parser = build_parser()
+    args = parser.parse_args([])
+    assert args.starting_bankroll_usd == 10_000.0
+    assert args.position_fraction == 0.01
+    assert args.min_multiplier == 0.10
+    assert args.scale_factor == 0.01
+    assert args.max_cost_per_trade == 1_000.0
+    assert args.edge_scale == 5.0
+    assert args.max_multiplier == 3.0
+    assert args.min_trades_for_edge == 10
+    assert args.platform == "polymarket"
+    assert args.start_ts is None
+    assert args.end_ts is None
+
+
+def test_build_parser_accepts_csv_path(tmp_path: Path) -> None:
+    parser = build_parser()
+    target = str(tmp_path / "x.csv")
+    args = parser.parse_args(["--csv", target])
+    assert args.csv == target
 
 
 def test_simulator_initializes_per_scheme_state() -> None:
