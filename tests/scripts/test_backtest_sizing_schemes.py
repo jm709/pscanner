@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from scripts.backtest_copy_sizing import EqualWeight, Trade
+import pytest
+from scripts.backtest_copy_sizing import ConcentrationCapped, EqualWeight, Trade
 
 
 def _trade(
@@ -35,3 +36,32 @@ def test_equal_weight_ignores_trade_details() -> None:
     cost_a = scheme.compute(_trade(price=0.1, notional_usd=50.0), bankroll=5_000.0)
     cost_b = scheme.compute(_trade(price=0.9, notional_usd=500.0), bankroll=5_000.0)
     assert cost_a == cost_b == 100.0
+
+
+def test_concentration_capped_first_trade_per_wallet_is_unit_multiplier() -> None:
+    scheme = ConcentrationCapped(
+        position_fraction=0.01, min_multiplier=0.10, watchlist_size=10
+    )
+    cost = scheme.compute(_trade(wallet="0xA"), bankroll=10_000.0)
+    assert cost == 100.0
+
+
+def test_concentration_capped_decays_with_repeat_offender() -> None:
+    scheme = ConcentrationCapped(
+        position_fraction=0.01, min_multiplier=0.10, watchlist_size=10
+    )
+    scheme.compute(_trade(wallet="0xA"), bankroll=10_000.0)
+    scheme.compute(_trade(wallet="0xA"), bankroll=10_000.0)
+    scheme.compute(_trade(wallet="0xB"), bankroll=10_000.0)
+    cost = scheme.compute(_trade(wallet="0xA"), bankroll=10_000.0)
+    assert cost == pytest.approx(10_000.0 * 0.01 * 0.15)
+
+
+def test_concentration_capped_floors_at_min_multiplier() -> None:
+    scheme = ConcentrationCapped(
+        position_fraction=0.01, min_multiplier=0.25, watchlist_size=100
+    )
+    for _ in range(50):
+        scheme.compute(_trade(wallet="0xA"), bankroll=10_000.0)
+    cost = scheme.compute(_trade(wallet="0xA"), bankroll=10_000.0)
+    assert cost == pytest.approx(10_000.0 * 0.01 * 0.25)

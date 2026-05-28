@@ -43,3 +43,42 @@ class EqualWeight:
     def observe_resolution(self, trade: Trade, payout: float) -> None:
         """Record resolution outcome (no-op for stateless scheme)."""
         del trade, payout
+
+
+class ConcentrationCapped:
+    """Production sizing: cost = bankroll * position_fraction * mult.
+
+    Mirrors ``pscanner.strategies.evaluators.subgraph_copy
+    .SubgraphCopyEvaluator._concentration_multiplier``. The running
+    count is incremented AFTER the size is computed so the first trade
+    per wallet always gets a clean 1.0 multiplier.
+    """
+
+    name = "concentration_capped"
+
+    def __init__(
+        self,
+        *,
+        position_fraction: float,
+        min_multiplier: float,
+        watchlist_size: int,
+    ) -> None:
+        """Initialize concentration-capped sizing scheme."""
+        self._position_fraction = position_fraction
+        self._min_multiplier = min_multiplier
+        self._watchlist_size = max(1, watchlist_size)
+        self._counts: dict[str, int] = {}
+
+    def compute(self, trade: Trade, bankroll: float) -> float:
+        """Size the trade, decaying the multiplier as wallet share rises."""
+        total = sum(self._counts.values())
+        share = self._counts.get(trade.wallet, 0) / total if total else 0.0
+        target_share = 1.0 / self._watchlist_size
+        raw = min(1.0, target_share / max(share, target_share))
+        mult = max(raw, self._min_multiplier)
+        self._counts[trade.wallet] = self._counts.get(trade.wallet, 0) + 1
+        return bankroll * self._position_fraction * mult
+
+    def observe_resolution(self, trade: Trade, payout: float) -> None:
+        """Record resolution outcome (no-op; concentration ignores outcomes)."""
+        del trade, payout
