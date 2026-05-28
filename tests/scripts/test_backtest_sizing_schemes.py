@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from scripts.backtest_copy_sizing import (
     ConcentrationCapped,
+    EdgeWeightedCausal,
     EqualWeight,
     FollowSeedSize,
     Trade,
@@ -89,3 +90,59 @@ def test_follow_seed_size_ignores_bankroll() -> None:
     cost_a = scheme.compute(_trade(notional_usd=2_000.0), bankroll=100.0)
     cost_b = scheme.compute(_trade(notional_usd=2_000.0), bankroll=1_000_000.0)
     assert cost_a == cost_b == 20.0
+
+
+def test_edge_weighted_returns_unit_multiplier_when_below_min_trades() -> None:
+    scheme = EdgeWeightedCausal(
+        position_fraction=0.01,
+        edge_scale=5.0,
+        min_multiplier=0.25,
+        max_multiplier=3.0,
+        min_trades_for_edge=10,
+    )
+    for _ in range(5):
+        scheme.observe_resolution(_trade(wallet="0xA", price=0.5), payout=1.0)
+    cost = scheme.compute(_trade(wallet="0xA"), bankroll=10_000.0)
+    assert cost == 100.0
+
+
+def test_edge_weighted_scales_up_with_positive_edge() -> None:
+    scheme = EdgeWeightedCausal(
+        position_fraction=0.01,
+        edge_scale=5.0,
+        min_multiplier=0.25,
+        max_multiplier=3.0,
+        min_trades_for_edge=10,
+    )
+    for _ in range(10):
+        scheme.observe_resolution(_trade(wallet="0xA", price=0.5), payout=1.0)
+    cost = scheme.compute(_trade(wallet="0xA"), bankroll=10_000.0)
+    assert cost == 300.0
+
+
+def test_edge_weighted_scales_down_with_negative_edge() -> None:
+    scheme = EdgeWeightedCausal(
+        position_fraction=0.01,
+        edge_scale=5.0,
+        min_multiplier=0.25,
+        max_multiplier=3.0,
+        min_trades_for_edge=10,
+    )
+    for _ in range(10):
+        scheme.observe_resolution(_trade(wallet="0xA", price=0.5), payout=0.0)
+    cost = scheme.compute(_trade(wallet="0xA"), bankroll=10_000.0)
+    assert cost == 25.0
+
+
+def test_edge_weighted_state_is_per_wallet() -> None:
+    scheme = EdgeWeightedCausal(
+        position_fraction=0.01,
+        edge_scale=5.0,
+        min_multiplier=0.25,
+        max_multiplier=3.0,
+        min_trades_for_edge=2,
+    )
+    for _ in range(2):
+        scheme.observe_resolution(_trade(wallet="0xA", price=0.5), payout=1.0)
+    cost_b = scheme.compute(_trade(wallet="0xB"), bankroll=10_000.0)
+    assert cost_b == 100.0

@@ -102,3 +102,47 @@ class FollowSeedSize:
     def observe_resolution(self, trade: Trade, payout: float) -> None:
         """Record resolution outcome (no-op; stateless scheme)."""
         del trade, payout
+
+
+class EdgeWeightedCausal:
+    """Edge-weighted sizing with strict no-look-ahead.
+
+    ``compute`` uses ONLY trades passed via :meth:`observe_resolution`
+    BEFORE this call. The event-walk caller is responsible for
+    processing resolutions in ``ts`` order before any subsequent trade
+    with ``ts >= resolution.ts``.
+    """
+
+    name = "edge_weighted_causal"
+
+    def __init__(
+        self,
+        *,
+        position_fraction: float,
+        edge_scale: float,
+        min_multiplier: float,
+        max_multiplier: float,
+        min_trades_for_edge: int,
+    ) -> None:
+        """Initialize edge-weighted causal sizing scheme."""
+        self._position_fraction = position_fraction
+        self._edge_scale = edge_scale
+        self._min_multiplier = min_multiplier
+        self._max_multiplier = max_multiplier
+        self._min_trades_for_edge = min_trades_for_edge
+        self._resolved: dict[str, list[tuple[float, float]]] = {}
+
+    def compute(self, trade: Trade, bankroll: float) -> float:
+        """Size based on wallet's rolling realized edge from prior resolved trades."""
+        prior = self._resolved.get(trade.wallet, [])
+        if len(prior) < self._min_trades_for_edge:
+            mult = 1.0
+        else:
+            edge = sum(p - imp for p, imp in prior) / len(prior)
+            raw = 1.0 + self._edge_scale * edge
+            mult = max(self._min_multiplier, min(self._max_multiplier, raw))
+        return bankroll * self._position_fraction * mult
+
+    def observe_resolution(self, trade: Trade, payout: float) -> None:
+        """Append (payout, fill price) to this wallet's resolved-trade history."""
+        self._resolved.setdefault(trade.wallet, []).append((payout, trade.price))
