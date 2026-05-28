@@ -310,9 +310,7 @@ class Simulator:
                     ),
                     payout=payout,
                 )
-                state.nav_series.append(
-                    (resolution.resolved_at, state.cumulative_pnl)
-                )
+                state.nav_series.append((resolution.resolved_at, state.cumulative_pnl))
 
 
 def load_watchlist(daemon_db: Path) -> set[str]:
@@ -503,8 +501,7 @@ def _render_headline_table(sim: Simulator, schemes: list[SizingScheme]) -> str:
 def _render_risk_table(sim: Simulator, schemes: list[SizingScheme]) -> str:
     """Return the risk-metrics markdown table (one row per scheme)."""
     rows = [
-        "| Scheme | Max DD | DD duration (days) | Sharpe-like"
-        " | Worst trade | Best trade |\n",
+        "| Scheme | Max DD | DD duration (days) | Sharpe-like | Worst trade | Best trade |\n",
         "|---|---:|---:|---:|---:|---:|\n",
     ]
     for scheme in schemes:
@@ -531,9 +528,7 @@ def _render_quarterly_grid(sim: Simulator, schemes: list[SizingScheme]) -> str:
         for r in state.resolved_trades:
             q = _quarter_label(r.resolved_at)
             all_quarters.add(q)
-            quarter_pnl[scheme.name][q] = (
-                quarter_pnl[scheme.name].get(q, 0.0) + r.pnl
-            )
+            quarter_pnl[scheme.name][q] = quarter_pnl[scheme.name].get(q, 0.0) + r.pnl
     sorted_q = sorted(all_quarters)
     if not sorted_q:
         return "(no resolved trades)\n"
@@ -542,9 +537,7 @@ def _render_quarterly_grid(sim: Simulator, schemes: list[SizingScheme]) -> str:
         "|---|" + "|".join("---:" for _ in sorted_q) + "|\n",
     ]
     for scheme in schemes:
-        cells = " | ".join(
-            f"${quarter_pnl[scheme.name].get(q, 0.0):+,.0f}" for q in sorted_q
-        )
+        cells = " | ".join(f"${quarter_pnl[scheme.name].get(q, 0.0):+,.0f}" for q in sorted_q)
         rows.append(f"| {scheme.name} | {cells} |\n")
     return "".join(rows)
 
@@ -584,9 +577,12 @@ def render_report(
     return (
         "# Backtest: copy-trading sizing comparison\n"
         f"Bankroll: ${bankroll:,.2f}\n"
-        "\n## Headline\n" + _render_headline_table(sim, schemes)
-        + "\n## Risk\n" + _render_risk_table(sim, schemes)
-        + "\n## Quarterly PnL\n" + _render_quarterly_grid(sim, schemes)
+        "\n## Headline\n"
+        + _render_headline_table(sim, schemes)
+        + "\n## Risk\n"
+        + _render_risk_table(sim, schemes)
+        + "\n## Quarterly PnL\n"
+        + _render_quarterly_grid(sim, schemes)
         + "\n## Top contributors (best-PnL scheme)\n"
         + _render_top_contributors(sim, schemes)
     )
@@ -627,9 +623,18 @@ def _write_csv(sim: Simulator, schemes: list[SizingScheme], path: str) -> None:
         w = _csv.writer(fh)
         w.writerow(
             [
-                "scheme", "wallet", "condition_id", "outcome_side", "price",
-                "shares", "cost", "payout", "proceeds", "pnl",
-                "trade_ts", "resolved_at",
+                "scheme",
+                "wallet",
+                "condition_id",
+                "outcome_side",
+                "price",
+                "shares",
+                "cost",
+                "payout",
+                "proceeds",
+                "pnl",
+                "trade_ts",
+                "resolved_at",
             ]
         )
         for scheme in schemes:
@@ -638,17 +643,23 @@ def _write_csv(sim: Simulator, schemes: list[SizingScheme], path: str) -> None:
                 pos = r.open_pos
                 w.writerow(
                     [
-                        scheme.name, pos.wallet, pos.condition_id, pos.outcome_side,
-                        f"{pos.price}", f"{pos.shares}", f"{pos.cost}",
-                        f"{r.payout}", f"{r.proceeds}", f"{r.pnl}",
-                        pos.ts, r.resolved_at,
+                        scheme.name,
+                        pos.wallet,
+                        pos.condition_id,
+                        pos.outcome_side,
+                        f"{pos.price}",
+                        f"{pos.shares}",
+                        f"{pos.cost}",
+                        f"{r.payout}",
+                        f"{r.proceeds}",
+                        f"{r.pnl}",
+                        pos.ts,
+                        r.resolved_at,
                     ]
                 )
 
 
-def _build_schemes(
-    args: argparse.Namespace, watchlist_size: int
-) -> list[SizingScheme]:
+def _build_schemes(args: argparse.Namespace, watchlist_size: int) -> list[SizingScheme]:
     """Instantiate the four sizing schemes from CLI args."""
     return [
         EqualWeight(position_fraction=args.position_fraction),

@@ -80,8 +80,7 @@ def _make_corpus_db(
     )
     for i, (w, cid, side, bs, price, notional, ts) in enumerate(trades):
         conn.execute(
-            "INSERT INTO corpus_trades VALUES "
-            "('polymarket', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO corpus_trades VALUES ('polymarket', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 f"0xtx{i}",
                 f"asset{i}",
@@ -97,8 +96,7 @@ def _make_corpus_db(
         )
     for cid, yes_won, resolved_at in resolutions:
         conn.execute(
-            "INSERT INTO market_resolutions VALUES "
-            "('polymarket', ?, ?, ?, ?, 'test', ?)",
+            "INSERT INTO market_resolutions VALUES ('polymarket', ?, ?, ?, ?, 'test', ?)",
             (cid, 0 if yes_won else 1, yes_won, resolved_at, resolved_at),
         )
     conn.commit()
@@ -116,9 +114,7 @@ def test_load_watchlist_excludes_inactive(tmp_path: Path) -> None:
     db = tmp_path / "daemon.sqlite3"
     _make_daemon_db(db, ["0xa"])
     conn = sqlite3.connect(db)
-    conn.execute(
-        "INSERT INTO wallet_watchlist VALUES ('0xc', 'test', 'test', 1, 0)"
-    )
+    conn.execute("INSERT INTO wallet_watchlist VALUES ('0xc', 'test', 'test', 1, 0)")
     conn.commit()
     conn.close()
     addrs = load_watchlist(db)
@@ -190,11 +186,7 @@ def test_load_event_stream_skips_unresolved_markets(tmp_path: Path) -> None:
     )
     events = list(load_event_stream(db, watchlist={"0xa"}, platform="polymarket"))
     cids = {
-        (
-            e.trade.condition_id
-            if isinstance(e, TradeEvent)
-            else e.resolution.condition_id
-        )
+        (e.trade.condition_id if isinstance(e, TradeEvent) else e.resolution.condition_id)
         for e in events
     }
     assert cids == {"0xM1"}
@@ -213,9 +205,7 @@ def test_render_report_includes_all_scheme_rows() -> None:
             ts=100,
         )
     )
-    sim.on_resolution(
-        Resolution(condition_id="0xM1", winning_side="YES", resolved_at=200)
-    )
+    sim.on_resolution(Resolution(condition_id="0xM1", winning_side="YES", resolved_at=200))
     report = render_report(sim, schemes=schemes, bankroll=10_000.0)
     assert "equal_weight" in report
     assert "PnL" in report
@@ -248,9 +238,7 @@ def test_render_report_includes_quarterly_grid_and_unresolved_count() -> None:
         )
     )
     sim.on_resolution(
-        Resolution(
-            condition_id="0xM1", winning_side="YES", resolved_at=1_700_000_500
-        )
+        Resolution(condition_id="0xM1", winning_side="YES", resolved_at=1_700_000_500)
     )
     report = render_report(sim, schemes=schemes, bankroll=10_000.0)
     assert "Unresolved" in report
@@ -303,9 +291,7 @@ def test_simulator_books_pnl_on_resolution() -> None:
             ts=100,
         )
     )
-    sim.on_resolution(
-        Resolution(condition_id="0xM1", winning_side="YES", resolved_at=200)
-    )
+    sim.on_resolution(Resolution(condition_id="0xM1", winning_side="YES", resolved_at=200))
     state = sim.state_for(scheme)
     assert state.open_positions == {}
     assert len(state.resolved_trades) == 1
@@ -330,9 +316,7 @@ def test_simulator_books_zero_payout_on_losing_outcome() -> None:
             ts=100,
         )
     )
-    sim.on_resolution(
-        Resolution(condition_id="0xM1", winning_side="NO", resolved_at=200)
-    )
+    sim.on_resolution(Resolution(condition_id="0xM1", winning_side="NO", resolved_at=200))
     rec = sim.state_for(scheme).resolved_trades[0]
     assert rec.payout == 0.0
     assert rec.pnl == -100.0
@@ -373,12 +357,8 @@ def test_simulator_temporal_correctness_with_edge_weighted() -> None:
             ts=200,
         )
     )
-    sim.on_resolution(
-        Resolution(condition_id="0xM1", winning_side="YES", resolved_at=300)
-    )
-    sim.on_resolution(
-        Resolution(condition_id="0xM2", winning_side="YES", resolved_at=400)
-    )
+    sim.on_resolution(Resolution(condition_id="0xM1", winning_side="YES", resolved_at=300))
+    sim.on_resolution(Resolution(condition_id="0xM2", winning_side="YES", resolved_at=400))
     sim.on_trade(
         Trade(
             wallet="0xA",
@@ -417,9 +397,7 @@ def test_simulator_resolves_multiple_open_positions_on_same_market() -> None:
             ts=150,
         )
     )
-    sim.on_resolution(
-        Resolution(condition_id="0xM1", winning_side="YES", resolved_at=200)
-    )
+    sim.on_resolution(Resolution(condition_id="0xM1", winning_side="YES", resolved_at=200))
     state = sim.state_for(scheme)
     assert state.open_positions == {}
     assert len(state.resolved_trades) == 2

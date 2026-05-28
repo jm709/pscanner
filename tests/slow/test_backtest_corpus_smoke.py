@@ -61,9 +61,7 @@ def test_backtest_produces_finite_report_against_corpus() -> None:
     sim = Simulator(schemes=schemes, bankroll=bankroll)
     n_trades = 0
     n_resolutions = 0
-    for event in load_event_stream(
-        _CORPUS_DB, watchlist=limited, platform="polymarket"
-    ):
+    for event in load_event_stream(_CORPUS_DB, watchlist=limited, platform="polymarket"):
         if isinstance(event, TradeEvent):
             sim.on_trade(event.trade)
             n_trades += 1

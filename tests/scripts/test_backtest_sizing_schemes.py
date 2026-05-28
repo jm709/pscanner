@@ -45,17 +45,13 @@ def test_equal_weight_ignores_trade_details() -> None:
 
 
 def test_concentration_capped_first_trade_per_wallet_is_unit_multiplier() -> None:
-    scheme = ConcentrationCapped(
-        position_fraction=0.01, min_multiplier=0.10, watchlist_size=10
-    )
+    scheme = ConcentrationCapped(position_fraction=0.01, min_multiplier=0.10, watchlist_size=10)
     cost = scheme.compute(_trade(wallet="0xA"), bankroll=10_000.0)
     assert cost == 100.0
 
 
 def test_concentration_capped_decays_with_repeat_offender() -> None:
-    scheme = ConcentrationCapped(
-        position_fraction=0.01, min_multiplier=0.10, watchlist_size=10
-    )
+    scheme = ConcentrationCapped(position_fraction=0.01, min_multiplier=0.10, watchlist_size=10)
     scheme.compute(_trade(wallet="0xA"), bankroll=10_000.0)
     scheme.compute(_trade(wallet="0xA"), bankroll=10_000.0)
     scheme.compute(_trade(wallet="0xB"), bankroll=10_000.0)
@@ -64,9 +60,7 @@ def test_concentration_capped_decays_with_repeat_offender() -> None:
 
 
 def test_concentration_capped_floors_at_min_multiplier() -> None:
-    scheme = ConcentrationCapped(
-        position_fraction=0.01, min_multiplier=0.25, watchlist_size=100
-    )
+    scheme = ConcentrationCapped(position_fraction=0.01, min_multiplier=0.25, watchlist_size=100)
     for _ in range(50):
         scheme.compute(_trade(wallet="0xA"), bankroll=10_000.0)
     cost = scheme.compute(_trade(wallet="0xA"), bankroll=10_000.0)
