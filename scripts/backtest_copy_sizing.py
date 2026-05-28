@@ -12,6 +12,7 @@ Spec: docs/superpowers/specs/2026-05-28-backtest-copy-sizing-design.md
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal, Protocol
 
 
 @dataclass(frozen=True)
@@ -146,3 +147,101 @@ class EdgeWeightedCausal:
     def observe_resolution(self, trade: Trade, payout: float) -> None:
         """Append (payout, fill price) to this wallet's resolved-trade history."""
         self._resolved.setdefault(trade.wallet, []).append((payout, trade.price))
+
+
+@dataclass(frozen=True)
+class Resolution:
+    """A market resolution event from ``market_resolutions``."""
+
+    condition_id: str
+    winning_side: str  # "YES" or "NO"
+    resolved_at: int
+
+
+@dataclass(frozen=True)
+class TradeEvent:
+    """A chronologically-ordered trade event in the simulator stream."""
+
+    kind: Literal["trade"]
+    ts: int
+    trade: Trade
+
+
+@dataclass(frozen=True)
+class ResolutionEvent:
+    """A chronologically-ordered resolution event in the simulator stream."""
+
+    kind: Literal["resolution"]
+    ts: int
+    resolution: Resolution
+
+
+@dataclass
+class OpenPos:
+    """One open paper position held by a sizing scheme."""
+
+    trade_id: int
+    wallet: str
+    condition_id: str
+    outcome_side: str
+    shares: float
+    cost: float
+    ts: int
+    price: float
+
+
+@dataclass
+class ResolvedTradeRecord:
+    """A position closed by a resolution; carries the final PnL."""
+
+    open_pos: OpenPos
+    payout: float
+    proceeds: float
+    pnl: float
+    resolved_at: int
+
+
+@dataclass
+class BacktestState:
+    """Per-scheme mutable simulator state."""
+
+    open_positions: dict[int, OpenPos]
+    resolved_trades: list[ResolvedTradeRecord]
+    cumulative_pnl: float
+    nav_series: list[tuple[int, float]]
+
+
+class SizingScheme(Protocol):
+    """Protocol every sizing scheme satisfies."""
+
+    name: str
+
+    def compute(self, trade: Trade, bankroll: float) -> float:
+        """Return the cost (USD) to size this trade at."""
+        ...
+
+    def observe_resolution(self, trade: Trade, payout: float) -> None:
+        """Notify the scheme of a resolved trade's payout."""
+        ...
+
+
+class Simulator:
+    """Walks an event stream once, dispatching to per-scheme state."""
+
+    def __init__(self, *, schemes: list[SizingScheme], bankroll: float) -> None:
+        """Initialize per-scheme :class:`BacktestState`."""
+        self._schemes = schemes
+        self._bankroll = bankroll
+        self._states: dict[str, BacktestState] = {
+            s.name: BacktestState(
+                open_positions={},
+                resolved_trades=[],
+                cumulative_pnl=0.0,
+                nav_series=[],
+            )
+            for s in schemes
+        }
+
+    def state_for(self, scheme: SizingScheme) -> BacktestState:
+        """Return the mutable :class:`BacktestState` owned by ``scheme``."""
+        return self._states[scheme.name]
