@@ -11,8 +11,12 @@ Spec: docs/superpowers/specs/2026-05-28-backtest-copy-sizing-design.md
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, Protocol
+
+import duckdb
 
 
 @dataclass(frozen=True)
@@ -303,3 +307,111 @@ class Simulator:
                 state.nav_series.append(
                     (resolution.resolved_at, state.cumulative_pnl)
                 )
+
+
+def load_watchlist(daemon_db: Path) -> set[str]:
+    """Return the set of active watchlist addresses (lowercase)."""
+    con = duckdb.connect(":memory:")
+    con.execute(f"ATTACH '{daemon_db}' AS daemon (TYPE sqlite)")
+    rows = con.execute(
+        "SELECT LOWER(address) FROM daemon.wallet_watchlist WHERE active = 1"
+    ).fetchall()
+    con.close()
+    return {r[0] for r in rows}
+
+
+def load_event_stream(
+    corpus_db: Path,
+    *,
+    watchlist: set[str],
+    platform: str,
+    start_ts: int | None = None,
+    end_ts: int | None = None,
+) -> Iterator[TradeEvent | ResolutionEvent]:
+    """Yield :class:`TradeEvent` + :class:`ResolutionEvent` in ``ts`` order.
+
+    A trade is included only when its direction is ``BUY``, its
+    ``wallet_address`` is in ``watchlist``, and the trade's market has
+    a ``market_resolutions`` row for ``platform``. A resolution is
+    included only when at least one of its market's BUY trades passes
+    the trade filter above.
+    """
+    if not watchlist:
+        return
+    con = duckdb.connect(":memory:")
+    con.execute(f"ATTACH '{corpus_db}' AS c (TYPE sqlite)")
+    con.execute("CREATE TEMP TABLE wl(addr TEXT)")
+    con.executemany("INSERT INTO wl VALUES (?)", [(a,) for a in watchlist])
+    ts_filter = ""
+    params: list[int] = []
+    if start_ts is not None:
+        ts_filter += " AND t.ts >= ?"
+        params.append(start_ts)
+    if end_ts is not None:
+        ts_filter += " AND t.ts < ?"
+        params.append(end_ts)
+    # ts_filter is composed of fixed string literals, not user input. The actual
+    # bound values flow via the `?` placeholders below.
+    query = f"""
+        WITH eligible_trades AS (
+          SELECT
+            t.wallet_address AS wallet,
+            t.condition_id AS condition_id,
+            t.outcome_side AS outcome_side,
+            t.price AS price,
+            t.notional_usd AS notional_usd,
+            t.ts AS ts
+          FROM c.corpus_trades t
+          JOIN c.market_resolutions r
+            ON r.platform = t.platform AND r.condition_id = t.condition_id
+          WHERE t.platform = ?
+            AND t.bs = 'BUY'
+            AND LOWER(t.wallet_address) IN (SELECT addr FROM wl)
+            {ts_filter}
+        ),
+        eligible_resolutions AS (
+          SELECT
+            r.condition_id AS condition_id,
+            r.outcome_yes_won AS outcome_yes_won,
+            r.resolved_at AS ts
+          FROM c.market_resolutions r
+          WHERE r.platform = ?
+            AND r.condition_id IN (SELECT DISTINCT condition_id FROM eligible_trades)
+        )
+        SELECT
+          'trade' AS kind, ts, wallet, condition_id, outcome_side,
+          price, notional_usd, NULL AS outcome_yes_won
+        FROM eligible_trades
+        UNION ALL
+        SELECT
+          'resolution' AS kind, ts, NULL, condition_id, NULL,
+          NULL, NULL, outcome_yes_won
+        FROM eligible_resolutions
+        ORDER BY ts ASC
+    """  # noqa: S608
+    rows = con.execute(query, [platform, *params, platform]).fetchall()
+    con.close()
+    for kind, ts, wallet, cid, side, price, notional, yes_won in rows:
+        if kind == "trade":
+            yield TradeEvent(
+                kind="trade",
+                ts=int(ts),
+                trade=Trade(
+                    wallet=str(wallet),
+                    condition_id=str(cid),
+                    outcome_side=str(side),
+                    price=float(price),
+                    notional_usd=float(notional),
+                    ts=int(ts),
+                ),
+            )
+        else:
+            yield ResolutionEvent(
+                kind="resolution",
+                ts=int(ts),
+                resolution=Resolution(
+                    condition_id=str(cid),
+                    winning_side="YES" if int(yes_won) == 1 else "NO",
+                    resolved_at=int(ts),
+                ),
+            )
