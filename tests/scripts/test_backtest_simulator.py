@@ -138,6 +138,7 @@ def test_load_event_stream_orders_by_ts(tmp_path: Path) -> None:
     assert [e.ts for e in events] == [100, 200, 300, 400]
     assert isinstance(events[0], TradeEvent)
     assert isinstance(events[1], ResolutionEvent)
+    assert isinstance(events[3], ResolutionEvent)
     assert events[1].resolution.winning_side == "YES"
     assert events[3].resolution.winning_side == "NO"
 

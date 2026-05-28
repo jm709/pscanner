@@ -17,7 +17,7 @@ import csv as _csv
 import datetime as dt
 import math
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -238,9 +238,9 @@ class SizingScheme(Protocol):
 class Simulator:
     """Walks an event stream once, dispatching to per-scheme state."""
 
-    def __init__(self, *, schemes: list[SizingScheme], bankroll: float) -> None:
+    def __init__(self, *, schemes: Sequence[SizingScheme], bankroll: float) -> None:
         """Initialize per-scheme :class:`BacktestState`."""
-        self._schemes = schemes
+        self._schemes: Sequence[SizingScheme] = schemes
         self._bankroll = bankroll
         self._states: dict[str, BacktestState] = {
             s.name: BacktestState(
@@ -471,7 +471,7 @@ def _quarter_label(ts: int) -> str:
     return f"{d.year}-Q{(d.month - 1) // 3 + 1}"
 
 
-def _render_headline_table(sim: Simulator, schemes: list[SizingScheme]) -> str:
+def _render_headline_table(sim: Simulator, schemes: Sequence[SizingScheme]) -> str:
     """Return the headline-metrics markdown table (one row per scheme)."""
     rows = [
         "| Scheme | Trades | Cost | Proceeds | PnL | ROI | Win rate"
@@ -498,7 +498,7 @@ def _render_headline_table(sim: Simulator, schemes: list[SizingScheme]) -> str:
     return "".join(rows)
 
 
-def _render_risk_table(sim: Simulator, schemes: list[SizingScheme]) -> str:
+def _render_risk_table(sim: Simulator, schemes: Sequence[SizingScheme]) -> str:
     """Return the risk-metrics markdown table (one row per scheme)."""
     rows = [
         "| Scheme | Max DD | DD duration (days) | Sharpe-like | Worst trade | Best trade |\n",
@@ -519,7 +519,7 @@ def _render_risk_table(sim: Simulator, schemes: list[SizingScheme]) -> str:
     return "".join(rows)
 
 
-def _render_quarterly_grid(sim: Simulator, schemes: list[SizingScheme]) -> str:
+def _render_quarterly_grid(sim: Simulator, schemes: Sequence[SizingScheme]) -> str:
     """Return the quarterly-PnL markdown grid (one row per scheme)."""
     all_quarters: set[str] = set()
     quarter_pnl: dict[str, dict[str, float]] = {s.name: {} for s in schemes}
@@ -542,7 +542,7 @@ def _render_quarterly_grid(sim: Simulator, schemes: list[SizingScheme]) -> str:
     return "".join(rows)
 
 
-def _render_top_contributors(sim: Simulator, schemes: list[SizingScheme]) -> str:
+def _render_top_contributors(sim: Simulator, schemes: Sequence[SizingScheme]) -> str:
     """Return the top-wallet contributors block for the best-PnL scheme."""
     best_scheme = max(
         schemes,
@@ -570,7 +570,7 @@ def _render_top_contributors(sim: Simulator, schemes: list[SizingScheme]) -> str
 def render_report(
     sim: Simulator,
     *,
-    schemes: list[SizingScheme],
+    schemes: Sequence[SizingScheme],
     bankroll: float,
 ) -> str:
     """Render the backtest result as a multi-section markdown report."""
@@ -617,7 +617,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _write_csv(sim: Simulator, schemes: list[SizingScheme], path: str) -> None:
+def _write_csv(sim: Simulator, schemes: Sequence[SizingScheme], path: str) -> None:
     """Dump per-trade per-scheme rows to ``path`` for downstream analysis."""
     with Path(path).open("w", newline="") as fh:
         w = _csv.writer(fh)
