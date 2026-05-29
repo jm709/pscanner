@@ -219,6 +219,8 @@ class BacktestState:
     resolved_trades: list[ResolvedTradeRecord]
     cumulative_pnl: float
     nav_series: list[tuple[int, float]]
+    open_cost: float = 0.0
+    skipped_trades: int = 0
 
 
 class SizingScheme(Protocol):
@@ -238,10 +240,27 @@ class SizingScheme(Protocol):
 class Simulator:
     """Walks an event stream once, dispatching to per-scheme state."""
 
-    def __init__(self, *, schemes: Sequence[SizingScheme], bankroll: float) -> None:
-        """Initialize per-scheme :class:`BacktestState`."""
+    def __init__(
+        self,
+        *,
+        schemes: Sequence[SizingScheme],
+        bankroll: float,
+        enforce_capacity: bool = False,
+        max_open_exposure_usd: float | None = None,
+    ) -> None:
+        """Initialize per-scheme :class:`BacktestState`.
+
+        ``enforce_capacity`` (issue #204 gate #1) refuses a trade when the
+        scheme's free capital (``bankroll + cumulative_pnl - open_cost``)
+        cannot cover its cost. ``max_open_exposure_usd`` (gate #3) refuses a
+        trade when it would push the scheme's open-position cost over the cap.
+        Both default off, preserving the edge-measurement mode where every
+        scheme processes the identical trade stream.
+        """
         self._schemes: Sequence[SizingScheme] = schemes
         self._bankroll = bankroll
+        self._enforce_capacity = enforce_capacity
+        self._max_open_exposure_usd = max_open_exposure_usd
         self._states: dict[str, BacktestState] = {
             s.name: BacktestState(
                 open_positions={},
@@ -257,11 +276,31 @@ class Simulator:
         """Return the mutable :class:`BacktestState` owned by ``scheme``."""
         return self._states[scheme.name]
 
+    def _can_open(self, state: BacktestState, cost: float) -> bool:
+        """Return whether ``cost`` clears both capacity gates for ``state``."""
+        if self._enforce_capacity:
+            available = self._bankroll + state.cumulative_pnl - state.open_cost
+            if available < cost:
+                return False
+        return (
+            self._max_open_exposure_usd is None
+            or state.open_cost + cost <= self._max_open_exposure_usd
+        )
+
     def on_trade(self, trade: Trade) -> None:
-        """Size the trade and open a position for every scheme."""
+        """Size the trade and open a position for every scheme that can fund it.
+
+        ``scheme.compute`` is called before the gate, so a skipped trade still
+        triggers any compute side effects (e.g. ``ConcentrationCapped``'s
+        per-wallet counter). The cost is needed to evaluate the gate, so this
+        is unavoidable without a peek/commit split in the scheme protocol.
+        """
         for scheme in self._schemes:
             state = self._states[scheme.name]
             cost = scheme.compute(trade, self._bankroll)
+            if not self._can_open(state, cost):
+                state.skipped_trades += 1
+                continue
             shares = cost / trade.price if trade.price > 0 else 0.0
             state.open_positions[self._next_trade_id] = OpenPos(
                 trade_id=self._next_trade_id,
@@ -273,6 +312,7 @@ class Simulator:
                 ts=trade.ts,
                 price=trade.price,
             )
+            state.open_cost += cost
         self._next_trade_id += 1
 
     def on_resolution(self, resolution: Resolution) -> None:
@@ -286,6 +326,7 @@ class Simulator:
             ]
             for tid in closing:
                 pos = state.open_positions.pop(tid)
+                state.open_cost -= pos.cost
                 payout = 1.0 if resolution.winning_side == pos.outcome_side else 0.0
                 proceeds = pos.shares * payout
                 pnl = proceeds - pos.cost
@@ -475,8 +516,8 @@ def _render_headline_table(sim: Simulator, schemes: Sequence[SizingScheme]) -> s
     """Return the headline-metrics markdown table (one row per scheme)."""
     rows = [
         "| Scheme | Trades | Cost | Proceeds | PnL | ROI | Win rate"
-        " | Avg cost/trade | Unresolved |\n",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+        " | Avg cost/trade | Unresolved | Skipped |\n",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
     ]
     for scheme in schemes:
         state = sim.state_for(scheme)
@@ -493,7 +534,7 @@ def _render_headline_table(sim: Simulator, schemes: Sequence[SizingScheme]) -> s
             f"| {scheme.name} | {n:,} | ${cost:,.2f} | ${proceeds:,.2f}"
             f" | {'+' if pnl >= 0 else ''}${pnl:,.2f}"
             f" | {roi * 100:+.2f}% | {win_rate * 100:.2f}%"
-            f" | ${avg_cost:,.2f} | {unresolved} |\n"
+            f" | ${avg_cost:,.2f} | {unresolved} | {state.skipped_trades:,} |\n"
         )
     return "".join(rows)
 
@@ -567,17 +608,27 @@ def _render_top_contributors(sim: Simulator, schemes: Sequence[SizingScheme]) ->
     return "".join(rows)
 
 
+def _capacity_note(enforce_capacity: bool, max_open_exposure_usd: float | None) -> str:
+    """Return the one-line capacity-mode header note."""
+    enforcement = "ON" if enforce_capacity else "OFF"
+    cap = f"${max_open_exposure_usd:,.2f}" if max_open_exposure_usd is not None else "none"
+    return f"Capacity enforcement: {enforcement} | Max open exposure: {cap}\n"
+
+
 def render_report(
     sim: Simulator,
     *,
     schemes: Sequence[SizingScheme],
     bankroll: float,
+    enforce_capacity: bool = False,
+    max_open_exposure_usd: float | None = None,
 ) -> str:
     """Render the backtest result as a multi-section markdown report."""
     return (
         "# Backtest: copy-trading sizing comparison\n"
         f"Bankroll: ${bankroll:,.2f}\n"
-        "\n## Headline\n"
+        + _capacity_note(enforce_capacity, max_open_exposure_usd)
+        + "\n## Headline\n"
         + _render_headline_table(sim, schemes)
         + "\n## Risk\n"
         + _render_risk_table(sim, schemes)
@@ -609,6 +660,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--platform", default="polymarket")
     p.add_argument("--start-ts", type=int, default=None)
     p.add_argument("--end-ts", type=int, default=None)
+    p.add_argument(
+        "--enforce-capacity",
+        action="store_true",
+        help=(
+            "Refuse a trade when a scheme's free capital"
+            " (bankroll + realized PnL - open-position cost) cannot fund it."
+            " Off by default (edge-measurement mode)."
+        ),
+    )
+    exposure = p.add_mutually_exclusive_group()
+    exposure.add_argument(
+        "--max-open-exposure-usd",
+        type=float,
+        default=None,
+        help="Refuse a trade that would push open-position cost over this USD cap.",
+    )
+    exposure.add_argument(
+        "--max-open-exposure-frac",
+        type=float,
+        default=None,
+        help="Same cap as --max-open-exposure-usd, expressed as a fraction of bankroll.",
+    )
     p.add_argument(
         "--csv",
         default=None,
@@ -690,7 +763,15 @@ def main(argv: list[str] | None = None) -> int:
         print("Watchlist is empty; nothing to backtest.", file=sys.stderr)
         return 1
     schemes = _build_schemes(args, len(watchlist))
-    sim = Simulator(schemes=schemes, bankroll=args.starting_bankroll_usd)
+    max_exposure = args.max_open_exposure_usd
+    if args.max_open_exposure_frac is not None:
+        max_exposure = args.max_open_exposure_frac * args.starting_bankroll_usd
+    sim = Simulator(
+        schemes=schemes,
+        bankroll=args.starting_bankroll_usd,
+        enforce_capacity=args.enforce_capacity,
+        max_open_exposure_usd=max_exposure,
+    )
     for event in load_event_stream(
         Path(args.db),
         watchlist=watchlist,
@@ -702,7 +783,15 @@ def main(argv: list[str] | None = None) -> int:
             sim.on_trade(event.trade)
         else:
             sim.on_resolution(event.resolution)
-    print(render_report(sim, schemes=schemes, bankroll=args.starting_bankroll_usd))
+    print(
+        render_report(
+            sim,
+            schemes=schemes,
+            bankroll=args.starting_bankroll_usd,
+            enforce_capacity=args.enforce_capacity,
+            max_open_exposure_usd=max_exposure,
+        )
+    )
     if args.csv:
         _write_csv(sim, schemes, args.csv)
     return 0
