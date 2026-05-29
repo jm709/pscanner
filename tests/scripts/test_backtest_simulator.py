@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
 from scripts.backtest_copy_sizing import (
     EdgeWeightedCausal,
     EqualWeight,
@@ -260,6 +261,9 @@ def test_build_parser_has_expected_defaults() -> None:
     assert args.platform == "polymarket"
     assert args.start_ts is None
     assert args.end_ts is None
+    assert args.enforce_capacity is False
+    assert args.max_open_exposure_usd is None
+    assert args.max_open_exposure_frac is None
 
 
 def test_build_parser_accepts_csv_path(tmp_path: Path) -> None:
@@ -267,6 +271,27 @@ def test_build_parser_accepts_csv_path(tmp_path: Path) -> None:
     target = str(tmp_path / "x.csv")
     args = parser.parse_args(["--csv", target])
     assert args.csv == target
+
+
+def test_build_parser_accepts_capacity_flags() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["--enforce-capacity", "--max-open-exposure-usd", "5000"])
+    assert args.enforce_capacity is True
+    assert args.max_open_exposure_usd == 5_000.0
+    assert args.max_open_exposure_frac is None
+
+
+def test_build_parser_accepts_exposure_frac() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["--max-open-exposure-frac", "0.5"])
+    assert args.max_open_exposure_frac == 0.5
+    assert args.max_open_exposure_usd is None
+
+
+def test_build_parser_rejects_both_exposure_flags() -> None:
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--max-open-exposure-usd", "5000", "--max-open-exposure-frac", "0.5"])
 
 
 def test_simulator_initializes_per_scheme_state() -> None:
@@ -277,6 +302,8 @@ def test_simulator_initializes_per_scheme_state() -> None:
     assert state.resolved_trades == []
     assert state.cumulative_pnl == 0.0
     assert state.nav_series == []
+    assert state.open_cost == 0.0
+    assert state.skipped_trades == 0
 
 
 def test_simulator_books_pnl_on_resolution() -> None:
@@ -420,3 +447,107 @@ def test_simulator_unresolved_trade_stays_open() -> None:
     state = sim.state_for(scheme)
     assert len(state.open_positions) == 1
     assert state.resolved_trades == []
+
+
+def _buy(cid: str, ts: int, *, wallet: str = "0xA", price: float = 0.5) -> Trade:
+    return Trade(
+        wallet=wallet,
+        condition_id=cid,
+        outcome_side="YES",
+        price=price,
+        notional_usd=1_000.0,
+        ts=ts,
+    )
+
+
+def test_simulator_tracks_open_cost_across_open_and_close() -> None:
+    scheme = EqualWeight(position_fraction=0.5)  # cost = 500 per trade
+    sim = Simulator(schemes=[scheme], bankroll=1_000.0)
+    sim.on_trade(_buy("0xM1", 100))
+    sim.on_trade(_buy("0xM2", 110))
+    state = sim.state_for(scheme)
+    assert state.open_cost == 1_000.0
+    sim.on_resolution(Resolution(condition_id="0xM1", winning_side="NO", resolved_at=200))
+    assert state.open_cost == 500.0
+
+
+def test_capacity_gate_disabled_by_default_overspends_bankroll() -> None:
+    scheme = EqualWeight(position_fraction=0.5)  # cost = 500 per trade
+    sim = Simulator(schemes=[scheme], bankroll=1_000.0)
+    for i in range(4):
+        sim.on_trade(_buy(f"0xM{i}", 100 + i))
+    state = sim.state_for(scheme)
+    assert len(state.open_positions) == 4
+    assert state.skipped_trades == 0
+
+
+def test_capacity_gate_refuses_trade_when_capital_exhausted() -> None:
+    scheme = EqualWeight(position_fraction=0.5)  # cost = 500 per trade
+    sim = Simulator(schemes=[scheme], bankroll=1_000.0, enforce_capacity=True)
+    sim.on_trade(_buy("0xM1", 100))  # available 1000 >= 500 -> open
+    sim.on_trade(_buy("0xM2", 110))  # available 500 >= 500 -> open
+    sim.on_trade(_buy("0xM3", 120))  # available 0 < 500 -> skip
+    state = sim.state_for(scheme)
+    assert len(state.open_positions) == 2
+    assert state.skipped_trades == 1
+
+
+def test_capacity_gate_frees_capital_after_winning_resolution() -> None:
+    scheme = EqualWeight(position_fraction=1.0)  # cost = 1000 (whole bankroll)
+    sim = Simulator(schemes=[scheme], bankroll=1_000.0, enforce_capacity=True)
+    sim.on_trade(_buy("0xM1", 100))  # opens, open_cost=1000
+    sim.on_trade(_buy("0xM2", 110))  # available 0 < 1000 -> skip
+    # Win at price 0.5: shares=2000, proceeds=2000, pnl=+1000.
+    sim.on_resolution(Resolution(condition_id="0xM1", winning_side="YES", resolved_at=200))
+    sim.on_trade(_buy("0xM3", 300))  # available 1000+1000-0=2000 >= 1000 -> open
+    state = sim.state_for(scheme)
+    assert state.skipped_trades == 1
+    assert len(state.open_positions) == 1
+    assert next(iter(state.open_positions.values())).condition_id == "0xM3"
+
+
+def test_exposure_cap_disabled_by_default() -> None:
+    scheme = EqualWeight(position_fraction=0.5)  # cost = 500 per trade
+    sim = Simulator(schemes=[scheme], bankroll=1_000.0)
+    sim.on_trade(_buy("0xM1", 100))
+    sim.on_trade(_buy("0xM2", 110))
+    state = sim.state_for(scheme)
+    assert len(state.open_positions) == 2
+    assert state.skipped_trades == 0
+
+
+def test_exposure_cap_refuses_trade_over_cap() -> None:
+    scheme = EqualWeight(position_fraction=0.5)  # cost = 500 per trade
+    sim = Simulator(schemes=[scheme], bankroll=1_000.0, max_open_exposure_usd=600.0)
+    sim.on_trade(_buy("0xM1", 100))  # open_cost 0+500 <= 600 -> open
+    sim.on_trade(_buy("0xM2", 110))  # open_cost 500+500=1000 > 600 -> skip
+    state = sim.state_for(scheme)
+    assert len(state.open_positions) == 1
+    assert state.skipped_trades == 1
+
+
+def test_exposure_cap_frees_after_resolution() -> None:
+    scheme = EqualWeight(position_fraction=0.5)  # cost = 500 per trade
+    sim = Simulator(schemes=[scheme], bankroll=1_000.0, max_open_exposure_usd=600.0)
+    sim.on_trade(_buy("0xM1", 100))  # open
+    sim.on_resolution(Resolution(condition_id="0xM1", winning_side="NO", resolved_at=200))
+    sim.on_trade(_buy("0xM2", 300))  # open_cost back to 0 -> 500 <= 600 -> open
+    state = sim.state_for(scheme)
+    assert state.skipped_trades == 0
+    assert len(state.open_positions) == 1
+
+
+def test_render_report_includes_skipped_column_and_capacity_note() -> None:
+    schemes = [EqualWeight(position_fraction=0.5)]  # cost = 500 per trade
+    sim = Simulator(schemes=schemes, bankroll=1_000.0, enforce_capacity=True)
+    sim.on_trade(_buy("0xM1", 100))
+    sim.on_trade(_buy("0xM2", 110))
+    sim.on_trade(_buy("0xM3", 120))  # skipped
+    report = render_report(
+        sim,
+        schemes=schemes,
+        bankroll=1_000.0,
+        enforce_capacity=True,
+    )
+    assert "Skipped" in report
+    assert "Capacity enforcement" in report
