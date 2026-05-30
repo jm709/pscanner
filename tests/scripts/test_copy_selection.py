@@ -169,3 +169,44 @@ def test_iter_selected_rows_only_copies_top_k_in_frozen_period(corpus_factory) -
     # resolutions for copied markets are present and stream is ts-ordered
     assert any(r[0] == "resolution" and r[3] == "n1" for r in rows)
     assert [r[1] for r in rows] == sorted(r[1] for r in rows)
+
+
+def test_iter_selected_rows_empty_universe(corpus_factory) -> None:
+    rows = list(iter_selected_rows(
+        corpus_factory([], []), platform="polymarket", min_resolved=20,
+        edge_window_days=0, rebalance_days=None, rebalance_seconds=100,
+        policy=KPolicy(top_k=5), bankroll=10_000.0, start_ts=None, end_ts=None,
+    ))
+    assert rows == []
+
+
+def test_iter_selected_rows_k_larger_than_qualified(corpus_factory) -> None:
+    trades = [
+        ("A", "h1", "YES", "BUY", 0.30, 100.0, 1),
+        ("A", "h2", "YES", "BUY", 0.30, 100.0, 2),
+        ("A", "n1", "YES", "BUY", 0.50, 100.0, 150),
+    ]
+    resolutions = [("h1", 1, 50), ("h2", 1, 60), ("n1", 1, 300)]
+    rows = list(iter_selected_rows(
+        corpus_factory(trades, resolutions), platform="polymarket", min_resolved=2,
+        edge_window_days=0, rebalance_days=None, rebalance_seconds=100,
+        policy=KPolicy(top_k=50), bankroll=10_000.0, start_ts=None, end_ts=None,
+    ))
+    copied = {r[2] for r in rows if r[0] == "trade" and r[3] == "n1"}
+    assert copied == {"A"}  # only 1 qualifies; K=50 just takes all qualified
+
+
+def test_iter_selected_rows_no_platform_corpus(corpus_factory) -> None:
+    trades = [
+        ("A", "h1", "YES", "BUY", 0.30, 100.0, 1),
+        ("A", "h2", "YES", "BUY", 0.30, 100.0, 2),
+        ("A", "n1", "YES", "BUY", 0.50, 100.0, 150),
+    ]
+    resolutions = [("h1", 1, 50), ("h2", 1, 60), ("n1", 1, 300)]
+    rows = list(iter_selected_rows(
+        corpus_factory(trades, resolutions, with_platform=False),
+        platform="polymarket", min_resolved=2, edge_window_days=0,
+        rebalance_days=None, rebalance_seconds=100, policy=KPolicy(top_k=5),
+        bankroll=10_000.0, start_ts=None, end_ts=None,
+    ))
+    assert any(r[0] == "trade" and r[3] == "n1" for r in rows)
