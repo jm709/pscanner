@@ -24,7 +24,11 @@ from typing import Literal, Protocol
 
 import duckdb
 
-from scripts import copy_selection
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from scripts import copy_selection  # noqa: E402  (import after sys.path bootstrap)
 
 # Default top-K when no copy policy is given. 25 matches the live daemon's
 # watchlist target order of magnitude (anti-concentration sizing divides by it).

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import csv
 import sqlite3
+import subprocess
+import sys as _sys
 from pathlib import Path
 
 import pytest
@@ -630,3 +632,16 @@ def test_main_causal_select_end_to_end(corpus_factory, capsys, tmp_path) -> None
     assert equal_weight_rows[0]["wallet"] == "A"
     assert equal_weight_rows[0]["condition_id"] == "n1"
     assert {r["wallet"] for r in rows} == {"A"}
+
+
+def test_script_runs_via_direct_execution() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [_sys.executable, "scripts/backtest_copy_sizing.py", "--help"],
+        capture_output=True,
+        text=True,
+        cwd=repo_root,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--causal-select" in result.stdout
