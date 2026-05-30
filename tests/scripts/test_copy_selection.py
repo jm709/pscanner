@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from scripts.copy_selection import KPolicy, has_platform_column, ranked_qualifiers, resolve_k
+from scripts.copy_selection import (
+    KPolicy,
+    has_platform_column,
+    iter_selected_rows,
+    ranked_qualifiers,
+    resolve_k,
+)
 
 
 def test_resolve_k_fixed_count() -> None:
@@ -132,3 +138,34 @@ def test_ranked_qualifiers_rolling_window_drops_old_trades(corpus_factory) -> No
         platform="polymarket", min_resolved=2, edge_window_days=1, boundaries=[boundary],
     )
     assert rows == []  # only 1 trade inside the 1-day window -> below min_resolved
+
+
+def test_iter_selected_rows_only_copies_top_k_in_frozen_period(corpus_factory) -> None:
+    # Boundaries every 100s from ts=0. A & B both qualify positive by boundary 100;
+    # A has higher edge. top_k=1 -> only A copied. Each makes a NEW trade in [100,200).
+    trades = [
+        # qualifying history (resolves before boundary 100)
+        ("A", "h1", "YES", "BUY", 0.30, 100.0, 1),
+        ("A", "h2", "YES", "BUY", 0.30, 100.0, 2),
+        ("B", "h3", "YES", "BUY", 0.45, 100.0, 1),
+        ("B", "h4", "YES", "BUY", 0.45, 100.0, 2),
+        # new trades inside period [100,200)
+        ("A", "n1", "YES", "BUY", 0.50, 100.0, 150),
+        ("B", "n2", "YES", "BUY", 0.50, 100.0, 160),
+    ]
+    resolutions = [
+        ("h1", 1, 50), ("h2", 1, 60), ("h3", 1, 50), ("h4", 1, 60),
+        ("n1", 1, 300), ("n2", 1, 300),
+    ]
+    rows = list(iter_selected_rows(
+        corpus_factory(trades, resolutions),
+        platform="polymarket", min_resolved=2, edge_window_days=0,
+        rebalance_days=None, rebalance_seconds=100, policy=KPolicy(top_k=1),
+        bankroll=10_000.0, start_ts=None, end_ts=None,
+    ))
+    trade_rows = [r for r in rows if r[0] == "trade"]
+    copied_new = {r[2] for r in trade_rows if r[3] in ("n1", "n2")}
+    assert copied_new == {"A"}  # only top-1 wallet A copied; B excluded
+    # resolutions for copied markets are present and stream is ts-ordered
+    assert any(r[0] == "resolution" and r[3] == "n1" for r in rows)
+    assert [r[1] for r in rows] == sorted(r[1] for r in rows)

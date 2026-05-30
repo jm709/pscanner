@@ -128,3 +128,103 @@ def ranked_qualifiers(
         con.close()
     return [(int(b), str(w), float(e), int(n), int(rk), int(nq))
             for (b, w, e, n, rk, nq) in rows]
+
+
+def _make_boundaries(con: duckdb.DuckDBPyConnection, *, period: int,
+                     start_ts: int | None, end_ts: int | None) -> list[int]:
+    """Boundary grid spanning the trade ts range (or the provided window), step=period."""
+    lo, hi = con.execute("SELECT MIN(ts), MAX(ts) FROM rb").fetchone()
+    if lo is None:
+        return []
+    lo = start_ts if start_ts is not None else int(lo)
+    hi = end_ts if end_ts is not None else int(hi)
+    return list(range(lo, hi + 1, period))
+
+
+def iter_selected_rows(
+    db_path: Path, *, platform: str, min_resolved: int, edge_window_days: int,
+    rebalance_days: int | None, policy: KPolicy, bankroll: float,
+    start_ts: int | None, end_ts: int | None, rebalance_seconds: int | None = None,
+) -> Iterator[tuple]:
+    """Yield (kind, ts, wallet, condition_id, outcome_side, price, notional_usd,
+    outcome_yes_won) rows for the causally-selected copy stream, ts-ordered.
+
+    rebalance_seconds overrides rebalance_days (tests use small windows).
+    """
+    period = rebalance_seconds if rebalance_seconds is not None else rebalance_days * 86400
+    has_plat = has_platform_column(db_path)
+    con = _attach(db_path)
+    try:
+        _build_rb(con, platform=platform, has_platform=has_plat)
+        boundaries = _make_boundaries(con, period=period, start_ts=start_ts, end_ts=end_ts)
+        if not boundaries:
+            return
+        con.close()  # ranked_qualifiers reopens its own connection
+        con = None
+        ranked = ranked_qualifiers(
+            db_path, platform=platform, min_resolved=min_resolved,
+            edge_window_days=edge_window_days, boundaries=boundaries,
+        )
+        # apply per-boundary K cut
+        n_qual_by_b: dict[int, int] = {}
+        for b, _w, _e, _n, _rk, nq in ranked:
+            n_qual_by_b[b] = nq
+        copyset: list[tuple[int, str]] = []
+        for b, w, _e, _n, rk, _nq in ranked:
+            k = resolve_k(policy, bankroll=bankroll, qualified_count=n_qual_by_b[b])
+            if rk <= k:
+                copyset.append((b, w))
+        if not copyset:
+            return
+        yield from _stream_selected(
+            db_path, platform=platform, has_platform=has_plat, period=period,
+            copyset=copyset,
+        )
+    finally:
+        if con is not None:
+            con.close()
+
+
+def _stream_selected(
+    db_path: Path, *, platform: str, has_platform: bool, period: int,
+    copyset: list[tuple[int, str]],
+) -> Iterator[tuple]:
+    tpred = "AND t.platform = ?" if has_platform else ""
+    rpred = "AND r.platform = ?" if has_platform else ""
+    tparams = [platform] if has_platform else []
+    rparams = [platform] if has_platform else []
+    con = _attach(db_path)
+    try:
+        con.execute("CREATE TEMP TABLE copyset(boundary_ts BIGINT, wallet VARCHAR)")
+        con.executemany("INSERT INTO copyset VALUES (?, ?)", copyset)
+        query = f"""
+            WITH selected AS (
+              SELECT t.wallet_address AS wallet, t.condition_id AS condition_id,
+                     t.outcome_side AS outcome_side, t.price AS price,
+                     t.notional_usd AS notional_usd, t.ts AS ts
+              FROM s.corpus_trades t
+              JOIN copyset cs ON cs.wallet = t.wallet_address
+                AND t.ts >= cs.boundary_ts AND t.ts < cs.boundary_ts + {period}
+              WHERE t.bs = 'BUY' {tpred}
+            ),
+            sel_res AS (
+              SELECT r.condition_id AS condition_id, r.outcome_yes_won AS outcome_yes_won,
+                     r.resolved_at AS ts
+              FROM s.market_resolutions r
+              WHERE r.condition_id IN (SELECT DISTINCT condition_id FROM selected) {rpred}
+            )
+            SELECT 'trade' AS kind, ts, wallet, condition_id, outcome_side,
+                   price, notional_usd, NULL AS outcome_yes_won FROM selected
+            UNION ALL
+            SELECT 'resolution' AS kind, ts, NULL, condition_id, NULL,
+                   NULL, NULL, outcome_yes_won FROM sel_res
+            ORDER BY ts ASC
+        """  # noqa: S608 -- period/predicates are fixed literals; values via ? params
+        cur = con.execute(query, [*tparams, *rparams])
+        while True:
+            batch = cur.fetchmany(100_000)
+            if not batch:
+                break
+            yield from batch
+    finally:
+        con.close()
