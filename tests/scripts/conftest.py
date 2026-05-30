@@ -14,8 +14,9 @@ Trade = tuple[str, str, str, str, float, float, int]
 Resolution = tuple[str, int, int]
 
 
-def _build(path: Path, trades: list[Trade], resolutions: list[Resolution],
-           *, with_platform: bool) -> None:
+def _build(
+    path: Path, trades: list[Trade], resolutions: list[Resolution], *, with_platform: bool
+) -> None:
     plat_col = "platform TEXT NOT NULL DEFAULT 'polymarket'," if with_platform else ""
     conn = sqlite3.connect(path)
     conn.executescript(
@@ -39,13 +40,12 @@ def _build(path: Path, trades: list[Trade], resolutions: list[Resolution],
     prefix = "'polymarket'," if with_platform else ""
     for i, (w, cid, side, bs, price, notional, ts) in enumerate(trades):
         conn.execute(
-            f"INSERT INTO corpus_trades VALUES ({prefix}?,?,?,?,?,?,?,?,?,?)",
-            (f"0xtx{i}", f"asset{i}", w, cid, side, bs, price,
-             notional / price, notional, ts),
+            f"INSERT INTO corpus_trades VALUES ({prefix}?,?,?,?,?,?,?,?,?,?)",  # noqa: S608
+            (f"0xtx{i}", f"asset{i}", w, cid, side, bs, price, notional / price, notional, ts),
         )
     for cid, yes_won, resolved_at in resolutions:
         conn.execute(
-            f"INSERT INTO market_resolutions VALUES ({prefix}?,?,?,?,'test',?)",
+            f"INSERT INTO market_resolutions VALUES ({prefix}?,?,?,?,'test',?)",  # noqa: S608
             (cid, 0 if yes_won else 1, yes_won, resolved_at, resolved_at),
         )
     conn.commit()
@@ -57,8 +57,9 @@ def corpus_factory(tmp_path: Path) -> Callable[..., Path]:
     """Return a builder: corpus_factory(trades, resolutions, with_platform=True) -> db path."""
     counter = {"n": 0}
 
-    def make(trades: list[Trade], resolutions: list[Resolution],
-             *, with_platform: bool = True) -> Path:
+    def make(
+        trades: list[Trade], resolutions: list[Resolution], *, with_platform: bool = True
+    ) -> Path:
         counter["n"] += 1
         db = tmp_path / f"corpus{counter['n']}.sqlite3"
         _build(db, trades, resolutions, with_platform=with_platform)

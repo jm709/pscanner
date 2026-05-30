@@ -64,7 +64,7 @@ def _build_rb(con: duckdb.DuckDBPyConnection, *, platform: str, has_platform: bo
     """Materialize the causal resolved-buy fact table `rb`."""
     tpred = "AND t.platform = ?" if has_platform else ""
     rpred = "AND r.platform = ?" if has_platform else ""
-    params = ([platform, platform] if has_platform else [])
+    params = [platform, platform] if has_platform else []
     con.execute(
         f"""
         CREATE TEMP TABLE rb AS
@@ -83,7 +83,11 @@ def _build_rb(con: duckdb.DuckDBPyConnection, *, platform: str, has_platform: bo
 
 
 def ranked_qualifiers(
-    db_path: Path, *, platform: str, min_resolved: int, edge_window_days: int,
+    db_path: Path,
+    *,
+    platform: str,
+    min_resolved: int,
+    edge_window_days: int,
     boundaries: Sequence[int],
 ) -> list[tuple[int, str, float, int, int, int]]:
     """Return (boundary_ts, wallet, edge, n_resolved, rank, n_qualified) rows.
@@ -101,8 +105,7 @@ def ranked_qualifiers(
         con.execute("CREATE TEMP TABLE bnd(boundary_ts BIGINT)")
         con.executemany("INSERT INTO bnd VALUES (?)", [(int(b),) for b in boundaries])
         window_pred = (
-            "" if edge_window_days == 0
-            else "AND rb.resolved_at >= b.boundary_ts - ? * 86400"
+            "" if edge_window_days == 0 else "AND rb.resolved_at >= b.boundary_ts - ? * 86400"
         )
         params = [] if edge_window_days == 0 else [edge_window_days]
         rows = con.execute(
@@ -126,14 +129,17 @@ def ranked_qualifiers(
         ).fetchall()
     finally:
         con.close()
-    return [(int(b), str(w), float(e), int(n), int(rk), int(nq))
-            for (b, w, e, n, rk, nq) in rows]
+    return [(int(b), str(w), float(e), int(n), int(rk), int(nq)) for (b, w, e, n, rk, nq) in rows]
 
 
-def _make_boundaries(con: duckdb.DuckDBPyConnection, *, period: int,
-                     start_ts: int | None, end_ts: int | None) -> list[int]:
+def _make_boundaries(
+    con: duckdb.DuckDBPyConnection, *, period: int, start_ts: int | None, end_ts: int | None
+) -> list[int]:
     """Boundary grid spanning the trade ts range (or the provided window), step=period."""
-    lo, hi = con.execute("SELECT MIN(ts), MAX(ts) FROM rb").fetchone()
+    row = con.execute("SELECT MIN(ts), MAX(ts) FROM rb").fetchone()
+    if row is None:
+        return []
+    lo, hi = row
     if lo is None:
         return []
     lo = start_ts if start_ts is not None else int(lo)
@@ -141,17 +147,51 @@ def _make_boundaries(con: duckdb.DuckDBPyConnection, *, period: int,
     return list(range(lo, hi + 1, period))
 
 
+def _resolve_period(rebalance_days: int | None, rebalance_seconds: int | None) -> int:
+    """Return the rebalance period in seconds, validating inputs."""
+    if rebalance_seconds is not None:
+        return rebalance_seconds
+    if rebalance_days is None:
+        raise ValueError("rebalance_days must be set when rebalance_seconds is None")
+    return rebalance_days * 86400
+
+
+def _build_copyset(
+    ranked: list[tuple[int, str, float, int, int, int]],
+    policy: KPolicy,
+    bankroll: float,
+) -> list[tuple[int, str]]:
+    """Apply per-boundary K cut to ranked qualifiers, returning (boundary_ts, wallet) pairs."""
+    n_qual_by_b: dict[int, int] = {b: nq for b, _w, _e, _n, _rk, nq in ranked}
+    copyset: list[tuple[int, str]] = []
+    for b, w, _e, _n, rk, _nq in ranked:
+        k = resolve_k(policy, bankroll=bankroll, qualified_count=n_qual_by_b[b])
+        if rk <= k:
+            copyset.append((b, w))
+    return copyset
+
+
 def iter_selected_rows(
-    db_path: Path, *, platform: str, min_resolved: int, edge_window_days: int,
-    rebalance_days: int | None, policy: KPolicy, bankroll: float,
-    start_ts: int | None, end_ts: int | None, rebalance_seconds: int | None = None,
+    db_path: Path,
+    *,
+    platform: str,
+    min_resolved: int,
+    edge_window_days: int,
+    rebalance_days: int | None,
+    policy: KPolicy,
+    bankroll: float,
+    start_ts: int | None,
+    end_ts: int | None,
+    rebalance_seconds: int | None = None,
 ) -> Iterator[tuple]:
-    """Yield (kind, ts, wallet, condition_id, outcome_side, price, notional_usd,
-    outcome_yes_won) rows for the causally-selected copy stream, ts-ordered.
+    """Yield event rows for the causally-selected copy stream, ts-ordered.
+
+    Row shape: (kind, ts, wallet, condition_id, outcome_side, price,
+    notional_usd, outcome_yes_won).
 
     rebalance_seconds overrides rebalance_days (tests use small windows).
     """
-    period = rebalance_seconds if rebalance_seconds is not None else rebalance_days * 86400
+    period = _resolve_period(rebalance_days, rebalance_seconds)
     has_plat = has_platform_column(db_path)
     con = _attach(db_path)
     try:
@@ -162,22 +202,20 @@ def iter_selected_rows(
         con.close()  # ranked_qualifiers reopens its own connection
         con = None
         ranked = ranked_qualifiers(
-            db_path, platform=platform, min_resolved=min_resolved,
-            edge_window_days=edge_window_days, boundaries=boundaries,
+            db_path,
+            platform=platform,
+            min_resolved=min_resolved,
+            edge_window_days=edge_window_days,
+            boundaries=boundaries,
         )
-        # apply per-boundary K cut
-        n_qual_by_b: dict[int, int] = {}
-        for b, _w, _e, _n, _rk, nq in ranked:
-            n_qual_by_b[b] = nq
-        copyset: list[tuple[int, str]] = []
-        for b, w, _e, _n, rk, _nq in ranked:
-            k = resolve_k(policy, bankroll=bankroll, qualified_count=n_qual_by_b[b])
-            if rk <= k:
-                copyset.append((b, w))
+        copyset = _build_copyset(ranked, policy, bankroll)
         if not copyset:
             return
         yield from _stream_selected(
-            db_path, platform=platform, has_platform=has_plat, period=period,
+            db_path,
+            platform=platform,
+            has_platform=has_plat,
+            period=period,
             copyset=copyset,
         )
     finally:
@@ -186,7 +224,11 @@ def iter_selected_rows(
 
 
 def _stream_selected(
-    db_path: Path, *, platform: str, has_platform: bool, period: int,
+    db_path: Path,
+    *,
+    platform: str,
+    has_platform: bool,
+    period: int,
     copyset: list[tuple[int, str]],
 ) -> Iterator[tuple]:
     tpred = "AND t.platform = ?" if has_platform else ""
