@@ -24,6 +24,8 @@ from typing import Literal, Protocol
 
 import duckdb
 
+from scripts import copy_selection
+
 
 @dataclass(frozen=True)
 class Trade:
@@ -806,14 +808,28 @@ def _build_schemes(args: argparse.Namespace, watchlist_size: int) -> list[Sizing
     ]
 
 
+def _resolve_policy(args: argparse.Namespace) -> copy_selection.KPolicy:
+    """Build the KPolicy from CLI args, defaulting to top-k 25."""
+    if args.copy_capital_per_wallet is not None:
+        return copy_selection.KPolicy(capital_per_wallet=args.copy_capital_per_wallet)
+    if args.copy_top_frac is not None:
+        return copy_selection.KPolicy(top_frac=args.copy_top_frac)
+    return copy_selection.KPolicy(top_k=args.copy_top_k if args.copy_top_k is not None else 25)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the backtest end-to-end against the corpus and print the report."""
     args = build_parser().parse_args(argv)
-    watchlist = load_watchlist(Path(args.watchlist_db))
-    if not watchlist:
-        print("Watchlist is empty; nothing to backtest.", file=sys.stderr)
-        return 1
-    schemes = _build_schemes(args, len(watchlist))
+    watchlist: set[str] = set()
+    if args.causal_select:
+        wl_size = args.copy_top_k or 25
+    else:
+        watchlist = load_watchlist(Path(args.watchlist_db))
+        if not watchlist:
+            print("Watchlist is empty; nothing to backtest.", file=sys.stderr)
+            return 1
+        wl_size = len(watchlist)
+    schemes = _build_schemes(args, wl_size)
     max_exposure = args.max_open_exposure_usd
     if args.max_open_exposure_frac is not None:
         max_exposure = args.max_open_exposure_frac * args.starting_bankroll_usd
@@ -823,19 +839,43 @@ def main(argv: list[str] | None = None) -> int:
         enforce_capacity=args.enforce_capacity,
         max_open_exposure_usd=max_exposure,
     )
-    for event in load_event_stream(
-        Path(args.db),
-        watchlist=watchlist,
-        platform=args.platform,
-        start_ts=args.start_ts,
-        end_ts=args.end_ts,
-    ):
+    if args.causal_select:
+        policy = _resolve_policy(args)
+        events = _rows_to_events(
+            copy_selection.iter_selected_rows(
+                Path(args.db),
+                platform=args.platform,
+                min_resolved=args.min_resolved,
+                edge_window_days=args.edge_window,
+                rebalance_days=args.rebalance_days,
+                policy=policy,
+                bankroll=args.starting_bankroll_usd,
+                start_ts=args.start_ts,
+                end_ts=args.end_ts,
+            )
+        )
+        selection_header = (
+            f"Causal selection: min_resolved={args.min_resolved}, "
+            f"edge_window={args.edge_window}d, rebalance_days={args.rebalance_days}, "
+            f"policy={policy}\n"
+        )
+    else:
+        events = load_event_stream(
+            Path(args.db),
+            watchlist=watchlist,
+            platform=args.platform,
+            start_ts=args.start_ts,
+            end_ts=args.end_ts,
+        )
+        selection_header = ""
+    for event in events:
         if isinstance(event, TradeEvent):
             sim.on_trade(event.trade)
         else:
             sim.on_resolution(event.resolution)
     print(
-        render_report(
+        selection_header
+        + render_report(
             sim,
             schemes=schemes,
             bankroll=args.starting_bankroll_usd,

@@ -586,14 +586,27 @@ def test_main_causal_select_end_to_end(corpus_factory, capsys) -> None:  # type:
         ("B", "n2", "YES", "BUY", 0.50, 100.0, 160),
     ]
     resolutions = [
-        ("h1", 1, 50), ("h2", 1, 60), ("h3", 0, 50), ("h4", 0, 60),
-        ("n1", 1, 300), ("n2", 1, 300),
+        ("h1", 1, 50),
+        ("h2", 1, 60),
+        ("h3", 0, 50),
+        ("h4", 0, 60),
+        ("n1", 1, 300),
+        ("n2", 1, 300),
     ]
     db = corpus_factory(trades, resolutions)
-    rc = main([
-        "--db", str(db), "--causal-select", "--min-resolved", "2",
-        "--rebalance-days", "1", "--copy-top-k", "5",
-    ])
+    rc = main(
+        [
+            "--db",
+            str(db),
+            "--causal-select",
+            "--min-resolved",
+            "2",
+            "--rebalance-days",
+            "1",
+            "--copy-top-k",
+            "5",
+        ]
+    )
     out = capsys.readouterr().out
     assert rc == 0
     assert "Causal selection" in out
