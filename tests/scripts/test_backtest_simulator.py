@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import csv
 import sqlite3
+import subprocess
+import sys as _sys
 from pathlib import Path
 
 import pytest
@@ -17,6 +20,7 @@ from scripts.backtest_copy_sizing import (
     build_parser,
     load_event_stream,
     load_watchlist,
+    main,
     render_report,
 )
 
@@ -551,3 +555,125 @@ def test_render_report_includes_skipped_column_and_capacity_note() -> None:
     )
     assert "Skipped" in report
     assert "Capacity enforcement" in report
+
+
+def test_build_parser_causal_select_defaults() -> None:
+    args = build_parser().parse_args(["--causal-select"])
+    assert args.causal_select is True
+    assert args.min_resolved == 20
+    assert args.edge_window == 0
+    assert args.rebalance_days == 14
+    assert args.copy_top_k is None
+    assert args.copy_capital_per_wallet is None
+    assert args.copy_top_frac is None
+
+
+def test_build_parser_causal_off_by_default() -> None:
+    args = build_parser().parse_args([])
+    assert args.causal_select is False
+
+
+def test_build_parser_rejects_two_copy_policies() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--copy-top-k", "10", "--copy-top-frac", "0.1"])
+
+
+def test_main_causal_select_end_to_end(corpus_factory, capsys, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # A qualifies positive and is copied; B never positive -> never copied.
+    # Historical trades (h*) resolve before the second rebalance boundary
+    # (at ts=86401 for --rebalance-days 1); the new-period trades (n1 for A,
+    # n2 for B) fall inside that boundary's copy window. Selection must filter
+    # B out so only A's n1 is booked.
+    day = 86_400
+    trades = [
+        ("A", "h1", "YES", "BUY", 0.30, 100.0, 1),
+        ("A", "h2", "YES", "BUY", 0.30, 100.0, 2),
+        ("B", "h3", "YES", "BUY", 0.90, 100.0, 1),
+        ("B", "h4", "YES", "BUY", 0.90, 100.0, 2),
+        ("A", "n1", "YES", "BUY", 0.50, 100.0, day + 100),
+        ("B", "n2", "YES", "BUY", 0.50, 100.0, day + 110),
+    ]
+    resolutions = [
+        ("h1", 1, 50),
+        ("h2", 1, 60),
+        ("h3", 0, 50),
+        ("h4", 0, 60),
+        ("n1", 1, day + 300),
+        ("n2", 1, day + 300),
+    ]
+    db = corpus_factory(trades, resolutions)
+    csv_path = tmp_path / "out.csv"
+    rc = main(
+        [
+            "--db",
+            str(db),
+            "--causal-select",
+            "--min-resolved",
+            "2",
+            "--rebalance-days",
+            "1",
+            "--copy-top-k",
+            "5",
+            "--csv",
+            str(csv_path),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Causal selection" in out
+    assert "equal_weight" in out
+    # equal_weight booked exactly 1 resolved trade (only A's n1; B's n2 filtered).
+    assert "| equal_weight | 1 |" in out
+    # Every booked row across all schemes belongs to wallet A — B was excluded.
+    with csv_path.open() as fh:
+        rows = list(csv.DictReader(fh))
+    equal_weight_rows = [r for r in rows if r["scheme"] == "equal_weight"]
+    assert len(equal_weight_rows) == 1
+    assert equal_weight_rows[0]["wallet"] == "A"
+    assert equal_weight_rows[0]["condition_id"] == "n1"
+    assert {r["wallet"] for r in rows} == {"A"}
+
+
+def test_main_causal_select_top_frac_policy(corpus_factory, capsys, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # Exercise the --copy-top-frac policy through main() (the top_k path is
+    # covered above). Same corpus: A is positive-edge, B never positive, so the
+    # positive-edge floor leaves only A regardless of the fraction; frac=1.0
+    # copies all qualified (= A). Proves _resolve_policy + wl_size wiring for frac.
+    day = 86_400
+    trades = [
+        ("A", "h1", "YES", "BUY", 0.30, 100.0, 1),
+        ("A", "h2", "YES", "BUY", 0.30, 100.0, 2),
+        ("B", "h3", "YES", "BUY", 0.90, 100.0, 1),
+        ("B", "h4", "YES", "BUY", 0.90, 100.0, 2),
+        ("A", "n1", "YES", "BUY", 0.50, 100.0, day + 100),
+        ("B", "n2", "YES", "BUY", 0.50, 100.0, day + 110),
+    ]
+    resolutions = [
+        ("h1", 1, 50), ("h2", 1, 60), ("h3", 0, 50), ("h4", 0, 60),
+        ("n1", 1, day + 300), ("n2", 1, day + 300),
+    ]
+    db = corpus_factory(trades, resolutions)
+    csv_path = tmp_path / "frac.csv"
+    rc = main([
+        "--db", str(db), "--causal-select", "--min-resolved", "2",
+        "--rebalance-days", "1", "--copy-top-frac", "1.0", "--csv", str(csv_path),
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "top_frac=1.0" in out  # policy threaded through to the header
+    with csv_path.open() as fh:
+        rows = list(csv.DictReader(fh))
+    assert {r["wallet"] for r in rows} == {"A"}
+
+
+def test_script_runs_via_direct_execution() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [_sys.executable, "scripts/backtest_copy_sizing.py", "--help"],
+        capture_output=True,
+        text=True,
+        cwd=repo_root,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--causal-select" in result.stdout

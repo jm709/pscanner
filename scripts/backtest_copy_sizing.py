@@ -17,12 +17,22 @@ import csv as _csv
 import datetime as dt
 import math
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
 import duckdb
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from scripts import copy_selection  # noqa: E402  (import after sys.path bootstrap)
+
+# Default top-K when no copy policy is given. 25 matches the live daemon's
+# watchlist target order of magnitude (anti-concentration sizing divides by it).
+_DEFAULT_TOP_K = 25
 
 
 @dataclass(frozen=True)
@@ -365,6 +375,40 @@ def load_watchlist(daemon_db: Path) -> set[str]:
     return {r[0] for r in rows}
 
 
+def _rows_to_events(rows: Iterable[tuple]) -> Iterator[TradeEvent | ResolutionEvent]:
+    """Convert event-row tuples into TradeEvent / ResolutionEvent objects.
+
+    Row shape: (kind, ts, wallet, condition_id, outcome_side, price,
+    notional_usd, outcome_yes_won). This shape mirrors the SELECT in
+    ``copy_selection._stream_selected`` (and ``load_event_stream`` below)
+    and MUST stay in sync with both — they all feed this converter.
+    """
+    for kind, ts, wallet, cid, side, price, notional, yes_won in rows:
+        if kind == "trade":
+            yield TradeEvent(
+                kind="trade",
+                ts=int(ts),
+                trade=Trade(
+                    wallet=str(wallet),
+                    condition_id=str(cid),
+                    outcome_side=str(side),
+                    price=float(price),
+                    notional_usd=float(notional),
+                    ts=int(ts),
+                ),
+            )
+        else:
+            yield ResolutionEvent(
+                kind="resolution",
+                ts=int(ts),
+                resolution=Resolution(
+                    condition_id=str(cid),
+                    winning_side="YES" if int(yes_won) == 1 else "NO",
+                    resolved_at=int(ts),
+                ),
+            )
+
+
 def load_event_stream(
     corpus_db: Path,
     *,
@@ -436,30 +480,7 @@ def load_event_stream(
     """  # noqa: S608
     rows = con.execute(query, [platform, *params, platform]).fetchall()
     con.close()
-    for kind, ts, wallet, cid, side, price, notional, yes_won in rows:
-        if kind == "trade":
-            yield TradeEvent(
-                kind="trade",
-                ts=int(ts),
-                trade=Trade(
-                    wallet=str(wallet),
-                    condition_id=str(cid),
-                    outcome_side=str(side),
-                    price=float(price),
-                    notional_usd=float(notional),
-                    ts=int(ts),
-                ),
-            )
-        else:
-            yield ResolutionEvent(
-                kind="resolution",
-                ts=int(ts),
-                resolution=Resolution(
-                    condition_id=str(cid),
-                    winning_side="YES" if int(yes_won) == 1 else "NO",
-                    resolved_at=int(ts),
-                ),
-            )
+    yield from _rows_to_events(rows)
 
 
 def _running_max_drawdown(nav_series: list[tuple[int, float]]) -> tuple[float, int]:
@@ -683,6 +704,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="Same cap as --max-open-exposure-usd, expressed as a fraction of bankroll.",
     )
     p.add_argument(
+        "--causal-select",
+        action="store_true",
+        help="Causally qualify+rank+select wallets from the corpus (ignores --watchlist-db).",
+    )
+    p.add_argument(
+        "--min-resolved",
+        type=int,
+        default=20,
+        help="Qualification: min resolved trades within the edge window.",
+    )
+    p.add_argument(
+        "--edge-window",
+        type=int,
+        default=0,
+        help="Rolling edge window in days; 0 = lifetime.",
+    )
+    p.add_argument(
+        "--rebalance-days",
+        type=int,
+        default=14,
+        help="Days between top-K copy-set recomputes.",
+    )
+    copy_policy = p.add_mutually_exclusive_group()
+    copy_policy.add_argument(
+        "--copy-top-k",
+        type=int,
+        default=None,
+        help="Copy the top N wallets by causal edge.",
+    )
+    copy_policy.add_argument(
+        "--copy-capital-per-wallet",
+        type=float,
+        default=None,
+        help="K = floor(bankroll / C).",
+    )
+    copy_policy.add_argument(
+        "--copy-top-frac",
+        type=float,
+        default=None,
+        help="Copy the top X fraction of qualified wallets.",
+    )
+    p.add_argument(
         "--csv",
         default=None,
         help="Optional path to dump per-trade per-scheme rows.",
@@ -755,14 +818,42 @@ def _build_schemes(args: argparse.Namespace, watchlist_size: int) -> list[Sizing
     ]
 
 
+def _resolve_policy(args: argparse.Namespace) -> copy_selection.KPolicy:
+    """Build the KPolicy from CLI args, defaulting to top-k _DEFAULT_TOP_K."""
+    if args.copy_capital_per_wallet is not None:
+        return copy_selection.KPolicy(capital_per_wallet=args.copy_capital_per_wallet)
+    if args.copy_top_frac is not None:
+        return copy_selection.KPolicy(top_frac=args.copy_top_frac)
+    return copy_selection.KPolicy(
+        top_k=args.copy_top_k if args.copy_top_k is not None else _DEFAULT_TOP_K
+    )
+
+
+def _watchlist_size_for_policy(policy: copy_selection.KPolicy, bankroll: float) -> int:
+    """Anti-concentration watchlist size implied by a resolved copy policy."""
+    if policy.top_k is not None:
+        return policy.top_k
+    if policy.capital_per_wallet is not None:
+        return max(1, int(bankroll // policy.capital_per_wallet))
+    # top_frac: K varies per boundary; use the default as an anti-concentration proxy.
+    return _DEFAULT_TOP_K
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the backtest end-to-end against the corpus and print the report."""
     args = build_parser().parse_args(argv)
-    watchlist = load_watchlist(Path(args.watchlist_db))
-    if not watchlist:
-        print("Watchlist is empty; nothing to backtest.", file=sys.stderr)
-        return 1
-    schemes = _build_schemes(args, len(watchlist))
+    watchlist: set[str] = set()
+    policy: copy_selection.KPolicy | None = None
+    if args.causal_select:
+        policy = _resolve_policy(args)
+        wl_size = _watchlist_size_for_policy(policy, args.starting_bankroll_usd)
+    else:
+        watchlist = load_watchlist(Path(args.watchlist_db))
+        if not watchlist:
+            print("Watchlist is empty; nothing to backtest.", file=sys.stderr)
+            return 1
+        wl_size = len(watchlist)
+    schemes = _build_schemes(args, wl_size)
     max_exposure = args.max_open_exposure_usd
     if args.max_open_exposure_frac is not None:
         max_exposure = args.max_open_exposure_frac * args.starting_bankroll_usd
@@ -772,19 +863,43 @@ def main(argv: list[str] | None = None) -> int:
         enforce_capacity=args.enforce_capacity,
         max_open_exposure_usd=max_exposure,
     )
-    for event in load_event_stream(
-        Path(args.db),
-        watchlist=watchlist,
-        platform=args.platform,
-        start_ts=args.start_ts,
-        end_ts=args.end_ts,
-    ):
+    if args.causal_select:
+        assert policy is not None  # noqa: S101  # set in the causal branch above
+        events = _rows_to_events(
+            copy_selection.iter_selected_rows(
+                Path(args.db),
+                platform=args.platform,
+                min_resolved=args.min_resolved,
+                edge_window_days=args.edge_window,
+                rebalance_days=args.rebalance_days,
+                policy=policy,
+                bankroll=args.starting_bankroll_usd,
+                start_ts=args.start_ts,
+                end_ts=args.end_ts,
+            )
+        )
+        selection_header = (
+            f"Causal selection: min_resolved={args.min_resolved}, "
+            f"edge_window={args.edge_window}d, rebalance_days={args.rebalance_days}, "
+            f"policy={policy}\n"
+        )
+    else:
+        events = load_event_stream(
+            Path(args.db),
+            watchlist=watchlist,
+            platform=args.platform,
+            start_ts=args.start_ts,
+            end_ts=args.end_ts,
+        )
+        selection_header = ""
+    for event in events:
         if isinstance(event, TradeEvent):
             sim.on_trade(event.trade)
         else:
             sim.on_resolution(event.resolution)
     print(
-        render_report(
+        selection_header
+        + render_report(
             sim,
             schemes=schemes,
             bankroll=args.starting_bankroll_usd,
