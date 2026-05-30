@@ -43,3 +43,11 @@ def resolve_k(policy: KPolicy, *, bankroll: float, qualified_count: int) -> int:
     if policy.top_frac is not None:
         return math.ceil(policy.top_frac * qualified_count)
     raise ValueError("KPolicy has no mode set")
+
+
+def has_platform_column(db_path: Path) -> bool:
+    """Return True if corpus_trades carries the multi-platform `platform` column."""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(corpus_trades)")]
+    conn.close()
+    return "platform" in cols

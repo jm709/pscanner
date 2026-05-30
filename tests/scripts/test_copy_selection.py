@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from scripts.copy_selection import KPolicy, resolve_k
+from scripts.copy_selection import KPolicy, has_platform_column, resolve_k
 
 
 def test_resolve_k_fixed_count() -> None:
@@ -29,3 +31,13 @@ def test_resolve_k_top_frac_zero_qualified_is_zero() -> None:
 def test_resolve_k_no_mode_raises() -> None:
     with pytest.raises(ValueError, match="no mode"):
         resolve_k(KPolicy(), bankroll=10_000.0, qualified_count=10)
+
+
+def test_has_platform_column_true(corpus_factory) -> None:
+    db: Path = corpus_factory([], [], with_platform=True)
+    assert has_platform_column(db) is True
+
+
+def test_has_platform_column_false(corpus_factory) -> None:
+    db: Path = corpus_factory([], [], with_platform=False)
+    assert has_platform_column(db) is False
