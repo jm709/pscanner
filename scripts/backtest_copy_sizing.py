@@ -692,6 +692,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="Same cap as --max-open-exposure-usd, expressed as a fraction of bankroll.",
     )
     p.add_argument(
+        "--causal-select",
+        action="store_true",
+        help="Causally qualify+rank+select wallets from the corpus (ignores --watchlist-db).",
+    )
+    p.add_argument(
+        "--min-resolved",
+        type=int,
+        default=20,
+        help="Qualification: min resolved trades within the edge window.",
+    )
+    p.add_argument(
+        "--edge-window",
+        type=int,
+        default=0,
+        help="Rolling edge window in days; 0 = lifetime.",
+    )
+    p.add_argument(
+        "--rebalance-days",
+        type=int,
+        default=14,
+        help="Days between top-K copy-set recomputes.",
+    )
+    copy_policy = p.add_mutually_exclusive_group()
+    copy_policy.add_argument(
+        "--copy-top-k",
+        type=int,
+        default=None,
+        help="Copy the top N wallets by causal edge.",
+    )
+    copy_policy.add_argument(
+        "--copy-capital-per-wallet",
+        type=float,
+        default=None,
+        help="K = floor(bankroll / C).",
+    )
+    copy_policy.add_argument(
+        "--copy-top-frac",
+        type=float,
+        default=None,
+        help="Copy the top X fraction of qualified wallets.",
+    )
+    p.add_argument(
         "--csv",
         default=None,
         help="Optional path to dump per-trade per-scheme rows.",

@@ -17,6 +17,7 @@ from scripts.backtest_copy_sizing import (
     build_parser,
     load_event_stream,
     load_watchlist,
+    main,
     render_report,
 )
 
@@ -551,3 +552,49 @@ def test_render_report_includes_skipped_column_and_capacity_note() -> None:
     )
     assert "Skipped" in report
     assert "Capacity enforcement" in report
+
+
+def test_build_parser_causal_select_defaults() -> None:
+    args = build_parser().parse_args(["--causal-select"])
+    assert args.causal_select is True
+    assert args.min_resolved == 20
+    assert args.edge_window == 0
+    assert args.rebalance_days == 14
+    assert args.copy_top_k is None
+    assert args.copy_capital_per_wallet is None
+    assert args.copy_top_frac is None
+
+
+def test_build_parser_causal_off_by_default() -> None:
+    args = build_parser().parse_args([])
+    assert args.causal_select is False
+
+
+def test_build_parser_rejects_two_copy_policies() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--copy-top-k", "10", "--copy-top-frac", "0.1"])
+
+
+def test_main_causal_select_end_to_end(corpus_factory, capsys) -> None:  # type: ignore[no-untyped-def]
+    # A qualifies positive and is copied; B never positive -> never copied.
+    trades = [
+        ("A", "h1", "YES", "BUY", 0.30, 100.0, 1),
+        ("A", "h2", "YES", "BUY", 0.30, 100.0, 2),
+        ("B", "h3", "YES", "BUY", 0.90, 100.0, 1),
+        ("B", "h4", "YES", "BUY", 0.90, 100.0, 2),
+        ("A", "n1", "YES", "BUY", 0.50, 100.0, 150),
+        ("B", "n2", "YES", "BUY", 0.50, 100.0, 160),
+    ]
+    resolutions = [
+        ("h1", 1, 50), ("h2", 1, 60), ("h3", 0, 50), ("h4", 0, 60),
+        ("n1", 1, 300), ("n2", 1, 300),
+    ]
+    db = corpus_factory(trades, resolutions)
+    rc = main([
+        "--db", str(db), "--causal-select", "--min-resolved", "2",
+        "--rebalance-days", "1", "--copy-top-k", "5",
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Causal selection" in out
+    assert "equal_weight" in out
