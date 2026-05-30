@@ -17,7 +17,7 @@ import csv as _csv
 import datetime as dt
 import math
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -365,6 +365,38 @@ def load_watchlist(daemon_db: Path) -> set[str]:
     return {r[0] for r in rows}
 
 
+def _rows_to_events(rows: Iterable[tuple]) -> Iterator[TradeEvent | ResolutionEvent]:
+    """Convert event-row tuples into TradeEvent / ResolutionEvent objects.
+
+    Row shape: (kind, ts, wallet, condition_id, outcome_side, price,
+    notional_usd, outcome_yes_won).
+    """
+    for kind, ts, wallet, cid, side, price, notional, yes_won in rows:
+        if kind == "trade":
+            yield TradeEvent(
+                kind="trade",
+                ts=int(ts),
+                trade=Trade(
+                    wallet=str(wallet),
+                    condition_id=str(cid),
+                    outcome_side=str(side),
+                    price=float(price),
+                    notional_usd=float(notional),
+                    ts=int(ts),
+                ),
+            )
+        else:
+            yield ResolutionEvent(
+                kind="resolution",
+                ts=int(ts),
+                resolution=Resolution(
+                    condition_id=str(cid),
+                    winning_side="YES" if int(yes_won) == 1 else "NO",
+                    resolved_at=int(ts),
+                ),
+            )
+
+
 def load_event_stream(
     corpus_db: Path,
     *,
@@ -436,30 +468,7 @@ def load_event_stream(
     """  # noqa: S608
     rows = con.execute(query, [platform, *params, platform]).fetchall()
     con.close()
-    for kind, ts, wallet, cid, side, price, notional, yes_won in rows:
-        if kind == "trade":
-            yield TradeEvent(
-                kind="trade",
-                ts=int(ts),
-                trade=Trade(
-                    wallet=str(wallet),
-                    condition_id=str(cid),
-                    outcome_side=str(side),
-                    price=float(price),
-                    notional_usd=float(notional),
-                    ts=int(ts),
-                ),
-            )
-        else:
-            yield ResolutionEvent(
-                kind="resolution",
-                ts=int(ts),
-                resolution=Resolution(
-                    condition_id=str(cid),
-                    winning_side="YES" if int(yes_won) == 1 else "NO",
-                    resolved_at=int(ts),
-                ),
-            )
+    yield from _rows_to_events(rows)
 
 
 def _running_max_drawdown(nav_series: list[tuple[int, float]]) -> tuple[float, int]:
