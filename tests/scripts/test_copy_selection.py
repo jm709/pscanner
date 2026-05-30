@@ -100,3 +100,35 @@ def test_ranked_qualifiers_excludes_below_min_resolved(corpus_factory) -> None:
         platform="polymarket", min_resolved=2, edge_window_days=0, boundaries=[200],
     )
     assert rows == []
+
+
+def test_ranked_qualifiers_no_lookahead(corpus_factory) -> None:
+    # A's trades resolve at 250/260, AFTER boundary 200 -> A not qualified at 200.
+    trades = [
+        ("A", "m1", "YES", "BUY", 0.40, 100.0, 10),
+        ("A", "m2", "YES", "BUY", 0.30, 100.0, 20),
+    ]
+    resolutions = [("m1", 1, 250), ("m2", 1, 260)]
+    rows = ranked_qualifiers(
+        corpus_factory(trades, resolutions),
+        platform="polymarket", min_resolved=2, edge_window_days=0, boundaries=[200],
+    )
+    assert rows == []  # no resolutions before the boundary
+
+
+def test_ranked_qualifiers_rolling_window_drops_old_trades(corpus_factory) -> None:
+    # window=1 day: at boundary 200 (ts), only trades resolved within [200-86400, 200).
+    # Put 2 old resolutions far in the past and 1 recent -> under min_resolved=2 in window.
+    day = 86400
+    trades = [
+        ("A", "m1", "YES", "BUY", 0.40, 100.0, 1),
+        ("A", "m2", "YES", "BUY", 0.40, 100.0, 2),
+        ("A", "m3", "YES", "BUY", 0.40, 100.0, 3),
+    ]
+    boundary = 10 * day
+    resolutions = [("m1", 1, 1 * day), ("m2", 1, 2 * day), ("m3", 1, boundary - 100)]
+    rows = ranked_qualifiers(
+        corpus_factory(trades, resolutions),
+        platform="polymarket", min_resolved=2, edge_window_days=1, boundaries=[boundary],
+    )
+    assert rows == []  # only 1 trade inside the 1-day window -> below min_resolved
