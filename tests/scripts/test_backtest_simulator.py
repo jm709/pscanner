@@ -634,6 +634,38 @@ def test_main_causal_select_end_to_end(corpus_factory, capsys, tmp_path) -> None
     assert {r["wallet"] for r in rows} == {"A"}
 
 
+def test_main_causal_select_top_frac_policy(corpus_factory, capsys, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # Exercise the --copy-top-frac policy through main() (the top_k path is
+    # covered above). Same corpus: A is positive-edge, B never positive, so the
+    # positive-edge floor leaves only A regardless of the fraction; frac=1.0
+    # copies all qualified (= A). Proves _resolve_policy + wl_size wiring for frac.
+    day = 86_400
+    trades = [
+        ("A", "h1", "YES", "BUY", 0.30, 100.0, 1),
+        ("A", "h2", "YES", "BUY", 0.30, 100.0, 2),
+        ("B", "h3", "YES", "BUY", 0.90, 100.0, 1),
+        ("B", "h4", "YES", "BUY", 0.90, 100.0, 2),
+        ("A", "n1", "YES", "BUY", 0.50, 100.0, day + 100),
+        ("B", "n2", "YES", "BUY", 0.50, 100.0, day + 110),
+    ]
+    resolutions = [
+        ("h1", 1, 50), ("h2", 1, 60), ("h3", 0, 50), ("h4", 0, 60),
+        ("n1", 1, day + 300), ("n2", 1, day + 300),
+    ]
+    db = corpus_factory(trades, resolutions)
+    csv_path = tmp_path / "frac.csv"
+    rc = main([
+        "--db", str(db), "--causal-select", "--min-resolved", "2",
+        "--rebalance-days", "1", "--copy-top-frac", "1.0", "--csv", str(csv_path),
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "top_frac=1.0" in out  # policy threaded through to the header
+    with csv_path.open() as fh:
+        rows = list(csv.DictReader(fh))
+    assert {r["wallet"] for r in rows} == {"A"}
+
+
 def test_script_runs_via_direct_execution() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     result = subprocess.run(
