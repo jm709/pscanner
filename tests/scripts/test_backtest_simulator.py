@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import sqlite3
 from pathlib import Path
 
@@ -575,25 +576,31 @@ def test_build_parser_rejects_two_copy_policies() -> None:
         build_parser().parse_args(["--copy-top-k", "10", "--copy-top-frac", "0.1"])
 
 
-def test_main_causal_select_end_to_end(corpus_factory, capsys) -> None:  # type: ignore[no-untyped-def]
+def test_main_causal_select_end_to_end(corpus_factory, capsys, tmp_path) -> None:  # type: ignore[no-untyped-def]
     # A qualifies positive and is copied; B never positive -> never copied.
+    # Historical trades (h*) resolve before the second rebalance boundary
+    # (at ts=86401 for --rebalance-days 1); the new-period trades (n1 for A,
+    # n2 for B) fall inside that boundary's copy window. Selection must filter
+    # B out so only A's n1 is booked.
+    day = 86_400
     trades = [
         ("A", "h1", "YES", "BUY", 0.30, 100.0, 1),
         ("A", "h2", "YES", "BUY", 0.30, 100.0, 2),
         ("B", "h3", "YES", "BUY", 0.90, 100.0, 1),
         ("B", "h4", "YES", "BUY", 0.90, 100.0, 2),
-        ("A", "n1", "YES", "BUY", 0.50, 100.0, 150),
-        ("B", "n2", "YES", "BUY", 0.50, 100.0, 160),
+        ("A", "n1", "YES", "BUY", 0.50, 100.0, day + 100),
+        ("B", "n2", "YES", "BUY", 0.50, 100.0, day + 110),
     ]
     resolutions = [
         ("h1", 1, 50),
         ("h2", 1, 60),
         ("h3", 0, 50),
         ("h4", 0, 60),
-        ("n1", 1, 300),
-        ("n2", 1, 300),
+        ("n1", 1, day + 300),
+        ("n2", 1, day + 300),
     ]
     db = corpus_factory(trades, resolutions)
+    csv_path = tmp_path / "out.csv"
     rc = main(
         [
             "--db",
@@ -605,9 +612,21 @@ def test_main_causal_select_end_to_end(corpus_factory, capsys) -> None:  # type:
             "1",
             "--copy-top-k",
             "5",
+            "--csv",
+            str(csv_path),
         ]
     )
     out = capsys.readouterr().out
     assert rc == 0
     assert "Causal selection" in out
     assert "equal_weight" in out
+    # equal_weight booked exactly 1 resolved trade (only A's n1; B's n2 filtered).
+    assert "| equal_weight | 1 |" in out
+    # Every booked row across all schemes belongs to wallet A — B was excluded.
+    with csv_path.open() as fh:
+        rows = list(csv.DictReader(fh))
+    equal_weight_rows = [r for r in rows if r["scheme"] == "equal_weight"]
+    assert len(equal_weight_rows) == 1
+    assert equal_weight_rows[0]["wallet"] == "A"
+    assert equal_weight_rows[0]["condition_id"] == "n1"
+    assert {r["wallet"] for r in rows} == {"A"}

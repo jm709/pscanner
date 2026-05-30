@@ -26,6 +26,10 @@ import duckdb
 
 from scripts import copy_selection
 
+# Default top-K when no copy policy is given. 25 matches the live daemon's
+# watchlist target order of magnitude (anti-concentration sizing divides by it).
+_DEFAULT_TOP_K = 25
+
 
 @dataclass(frozen=True)
 class Trade:
@@ -371,7 +375,9 @@ def _rows_to_events(rows: Iterable[tuple]) -> Iterator[TradeEvent | ResolutionEv
     """Convert event-row tuples into TradeEvent / ResolutionEvent objects.
 
     Row shape: (kind, ts, wallet, condition_id, outcome_side, price,
-    notional_usd, outcome_yes_won).
+    notional_usd, outcome_yes_won). This shape mirrors the SELECT in
+    ``copy_selection._stream_selected`` (and ``load_event_stream`` below)
+    and MUST stay in sync with both — they all feed this converter.
     """
     for kind, ts, wallet, cid, side, price, notional, yes_won in rows:
         if kind == "trade":
@@ -809,20 +815,34 @@ def _build_schemes(args: argparse.Namespace, watchlist_size: int) -> list[Sizing
 
 
 def _resolve_policy(args: argparse.Namespace) -> copy_selection.KPolicy:
-    """Build the KPolicy from CLI args, defaulting to top-k 25."""
+    """Build the KPolicy from CLI args, defaulting to top-k _DEFAULT_TOP_K."""
     if args.copy_capital_per_wallet is not None:
         return copy_selection.KPolicy(capital_per_wallet=args.copy_capital_per_wallet)
     if args.copy_top_frac is not None:
         return copy_selection.KPolicy(top_frac=args.copy_top_frac)
-    return copy_selection.KPolicy(top_k=args.copy_top_k if args.copy_top_k is not None else 25)
+    return copy_selection.KPolicy(
+        top_k=args.copy_top_k if args.copy_top_k is not None else _DEFAULT_TOP_K
+    )
+
+
+def _watchlist_size_for_policy(policy: copy_selection.KPolicy, bankroll: float) -> int:
+    """Anti-concentration watchlist size implied by a resolved copy policy."""
+    if policy.top_k is not None:
+        return policy.top_k
+    if policy.capital_per_wallet is not None:
+        return max(1, int(bankroll // policy.capital_per_wallet))
+    # top_frac: K varies per boundary; use the default as an anti-concentration proxy.
+    return _DEFAULT_TOP_K
 
 
 def main(argv: list[str] | None = None) -> int:
     """Run the backtest end-to-end against the corpus and print the report."""
     args = build_parser().parse_args(argv)
     watchlist: set[str] = set()
+    policy: copy_selection.KPolicy | None = None
     if args.causal_select:
-        wl_size = args.copy_top_k or 25
+        policy = _resolve_policy(args)
+        wl_size = _watchlist_size_for_policy(policy, args.starting_bankroll_usd)
     else:
         watchlist = load_watchlist(Path(args.watchlist_db))
         if not watchlist:
@@ -840,7 +860,7 @@ def main(argv: list[str] | None = None) -> int:
         max_open_exposure_usd=max_exposure,
     )
     if args.causal_select:
-        policy = _resolve_policy(args)
+        assert policy is not None  # noqa: S101  # set in the causal branch above
         events = _rows_to_events(
             copy_selection.iter_selected_rows(
                 Path(args.db),
