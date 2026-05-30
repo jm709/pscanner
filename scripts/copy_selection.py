@@ -18,6 +18,8 @@ from pathlib import Path
 
 import duckdb
 
+_SECONDS_PER_DAY = 86_400
+
 
 @dataclass(frozen=True)
 class KPolicy:
@@ -26,6 +28,12 @@ class KPolicy:
     top_k: int | None = None
     capital_per_wallet: float | None = None
     top_frac: float | None = None
+
+    def __post_init__(self) -> None:
+        """Enforce that exactly one sizing field is set."""
+        modes = [self.top_k, self.capital_per_wallet, self.top_frac]
+        if sum(m is not None for m in modes) != 1:
+            raise ValueError("KPolicy requires exactly one of top_k, capital_per_wallet, top_frac")
 
 
 def resolve_k(policy: KPolicy, *, bankroll: float, qualified_count: int) -> int:
@@ -48,8 +56,10 @@ def resolve_k(policy: KPolicy, *, bankroll: float, qualified_count: int) -> int:
 def has_platform_column(db_path: Path) -> bool:
     """Return True if corpus_trades carries the multi-platform `platform` column."""
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(corpus_trades)")]
-    conn.close()
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(corpus_trades)")]
+    finally:
+        conn.close()
     return "platform" in cols
 
 
@@ -105,7 +115,9 @@ def ranked_qualifiers(
         con.execute("CREATE TEMP TABLE bnd(boundary_ts BIGINT)")
         con.executemany("INSERT INTO bnd VALUES (?)", [(int(b),) for b in boundaries])
         window_pred = (
-            "" if edge_window_days == 0 else "AND rb.resolved_at >= b.boundary_ts - ? * 86400"
+            ""
+            if edge_window_days == 0
+            else f"AND rb.resolved_at >= b.boundary_ts - ? * {_SECONDS_PER_DAY}"
         )
         params = [] if edge_window_days == 0 else [edge_window_days]
         rows = con.execute(
@@ -147,17 +159,18 @@ def _make_boundaries(
     return list(range(lo, hi + 1, period))
 
 
-def _resolve_period(rebalance_days: int | None, rebalance_seconds: int | None) -> int:
+def _resolve_period(*, rebalance_days: int | None, rebalance_seconds: int | None) -> int:
     """Return the rebalance period in seconds, validating inputs."""
     if rebalance_seconds is not None:
         return rebalance_seconds
     if rebalance_days is None:
         raise ValueError("rebalance_days must be set when rebalance_seconds is None")
-    return rebalance_days * 86400
+    return rebalance_days * _SECONDS_PER_DAY
 
 
 def _build_copyset(
     ranked: list[tuple[int, str, float, int, int, int]],
+    *,
     policy: KPolicy,
     bankroll: float,
 ) -> list[tuple[int, str]]:
@@ -191,7 +204,7 @@ def iter_selected_rows(
 
     rebalance_seconds overrides rebalance_days (tests use small windows).
     """
-    period = _resolve_period(rebalance_days, rebalance_seconds)
+    period = _resolve_period(rebalance_days=rebalance_days, rebalance_seconds=rebalance_seconds)
     has_plat = has_platform_column(db_path)
     con = _attach(db_path)
     try:
@@ -208,7 +221,7 @@ def iter_selected_rows(
             edge_window_days=edge_window_days,
             boundaries=boundaries,
         )
-        copyset = _build_copyset(ranked, policy, bankroll)
+        copyset = _build_copyset(ranked, policy=policy, bankroll=bankroll)
         if not copyset:
             return
         yield from _stream_selected(
@@ -231,6 +244,11 @@ def _stream_selected(
     period: int,
     copyset: list[tuple[int, str]],
 ) -> Iterator[tuple]:
+    """Stream copied trades + their resolutions as event rows, ts-ordered.
+
+    Two CTEs: `selected` = each copyset wallet's BUYs inside its frozen
+    rebalance period; `sel_res` = resolutions for those selected markets.
+    """
     tpred = "AND t.platform = ?" if has_platform else ""
     rpred = "AND r.platform = ?" if has_platform else ""
     tparams = [platform] if has_platform else []

@@ -34,9 +34,14 @@ def test_resolve_k_top_frac_zero_qualified_is_zero() -> None:
     assert resolve_k(KPolicy(top_frac=0.1), bankroll=10_000.0, qualified_count=0) == 0
 
 
-def test_resolve_k_no_mode_raises() -> None:
-    with pytest.raises(ValueError, match="no mode"):
-        resolve_k(KPolicy(), bankroll=10_000.0, qualified_count=10)
+def test_kpolicy_no_mode_raises_at_construction() -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        KPolicy()
+
+
+def test_kpolicy_multiple_modes_raises_at_construction() -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        KPolicy(top_k=5, top_frac=0.1)
 
 
 def test_has_platform_column_true(corpus_factory) -> None:
@@ -235,6 +240,85 @@ def test_iter_selected_rows_k_larger_than_qualified(corpus_factory) -> None:
     )
     copied = {r[2] for r in rows if r[0] == "trade" and r[3] == "n1"}
     assert copied == {"A"}  # only 1 qualifies; K=50 just takes all qualified
+
+
+def test_iter_selected_rows_multi_boundary_rebalance(corpus_factory) -> None:
+    # Per-boundary freeze: A qualifies positive before t=100; B only before t=200
+    # (and outranks A once it qualifies). With rebalance_seconds=100, top_k=1:
+    #   boundary 100 -> A copied -> A's trades in [100,200) are copied (an1).
+    #   boundary 200 -> B copied -> B's trades in [200,300) are copied (bn2).
+    # B's [100,200) trade (bn1) and A's [200,300) trade (an2) must NOT be copied.
+    trades = [
+        # A qualifying history: resolves before boundary 100, positive edge (~0.60)
+        ("A", "ah1", "YES", "BUY", 0.40, 100.0, 10),
+        ("A", "ah2", "YES", "BUY", 0.40, 100.0, 20),
+        # B qualifying history: resolves in [100,200), higher edge (~0.80)
+        ("B", "bh1", "YES", "BUY", 0.20, 100.0, 30),
+        ("B", "bh2", "YES", "BUY", 0.20, 100.0, 40),
+        # new trades in [100,200): only A is the frozen pick at boundary 100
+        ("A", "an1", "YES", "BUY", 0.50, 100.0, 150),
+        ("B", "bn1", "YES", "BUY", 0.50, 100.0, 160),
+        # new trades in [200,300): only B is the frozen pick at boundary 200
+        ("B", "bn2", "YES", "BUY", 0.50, 100.0, 250),
+        ("A", "an2", "YES", "BUY", 0.50, 100.0, 260),
+    ]
+    resolutions = [
+        ("ah1", 1, 40),
+        ("ah2", 1, 50),
+        ("bh1", 1, 120),
+        ("bh2", 1, 130),
+        ("an1", 1, 400),
+        ("bn1", 1, 400),
+        ("bn2", 1, 400),
+        ("an2", 1, 400),
+    ]
+    rows = list(
+        iter_selected_rows(
+            corpus_factory(trades, resolutions),
+            platform="polymarket",
+            min_resolved=2,
+            edge_window_days=0,
+            rebalance_days=None,
+            rebalance_seconds=100,
+            policy=KPolicy(top_k=1),
+            bankroll=10_000.0,
+            start_ts=0,
+            end_ts=250,
+        )
+    )
+    copied = {(r[3], r[2]) for r in rows if r[0] == "trade" and r[3].startswith(("an", "bn"))}
+    # [100,200): only A's an1; [200,300): only B's bn2
+    assert copied == {("an1", "A"), ("bn2", "B")}
+
+
+def test_iter_selected_rows_rebalance_days_path(corpus_factory) -> None:
+    # Exercise the real rebalance_days=1 path (* _SECONDS_PER_DAY). All ts fall
+    # inside a single 1-day period anchored at the min trade ts.
+    day = 86_400
+    trades = [
+        # qualifying history resolves before the boundary at t=day
+        ("A", "h1", "YES", "BUY", 0.30, 100.0, 10),
+        ("A", "h2", "YES", "BUY", 0.30, 100.0, 20),
+        # new trade inside the single period [day, 2*day)
+        ("A", "n1", "YES", "BUY", 0.50, 100.0, day + 5_000),
+    ]
+    resolutions = [("h1", 1, 50), ("h2", 1, 60), ("n1", 1, 3 * day)]
+    rows = list(
+        iter_selected_rows(
+            corpus_factory(trades, resolutions),
+            platform="polymarket",
+            min_resolved=2,
+            edge_window_days=0,
+            rebalance_days=1,
+            rebalance_seconds=None,
+            policy=KPolicy(top_k=5),
+            bankroll=10_000.0,
+            start_ts=day,
+            end_ts=2 * day - 1,
+        )
+    )
+    copied = {r[2] for r in rows if r[0] == "trade" and r[3] == "n1"}
+    assert copied == {"A"}
 
 
 def test_iter_selected_rows_no_platform_corpus(corpus_factory) -> None:
