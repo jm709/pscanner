@@ -8,6 +8,8 @@ license = { text = "MIT" }
 authors = [{ name = "pscanner authors" }]
 dependencies = [
     "duckdb==1.5.2",
+    "numpy==2.4.4",
+    "scipy==1.17.1",
     "httpx==0.28.1",
     "websockets==16.0",
     "pydantic==2.13.3",
