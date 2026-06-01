@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from pathlib import Path
 
 from scripts.find_insider_wallets import (
+    FEATURE_NAMES,
     WalletAgg,
     compute_drift,
+    discriminate,
     split_cohorts,
     wallet_aggregates,
 )
@@ -147,3 +150,28 @@ def test_drift_side_normalizes_opposite_side(corpus_factory) -> None:
     db: Path = corpus_factory(trades, [("m1", 0, 1_000 + 30 * day)], with_platform=True)
     drift = compute_drift(db, ["A"], window_days=7)
     assert drift["A"] > 0.4  # NO prob moved 0.30 -> 0.80
+
+
+def test_discriminate_ranks_separating_feature_first() -> None:
+    # cases have high improbability_z, controls low; everything else equal.
+    cases = [_agg(f"c{i}", n=2, edge=0.3, pnl=500.0, first_ts=1_000) for i in range(8)]
+    controls = [_agg(f"k{i}", n=2, edge=-0.1, pnl=-50.0, first_ts=1_000) for i in range(8)]
+    cases = [dataclasses.replace(c, improbability_z=4.0 + i * 0.1) for i, c in enumerate(cases)]
+    controls = [
+        dataclasses.replace(c, improbability_z=0.1 + i * 0.05) for i, c in enumerate(controls)
+    ]
+    stats = discriminate(cases, controls, drift={}, features=FEATURE_NAMES)
+    assert stats[0].name == "improbability_z"
+    assert stats[0].cohen_d > 1.0
+    assert stats[0].mw_p < 0.05
+
+
+def test_discriminate_handles_missing_drift() -> None:
+    cases = [_agg(f"c{i}", n=2, edge=0.3, pnl=500.0, first_ts=1_000) for i in range(4)]
+    controls = [_agg(f"k{i}", n=2, edge=-0.1, pnl=-50.0, first_ts=1_000) for i in range(4)]
+    # only one case has a drift value -> drift feature has too few samples
+    stats = {
+        s.name: s
+        for s in discriminate(cases, controls, drift={"c0": 0.5}, features=("mean_drift",))
+    }
+    assert stats["mean_drift"].cohen_d == 0.0  # insufficient samples -> sentinel

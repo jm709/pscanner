@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Final
 
 import duckdb
+import numpy as np
+from scipy import stats as _sps
 
 from scripts.copy_selection import has_platform_column
 
@@ -233,3 +235,75 @@ def compute_drift(db_path: Path, wallets: list[str], *, window_days: int) -> dic
     finally:
         con.close()
     return {str(w): float(d) for w, d in rows}
+
+
+FEATURE_NAMES: Final[tuple[str, ...]] = (
+    "improbability_z",
+    "max_bet_usd",
+    "conviction_frac",
+    "mean_entry_price",
+    "mean_ttr_days",
+    "prior_activity_count",
+    "mean_drift",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class FeatureStat:
+    """Case-vs-control separation for one feature."""
+
+    name: str
+    case_mean: float
+    case_median: float
+    control_mean: float
+    control_median: float
+    cohen_d: float
+    mw_p: float
+
+
+def _feature_values(rows: list[WalletAgg], name: str, drift: dict[str, float]) -> list[float]:
+    if name == "mean_drift":
+        return [drift[a.wallet] for a in rows if a.wallet in drift]
+    return [float(getattr(a, name)) for a in rows]
+
+
+def _cohen_d(a: np.ndarray, b: np.ndarray) -> float:
+    na, nb = len(a), len(b)
+    if na < 2 or nb < 2:
+        return 0.0
+    pooled = ((na - 1) * a.var(ddof=1) + (nb - 1) * b.var(ddof=1)) / (na + nb - 2)
+    if pooled <= 0:
+        return 0.0
+    return float((a.mean() - b.mean()) / np.sqrt(pooled))
+
+
+def discriminate(
+    cases: list[WalletAgg],
+    controls: list[WalletAgg],
+    *,
+    drift: dict[str, float],
+    features: tuple[str, ...],
+) -> list[FeatureStat]:
+    """Rank features by |Cohen's d| of case-vs-control separation."""
+    out: list[FeatureStat] = []
+    for name in features:
+        cv = np.asarray(_feature_values(cases, name, drift), dtype=float)
+        kv = np.asarray(_feature_values(controls, name, drift), dtype=float)
+        d = _cohen_d(cv, kv)
+        if len(cv) >= 2 and len(kv) >= 2:
+            mw_p = float(_sps.mannwhitneyu(cv, kv, alternative="two-sided").pvalue)
+        else:
+            mw_p = 1.0
+        out.append(
+            FeatureStat(
+                name=name,
+                case_mean=float(cv.mean()) if len(cv) else 0.0,
+                case_median=float(np.median(cv)) if len(cv) else 0.0,
+                control_mean=float(kv.mean()) if len(kv) else 0.0,
+                control_median=float(np.median(kv)) if len(kv) else 0.0,
+                cohen_d=d,
+                mw_p=mw_p,
+            )
+        )
+    out.sort(key=lambda s: abs(s.cohen_d), reverse=True)
+    return out
