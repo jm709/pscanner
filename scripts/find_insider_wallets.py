@@ -342,20 +342,15 @@ def _cutoff_ts(db_path: Path, *, cutoff_pct: int) -> int:
     return int(row[0]) if row and row[0] is not None else 0
 
 
-def _trade_feature(name: str, *, price: float, notional: float, agg: WalletAgg) -> float | None:
-    """Trade-time value of a fingerprint feature, per-trade where one exists.
-
-    Returns None for features with no trade-time analogue (``mean_drift``).
-    """
-    if name == "mean_entry_price":
-        return price
-    if name == "max_bet_usd":
-        return notional
-    if name == "conviction_frac":
-        return notional / agg.total_notional_usd if agg.total_notional_usd > 0 else 0.0
-    if name == "mean_drift":
-        return None
-    return float(getattr(agg, name))
+# Fingerprint features observable per-trade at entry, mapped to their column in
+# the post-cutoff scan. Wallet-level features (improbability_z, prior_activity_count,
+# mean_ttr_days, conviction_frac, mean_drift) inform the discrimination report but
+# would need pre-cutoff-only per-wallet history to score post-cutoff trades without
+# lookahead; the lightweight forward-test scorer uses only these per-trade signals.
+_PER_TRADE_FEATURE_COL: Final[dict[str, str]] = {
+    "mean_entry_price": "price",
+    "max_bet_usd": "notional",
+}
 
 
 def _post_cutoff_scored_buys(
@@ -363,13 +358,10 @@ def _post_cutoff_scored_buys(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return (score, edge) arrays for resolved buys resolving after cutoff_ts.
 
-    Each trade is scored by a sign-weighted sum of the fingerprint features,
-    using the trade's own observables (entry price, notional) where the feature
-    is per-trade and the wallet's prior aggregate otherwise. No post-cutoff
-    outcome enters the score.
+    Each trade is scored by a sign-weighted sum of the per-trade fingerprint
+    features (entry price, notional) — no wallet aggregate and no post-cutoff
+    outcome enters the score. One filtered scan; nothing materialized per wallet.
     """
-    aggs = wallet_aggregates(db_path, max_trades=10**9, max_lifespan_days=10**9)
-    by_wallet = {a.wallet: a for a in aggs}
     has_plat = has_platform_column(db_path)
     tpred = "AND t.platform = 'polymarket'" if has_plat else ""
     rpred = "AND r.platform = 'polymarket'" if has_plat else ""
@@ -377,7 +369,7 @@ def _post_cutoff_scored_buys(
     try:
         rows = con.execute(
             f"""
-            SELECT t.wallet_address, t.price, t.notional_usd,
+            SELECT t.price AS price, t.notional_usd AS notional,
                    (({_won_expr()}) - t.price) AS edge
             FROM s.corpus_trades t
             JOIN s.market_resolutions r ON r.condition_id = t.condition_id {rpred}
@@ -388,20 +380,19 @@ def _post_cutoff_scored_buys(
         ).fetchall()
     finally:
         con.close()
-    weights = {s.name: (1.0 if s.cohen_d >= 0 else -1.0) * abs(s.cohen_d) for s in fingerprint}
+    weights = {
+        s.name: (1.0 if s.cohen_d >= 0 else -1.0) * abs(s.cohen_d)
+        for s in fingerprint
+        if s.name in _PER_TRADE_FEATURE_COL
+    }
+    col_idx = {"price": 0, "notional": 1}
+    weight_by_idx = {col_idx[_PER_TRADE_FEATURE_COL[name]]: w for name, w in weights.items()}
     scores: list[float] = []
     edges: list[float] = []
-    for wallet, price, notional, edge in rows:
-        a = by_wallet.get(str(wallet))
-        if a is None:
-            continue
-        score = 0.0
-        for name, w in weights.items():
-            value = _trade_feature(name, price=float(price), notional=float(notional), agg=a)
-            if value is not None:
-                score += w * value
+    for row in rows:
+        score = sum(w * float(row[i]) for i, w in weight_by_idx.items())
         scores.append(score)
-        edges.append(float(edge))
+        edges.append(float(row[2]))
     return np.asarray(scores, dtype=float), np.asarray(edges, dtype=float)
 
 
@@ -415,16 +406,20 @@ def forward_test(
     drift_window_days: int,
     top_k_features: int,
     seed: int,
+    aggs: list[WalletAgg] | None = None,
 ) -> ForwardResult:
-    """Derive the fingerprint pre-cutoff, score post-cutoff trades at trade-time."""
+    """Derive the fingerprint pre-cutoff, score post-cutoff trades at trade-time.
+
+    ``aggs`` lets a caller pass the shape-gated aggregate it already computed
+    (same ``max_trades`` / ``max_lifespan_days``) to skip recomputing it.
+    """
     cutoff_ts = _cutoff_ts(db_path, cutoff_pct=cutoff_pct)
-    pre_aggs = [
-        a
-        for a in wallet_aggregates(
-            db_path, max_trades=max_trades, max_lifespan_days=max_lifespan_days
-        )
-        if a.last_ts <= cutoff_ts
-    ]
+    base_aggs = (
+        aggs
+        if aggs is not None
+        else wallet_aggregates(db_path, max_trades=max_trades, max_lifespan_days=max_lifespan_days)
+    )
+    pre_aggs = [a for a in base_aggs if a.last_ts <= cutoff_ts]
     cases, controls = split_cohorts(pre_aggs, control_ratio=control_ratio, seed=seed)
     drift = compute_drift(
         db_path, [a.wallet for a in cases + controls], window_days=drift_window_days
@@ -554,6 +549,7 @@ def main(argv: list[str] | None = None) -> int:
         drift_window_days=args.drift_window_days,
         top_k_features=args.top_k_features,
         seed=args.seed,
+        aggs=aggs,
     )
     _print_report(
         aggs=aggs,
