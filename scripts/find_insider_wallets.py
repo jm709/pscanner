@@ -23,9 +23,14 @@ import duckdb
 import numpy as np
 from scipy import stats as _sps
 
-from scripts.copy_selection import has_platform_column
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from scripts.copy_selection import has_platform_column  # noqa: E402  (after sys.path bootstrap)
 
 _SECONDS_PER_DAY: Final[int] = 86_400
+_MIN_SAMPLES: Final[int] = 2  # minimum per-group n for a meaningful effect size / U test
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,7 +183,7 @@ def split_cohorts(
     pool: dict[tuple[int, str], list[WalletAgg]] = {}
     for a in losers:
         pool.setdefault(_stratum(a), []).append(a)
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # noqa: S311 -- reproducible cohort sampling, not cryptographic
     for bucket in pool.values():
         bucket.sort(key=lambda a: a.wallet)
         rng.shuffle(bucket)
@@ -272,7 +277,7 @@ def _feature_values(rows: list[WalletAgg], name: str, drift: dict[str, float]) -
 
 def _cohen_d(a: np.ndarray, b: np.ndarray) -> float:
     na, nb = len(a), len(b)
-    if na < 2 or nb < 2:
+    if na < _MIN_SAMPLES or nb < _MIN_SAMPLES:
         return 0.0
     pooled = ((na - 1) * a.var(ddof=1) + (nb - 1) * b.var(ddof=1)) / (na + nb - 2)
     if pooled <= 0:
@@ -293,7 +298,7 @@ def discriminate(
         cv = np.asarray(_feature_values(cases, name, drift), dtype=float)
         kv = np.asarray(_feature_values(controls, name, drift), dtype=float)
         d = _cohen_d(cv, kv)
-        if len(cv) >= 2 and len(kv) >= 2:
+        if len(cv) >= _MIN_SAMPLES and len(kv) >= _MIN_SAMPLES:
             mw_p = float(_sps.mannwhitneyu(cv, kv, alternative="two-sided").pvalue)
         else:
             mw_p = 1.0
@@ -458,8 +463,7 @@ def _print_report(
     print(f"{'feature':22} {'case_mean':>12} {'ctrl_mean':>12} {'cohen_d':>9} {'mw_p':>9}")
     for s in stats:
         print(
-            f"{s.name:22} {s.case_mean:12.4f} {s.control_mean:12.4f} "
-            f"{s.cohen_d:9.3f} {s.mw_p:9.4f}"
+            f"{s.name:22} {s.case_mean:12.4f} {s.control_mean:12.4f} {s.cohen_d:9.3f} {s.mw_p:9.4f}"
         )
     print("\n=== Top case wallets (by cash PnL) ===")
     print(
@@ -531,6 +535,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the full discovery pipeline and print the report."""
     args = _parse_args(argv)
     aggs = wallet_aggregates(
         args.db, max_trades=args.max_trades, max_lifespan_days=args.max_lifespan_days
@@ -551,7 +556,13 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
     )
     _print_report(
-        aggs=aggs, cases=cases, controls=controls, stats=stats, drift=drift, fwd=fwd, top_n=args.top_n
+        aggs=aggs,
+        cases=cases,
+        controls=controls,
+        stats=stats,
+        drift=drift,
+        fwd=fwd,
+        top_n=args.top_n,
     )
     if args.csv is not None:
         _write_csv(args.csv, cases, controls, drift)
