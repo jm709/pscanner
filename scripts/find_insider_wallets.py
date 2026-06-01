@@ -307,3 +307,133 @@ def discriminate(
         )
     out.sort(key=lambda s: abs(s.cohen_d), reverse=True)
     return out
+
+
+@dataclass(frozen=True, slots=True)
+class ForwardResult:
+    """Held-out forward-test of the pre-cutoff fingerprint."""
+
+    cutoff_ts: int
+    n_flagged: int
+    flagged_edge: float
+    base_rate_edge: float
+    fingerprint: tuple[FeatureStat, ...]
+
+
+def _cutoff_ts(db_path: Path, *, cutoff_pct: int) -> int:
+    has_plat = has_platform_column(db_path)
+    rpred = "WHERE platform = 'polymarket'" if has_plat else ""
+    con = _attach(db_path)
+    try:
+        row = con.execute(
+            f"SELECT quantile_cont(resolved_at, ?) FROM s.market_resolutions {rpred}",  # noqa: S608
+            [cutoff_pct / 100.0],
+        ).fetchone()
+    finally:
+        con.close()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def _trade_feature(name: str, *, price: float, notional: float, agg: WalletAgg) -> float | None:
+    """Trade-time value of a fingerprint feature, per-trade where one exists.
+
+    Returns None for features with no trade-time analogue (``mean_drift``).
+    """
+    if name == "mean_entry_price":
+        return price
+    if name == "max_bet_usd":
+        return notional
+    if name == "conviction_frac":
+        return notional / agg.total_notional_usd if agg.total_notional_usd > 0 else 0.0
+    if name == "mean_drift":
+        return None
+    return float(getattr(agg, name))
+
+
+def _post_cutoff_scored_buys(
+    db_path: Path, *, cutoff_ts: int, fingerprint: tuple[FeatureStat, ...]
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return (score, edge) arrays for resolved buys resolving after cutoff_ts.
+
+    Each trade is scored by a sign-weighted sum of the fingerprint features,
+    using the trade's own observables (entry price, notional) where the feature
+    is per-trade and the wallet's prior aggregate otherwise. No post-cutoff
+    outcome enters the score.
+    """
+    aggs = wallet_aggregates(db_path, max_trades=10**9, max_lifespan_days=10**9)
+    by_wallet = {a.wallet: a for a in aggs}
+    has_plat = has_platform_column(db_path)
+    tpred = "AND t.platform = 'polymarket'" if has_plat else ""
+    rpred = "AND r.platform = 'polymarket'" if has_plat else ""
+    con = _attach(db_path)
+    try:
+        rows = con.execute(
+            f"""
+            SELECT t.wallet_address, t.price, t.notional_usd,
+                   (({_won_expr()}) - t.price) AS edge
+            FROM s.corpus_trades t
+            JOIN s.market_resolutions r ON r.condition_id = t.condition_id {rpred}
+            WHERE t.bs = 'BUY' AND t.ts <= r.resolved_at
+              AND r.resolved_at > ? {tpred}
+            """,  # noqa: S608 -- predicates are fixed literals; cutoff via ?
+            [cutoff_ts],
+        ).fetchall()
+    finally:
+        con.close()
+    weights = {s.name: (1.0 if s.cohen_d >= 0 else -1.0) * abs(s.cohen_d) for s in fingerprint}
+    scores: list[float] = []
+    edges: list[float] = []
+    for wallet, price, notional, edge in rows:
+        a = by_wallet.get(str(wallet))
+        if a is None:
+            continue
+        score = 0.0
+        for name, w in weights.items():
+            value = _trade_feature(name, price=float(price), notional=float(notional), agg=a)
+            if value is not None:
+                score += w * value
+        scores.append(score)
+        edges.append(float(edge))
+    return np.asarray(scores, dtype=float), np.asarray(edges, dtype=float)
+
+
+def forward_test(
+    db_path: Path,
+    *,
+    cutoff_pct: int,
+    max_trades: int,
+    max_lifespan_days: int,
+    control_ratio: int,
+    drift_window_days: int,
+    top_k_features: int,
+    seed: int,
+) -> ForwardResult:
+    """Derive the fingerprint pre-cutoff, score post-cutoff trades at trade-time."""
+    cutoff_ts = _cutoff_ts(db_path, cutoff_pct=cutoff_pct)
+    pre_aggs = [
+        a
+        for a in wallet_aggregates(
+            db_path, max_trades=max_trades, max_lifespan_days=max_lifespan_days
+        )
+        if a.last_ts <= cutoff_ts
+    ]
+    cases, controls = split_cohorts(pre_aggs, control_ratio=control_ratio, seed=seed)
+    drift = compute_drift(
+        db_path, [a.wallet for a in cases + controls], window_days=drift_window_days
+    )
+    fingerprint = tuple(
+        discriminate(cases, controls, drift=drift, features=FEATURE_NAMES)[:top_k_features]
+    )
+    scores, edges = _post_cutoff_scored_buys(db_path, cutoff_ts=cutoff_ts, fingerprint=fingerprint)
+    if len(scores) == 0:
+        return ForwardResult(cutoff_ts, 0, 0.0, 0.0, fingerprint)
+    threshold = float(np.median(scores))
+    flagged = scores >= threshold
+    flagged_edge = float(edges[flagged].mean()) if flagged.any() else 0.0
+    return ForwardResult(
+        cutoff_ts=cutoff_ts,
+        n_flagged=int(flagged.sum()),
+        flagged_edge=flagged_edge,
+        base_rate_edge=float(edges.mean()),
+        fingerprint=fingerprint,
+    )

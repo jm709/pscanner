@@ -8,9 +8,11 @@ from pathlib import Path
 
 from scripts.find_insider_wallets import (
     FEATURE_NAMES,
+    ForwardResult,
     WalletAgg,
     compute_drift,
     discriminate,
+    forward_test,
     split_cohorts,
     wallet_aggregates,
 )
@@ -175,3 +177,36 @@ def test_discriminate_handles_missing_drift() -> None:
         for s in discriminate(cases, controls, drift={"c0": 0.5}, features=("mean_drift",))
     }
     assert stats["mean_drift"].cohen_d == 0.0  # insufficient samples -> sentinel
+
+
+def test_forward_test_no_lookahead_and_reports_edge(corpus_factory) -> None:
+    day = 86_400
+    trades: list[tuple[str, str, str, str, float, float, int]] = []
+    resolutions: list[tuple[str, int, int]] = []
+    # pre-T: skilled wallets buy cheap and win; noise wallets buy and lose.
+    for i in range(20):
+        trades.append((f"skill{i}", f"pre{i}", "YES", "BUY", 0.10, 100.0, 1_000 + i))
+        resolutions.append((f"pre{i}", 1, 10 * day + i))
+    for i in range(20):
+        trades.append((f"noise{i}", f"prn{i}", "YES", "BUY", 0.60, 100.0, 1_000 + i))
+        resolutions.append((f"prn{i}", 0, 10 * day + i))
+    # post-T: cheap-buy trades win, expensive-buy trades lose.
+    for i in range(20):
+        trades.append((f"q{i}", f"post{i}", "YES", "BUY", 0.10, 100.0, 100 * day + i))
+        resolutions.append((f"post{i}", 1, 200 * day + i))
+        trades.append((f"q{i}", f"poex{i}", "YES", "BUY", 0.80, 100.0, 100 * day + i))
+        resolutions.append((f"poex{i}", 0, 200 * day + i))
+    db: Path = corpus_factory(trades, resolutions, with_platform=True)
+    res = forward_test(
+        db,
+        cutoff_pct=50,
+        max_trades=10,
+        max_lifespan_days=30,
+        control_ratio=3,
+        drift_window_days=7,
+        top_k_features=3,
+        seed=0,
+    )
+    assert isinstance(res, ForwardResult)
+    assert res.n_flagged > 0
+    assert res.flagged_edge > res.base_rate_edge
