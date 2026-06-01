@@ -185,3 +185,51 @@ def split_cohorts(
         controls.extend(pool.get(stratum, [])[:n])
     cases.sort(key=lambda a: a.cash_pnl_usd, reverse=True)
     return cases, controls
+
+
+def compute_drift(db_path: Path, wallets: list[str], *, window_days: int) -> dict[str, float]:
+    """Mean post-entry price drift toward each wallet's side.
+
+    Returns only wallets with at least one entry that has an in-window later
+    trade on the same market.
+    """
+    if not wallets:
+        return {}
+    has_plat = has_platform_column(db_path)
+    tpred = "AND t.platform = 'polymarket'" if has_plat else ""
+    lpred = "AND l.platform = 'polymarket'" if has_plat else ""
+    rpred = "AND r.platform = 'polymarket'" if has_plat else ""
+    con = _attach(db_path)
+    try:
+        con.execute("CREATE TEMP TABLE w(wallet VARCHAR)")
+        con.executemany("INSERT INTO w VALUES (?)", [(x,) for x in wallets])
+        rows = con.execute(
+            f"""
+            WITH entries AS (
+              SELECT t.wallet_address AS wallet, t.condition_id AS cid,
+                     t.outcome_side AS side, t.price AS p0, t.ts AS t0,
+                     r.resolved_at AS resolved_at
+              FROM s.corpus_trades t
+              JOIN w ON w.wallet = t.wallet_address
+              JOIN s.market_resolutions r
+                ON r.condition_id = t.condition_id {rpred}
+              WHERE t.bs = 'BUY' AND t.ts <= r.resolved_at {tpred}
+            ),
+            per_entry AS (
+              SELECT e.wallet,
+                     AVG(CASE WHEN l.outcome_side = e.side
+                              THEN l.price ELSE 1 - l.price END) - e.p0 AS drift
+              FROM entries e
+              JOIN s.corpus_trades l ON l.condition_id = e.cid {lpred}
+              WHERE l.ts > e.t0
+                AND l.ts <= LEAST(e.t0 + ? * {_SECONDS_PER_DAY},
+                                  e.resolved_at - {_SECONDS_PER_DAY})
+              GROUP BY e.wallet, e.cid, e.t0, e.p0
+            )
+            SELECT wallet, AVG(drift) FROM per_entry GROUP BY wallet
+            """,  # noqa: S608 -- _SECONDS_PER_DAY is a fixed literal; window via ?
+            [window_days],
+        ).fetchall()
+    finally:
+        con.close()
+    return {str(w): float(d) for w, d in rows}

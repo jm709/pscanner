@@ -5,7 +5,12 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from scripts.find_insider_wallets import WalletAgg, split_cohorts, wallet_aggregates
+from scripts.find_insider_wallets import (
+    WalletAgg,
+    compute_drift,
+    split_cohorts,
+    wallet_aggregates,
+)
 
 
 def _agg(wallet: str, *, n: int, edge: float, pnl: float, first_ts: int) -> WalletAgg:
@@ -107,3 +112,38 @@ def test_split_cohorts_degrades_when_controls_scarce() -> None:
     cases, controls = split_cohorts(aggs, control_ratio=3, seed=0)
     assert len(cases) == 1
     assert len(controls) == 1  # only one control available; no error
+
+
+def test_drift_positive_when_market_moves_toward_wallet(corpus_factory) -> None:
+    day = 86_400
+    trades = [
+        ("A", "m1", "YES", "BUY", 0.20, 100.0, 1_000),  # entry @0.20
+        ("B", "m1", "YES", "BUY", 0.70, 50.0, 1_000 + 2 * day),  # market drifts to 0.70
+    ]
+    resolutions = [("m1", 1, 1_000 + 30 * day)]
+    db: Path = corpus_factory(trades, resolutions, with_platform=True)
+    drift = compute_drift(db, ["A"], window_days=7)
+    assert drift["A"] > 0.4  # ~0.70 - 0.20
+
+
+def test_drift_excludes_final_24h_snap(corpus_factory) -> None:
+    day = 86_400
+    r = 1_000 + 30 * day
+    trades = [
+        ("A", "m1", "YES", "BUY", 0.20, 100.0, 1_000),
+        ("B", "m1", "YES", "BUY", 0.99, 50.0, r - 3_600),  # snap within final 24h
+    ]
+    db: Path = corpus_factory(trades, [("m1", 1, r)], with_platform=True)
+    drift = compute_drift(db, ["A"], window_days=7)
+    assert "A" not in drift  # no measurable in-window later trade
+
+
+def test_drift_side_normalizes_opposite_side(corpus_factory) -> None:
+    day = 86_400
+    trades = [
+        ("A", "m1", "NO", "BUY", 0.30, 100.0, 1_000),  # NO @0.30 (YES=0.70)
+        ("B", "m1", "YES", "BUY", 0.20, 50.0, 1_000 + 2 * day),  # YES=0.20 -> NO=0.80
+    ]
+    db: Path = corpus_factory(trades, [("m1", 0, 1_000 + 30 * day)], with_platform=True)
+    drift = compute_drift(db, ["A"], window_days=7)
+    assert drift["A"] > 0.4  # NO prob moved 0.30 -> 0.80
