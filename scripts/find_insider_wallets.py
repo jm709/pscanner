@@ -10,8 +10,11 @@ Spec: docs/superpowers/specs/2026-06-01-insider-wallet-discovery-design.md
 
 from __future__ import annotations
 
+import argparse
+import csv
 import datetime as dt
 import random
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -437,3 +440,123 @@ def forward_test(
         base_rate_edge=float(edges.mean()),
         fingerprint=fingerprint,
     )
+
+
+def _print_report(
+    *,
+    aggs: list[WalletAgg],
+    cases: list[WalletAgg],
+    controls: list[WalletAgg],
+    stats: list[FeatureStat],
+    drift: dict[str, float],
+    fwd: ForwardResult,
+    top_n: int,
+) -> None:
+    print("=== Cohort summary ===")
+    print(f"shape wallets: {len(aggs)}  cases: {len(cases)}  controls: {len(controls)}")
+    print("\n=== Discrimination report (ranked by |Cohen's d|) ===")
+    print(f"{'feature':22} {'case_mean':>12} {'ctrl_mean':>12} {'cohen_d':>9} {'mw_p':>9}")
+    for s in stats:
+        print(
+            f"{s.name:22} {s.case_mean:12.4f} {s.control_mean:12.4f} "
+            f"{s.cohen_d:9.3f} {s.mw_p:9.4f}"
+        )
+    print("\n=== Top case wallets (by cash PnL) ===")
+    print(
+        f"{'wallet':14} {'n':>3} {'pnl_usd':>12} {'edge':>7} {'z':>6} "
+        f"{'max_bet':>10} {'conv':>6} {'drift':>7}"
+    )
+    for a in cases[:top_n]:
+        d = drift.get(a.wallet, float("nan"))
+        print(
+            f"{a.wallet[:14]:14} {a.n_resolved_buys:3d} {a.cash_pnl_usd:12.0f} "
+            f"{a.mean_edge:7.3f} {a.improbability_z:6.2f} {a.max_bet_usd:10.0f} "
+            f"{a.conviction_frac:6.2f} {d:7.3f}"
+        )
+    print("\n=== Forward-test ===")
+    print(
+        f"cutoff_ts={fwd.cutoff_ts} n_flagged={fwd.n_flagged} "
+        f"flagged_edge={fwd.flagged_edge:.4f} base_rate_edge={fwd.base_rate_edge:.4f}"
+    )
+
+
+def _write_csv(
+    path: Path, cases: list[WalletAgg], controls: list[WalletAgg], drift: dict[str, float]
+) -> None:
+    with path.open("w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(
+            [
+                "wallet",
+                "cohort",
+                "n_resolved_buys",
+                "cash_pnl_usd",
+                "mean_edge",
+                "improbability_z",
+                "max_bet_usd",
+                "conviction_frac",
+                "mean_drift",
+            ]
+        )
+        for cohort, rows in (("case", cases), ("control", controls)):
+            for a in rows:
+                w.writerow(
+                    [
+                        a.wallet,
+                        cohort,
+                        a.n_resolved_buys,
+                        a.cash_pnl_usd,
+                        a.mean_edge,
+                        a.improbability_z,
+                        a.max_bet_usd,
+                        a.conviction_frac,
+                        drift.get(a.wallet, ""),
+                    ]
+                )
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Insider-wallet discovery")
+    p.add_argument("--db", type=Path, default=Path("data/corpus.sqlite3"))
+    p.add_argument("--max-trades", type=int, default=10)
+    p.add_argument("--max-lifespan-days", type=int, default=30)
+    p.add_argument("--control-ratio", type=int, default=3)
+    p.add_argument("--top-n", type=int, default=100)
+    p.add_argument("--forward-cutoff-pct", type=int, default=70)
+    p.add_argument("--drift-window-days", type=int, default=7)
+    p.add_argument("--top-k-features", type=int, default=3)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--csv", type=Path, default=None)
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    aggs = wallet_aggregates(
+        args.db, max_trades=args.max_trades, max_lifespan_days=args.max_lifespan_days
+    )
+    cases, controls = split_cohorts(aggs, control_ratio=args.control_ratio, seed=args.seed)
+    drift = compute_drift(
+        args.db, [a.wallet for a in cases + controls], window_days=args.drift_window_days
+    )
+    stats = discriminate(cases, controls, drift=drift, features=FEATURE_NAMES)
+    fwd = forward_test(
+        args.db,
+        cutoff_pct=args.forward_cutoff_pct,
+        max_trades=args.max_trades,
+        max_lifespan_days=args.max_lifespan_days,
+        control_ratio=args.control_ratio,
+        drift_window_days=args.drift_window_days,
+        top_k_features=args.top_k_features,
+        seed=args.seed,
+    )
+    _print_report(
+        aggs=aggs, cases=cases, controls=controls, stats=stats, drift=drift, fwd=fwd, top_n=args.top_n
+    )
+    if args.csv is not None:
+        _write_csv(args.csv, cases, controls, drift)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

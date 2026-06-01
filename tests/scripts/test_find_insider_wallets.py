@@ -13,6 +13,7 @@ from scripts.find_insider_wallets import (
     compute_drift,
     discriminate,
     forward_test,
+    main,
     split_cohorts,
     wallet_aggregates,
 )
@@ -210,3 +211,33 @@ def test_forward_test_no_lookahead_and_reports_edge(corpus_factory) -> None:
     assert isinstance(res, ForwardResult)
     assert res.n_flagged > 0
     assert res.flagged_edge > res.base_rate_edge
+
+
+def test_main_runs_end_to_end(corpus_factory, capsys) -> None:
+    day = 86_400
+    trades: list[tuple[str, str, str, str, float, float, int]] = []
+    resolutions: list[tuple[str, int, int]] = []
+    for i in range(15):
+        trades.append((f"win{i}", f"m{i}", "YES", "BUY", 0.10, 500.0, 1_000 + i))
+        resolutions.append((f"m{i}", 1, 10 * day + i))
+    for i in range(15):
+        trades.append((f"lose{i}", f"n{i}", "YES", "BUY", 0.60, 100.0, 1_000 + i))
+        resolutions.append((f"n{i}", 0, 10 * day + i))
+    db: Path = corpus_factory(trades, resolutions, with_platform=True)
+    rc = main(
+        [
+            "--db",
+            str(db),
+            "--max-trades",
+            "10",
+            "--max-lifespan-days",
+            "30",
+            "--forward-cutoff-pct",
+            "50",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Cohort summary" in out
+    assert "Discrimination report" in out
+    assert "Forward-test" in out
