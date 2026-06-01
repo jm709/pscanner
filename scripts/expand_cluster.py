@@ -68,6 +68,8 @@ _FP_BAND = 0.47
 # the server returns 400. Treated as end-of-data (see issue #30).
 _POLYMARKET_OFFSET_CAP = 3500
 _HTTP_BAD_REQUEST = 400
+_HTTP_REQUEST_TIMEOUT = 408
+_HTTP_SERVER_ERROR = 500
 
 # Size buckets for the fingerprint computation (USD).
 _HIGH_PRICE_THRESHOLD = 0.95
@@ -210,6 +212,10 @@ async def _fetch_market_trades(
         # Polymarket caps /trades pagination at offset ~3500 with a 400.
         # Treat that as end-of-data, not a hard error (see issue #30).
         if r.status_code == _HTTP_BAD_REQUEST and offset >= _POLYMARKET_OFFSET_CAP:
+            break
+        # data-api returns 408/5xx on deep pages of busy markets; keep what we
+        # have for this market rather than aborting the whole expansion.
+        if r.status_code == _HTTP_REQUEST_TIMEOUT or r.status_code >= _HTTP_SERVER_ERROR:
             break
         r.raise_for_status()
         page = r.json()
@@ -441,10 +447,9 @@ def _parse_args() -> argparse.Namespace:
 
 
 async def _async_main(args: argparse.Namespace) -> int:
-    config = Config.load()
     seeds = sorted({w.lower() for w in (args.wallet or [])})
     if args.cluster_id:
-        conn = init_db(config.scanner.db_path)
+        conn = init_db(Config.load().scanner.db_path)
         try:
             seeds = _seed_wallets_from_cluster(conn, args.cluster_id)
         finally:
@@ -482,7 +487,7 @@ async def _async_main(args: argparse.Namespace) -> int:
     terse = {k: v for k, v in summary.items() if k != "in_seed_window_addresses"}
     print(f"\nSUMMARY: {json.dumps(terse, indent=2)}")
 
-    out = args.out or _default_out_path(config.scanner.db_path, seeds)
+    out = args.out or _default_out_path(seeds)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(
         json.dumps(
@@ -515,7 +520,11 @@ async def _fetch_all_seed_trades(
     try:
         for i, wallet in enumerate(seeds, 1):
             t0 = time.time()
-            trades = await _fetch_seed_trades(client, wallet)
+            try:
+                trades = await _fetch_seed_trades(client, wallet)
+            except httpx.HTTPError as exc:
+                print(f"[{i:>2}/{len(seeds)}] seed={wallet}  SKIP (data-api error: {exc})")
+                continue
             elapsed = time.time() - t0
             out[wallet] = trades
             print(f"[{i:>2}/{len(seeds)}] seed={wallet}  trades={len(trades):>4}  ({elapsed:.1f}s)")
@@ -524,10 +533,10 @@ async def _fetch_all_seed_trades(
     return out
 
 
-def _default_out_path(db_path: Path, seeds: list[str]) -> Path:
-    """Derive a stable output filename from the seed addresses."""
+def _default_out_path(seeds: list[str]) -> Path:
+    """Derive a stable output filename from the seed addresses (under ./data)."""
     digest = hashlib.sha256("|".join(seeds).encode()).hexdigest()[:12]
-    return db_path.parent / f"cluster_expansion_{digest}.json"
+    return Path("data") / f"cluster_expansion_{digest}.json"
 
 
 def main() -> int:
