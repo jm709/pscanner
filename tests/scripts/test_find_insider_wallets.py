@@ -5,7 +5,27 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from scripts.find_insider_wallets import WalletAgg, wallet_aggregates
+from scripts.find_insider_wallets import WalletAgg, split_cohorts, wallet_aggregates
+
+
+def _agg(wallet: str, *, n: int, edge: float, pnl: float, first_ts: int) -> WalletAgg:
+    return WalletAgg(
+        wallet=wallet,
+        n_resolved_buys=n,
+        n_distinct_markets=n,
+        first_ts=first_ts,
+        last_ts=first_ts + 100,
+        active_lifespan_days=1.0,
+        total_notional_usd=1000.0,
+        mean_bet_usd=100.0,
+        max_bet_usd=500.0,
+        mean_edge=edge,
+        cash_pnl_usd=pnl,
+        mean_entry_price=0.3,
+        improbability_z=2.0,
+        mean_ttr_days=5.0,
+        prior_activity_count=0,
+    )
 
 
 def test_wallet_aggregates_basic_stats(corpus_factory) -> None:
@@ -70,3 +90,20 @@ def test_aggregates_runs_without_platform_column(corpus_factory) -> None:
     trades = [("A", "m1", "YES", "BUY", 0.2, 100.0, 1_000)]
     db: Path = corpus_factory(trades, [("m1", 1, 5_000)], with_platform=False)
     assert len(wallet_aggregates(db, max_trades=10, max_lifespan_days=30)) == 1
+
+
+def test_split_cohorts_cases_and_matched_controls() -> None:
+    aggs = [_agg(f"win{i}", n=2, edge=0.3, pnl=500.0, first_ts=1_000) for i in range(2)]
+    aggs += [_agg(f"lose{i}", n=2, edge=-0.2, pnl=-100.0, first_ts=1_000) for i in range(10)]
+    cases, controls = split_cohorts(aggs, control_ratio=3, seed=0)
+    assert {c.wallet for c in cases} == {"win0", "win1"}
+    assert len(controls) == 6  # 2 cases * ratio 3, same (n, era) stratum
+    assert all(c.cash_pnl_usd <= 0 for c in controls)
+
+
+def test_split_cohorts_degrades_when_controls_scarce() -> None:
+    aggs = [_agg("win0", n=2, edge=0.3, pnl=500.0, first_ts=1_000)]
+    aggs += [_agg("lose0", n=2, edge=-0.2, pnl=-100.0, first_ts=1_000)]
+    cases, controls = split_cohorts(aggs, control_ratio=3, seed=0)
+    assert len(cases) == 1
+    assert len(controls) == 1  # only one control available; no error

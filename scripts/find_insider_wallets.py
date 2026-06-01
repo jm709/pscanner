@@ -10,6 +10,8 @@ Spec: docs/superpowers/specs/2026-06-01-insider-wallet-discovery-design.md
 
 from __future__ import annotations
 
+import datetime as dt
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -145,3 +147,41 @@ def wallet_aggregates(db_path: Path, *, max_trades: int, max_lifespan_days: int)
         )
         for r in rows
     ]
+
+
+def _era(first_ts: int) -> str:
+    """Calendar-quarter bucket of a wallet's first resolved buy."""
+    d = dt.datetime.fromtimestamp(first_ts, tz=dt.UTC)
+    return f"{d.year}Q{(d.month - 1) // 3 + 1}"
+
+
+def _stratum(a: WalletAgg) -> tuple[int, str]:
+    return (a.n_resolved_buys, _era(a.first_ts))
+
+
+def split_cohorts(
+    aggs: list[WalletAgg], *, control_ratio: int, seed: int = 0
+) -> tuple[list[WalletAgg], list[WalletAgg]]:
+    """Split shape wallets into PnL-positive cases and matched negative controls.
+
+    Controls are sampled at ``control_ratio`` per case within each
+    ``(n_resolved_buys, era)`` stratum. Degrades gracefully when a stratum has
+    fewer controls than requested.
+    """
+    cases = [a for a in aggs if a.cash_pnl_usd > 0 and a.mean_edge > 0]
+    losers = [a for a in aggs if a.cash_pnl_usd <= 0]
+    pool: dict[tuple[int, str], list[WalletAgg]] = {}
+    for a in losers:
+        pool.setdefault(_stratum(a), []).append(a)
+    rng = random.Random(seed)
+    for bucket in pool.values():
+        bucket.sort(key=lambda a: a.wallet)
+        rng.shuffle(bucket)
+    need: dict[tuple[int, str], int] = {}
+    for c in cases:
+        need[_stratum(c)] = need.get(_stratum(c), 0) + control_ratio
+    controls: list[WalletAgg] = []
+    for stratum, n in need.items():
+        controls.extend(pool.get(stratum, [])[:n])
+    cases.sort(key=lambda a: a.cash_pnl_usd, reverse=True)
+    return cases, controls
