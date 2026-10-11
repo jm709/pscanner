@@ -1,0 +1,1302 @@
+# Insider-episode case registry (gold set). Hand-curated; the only place hindsight enters the pipeline.
+# Compiled from web research 2026-10-11; see research_notes for dead ends and ambiguities.
+registry_version: 1
+compiled: '2026-10-11'
+spec: docs/superpowers/specs/2026-10-11-insider-episode-catalogue-design.md
+split_rule: 'Two strata: (A) cases with at least one full published address present in the corpus [israel-strikes-iran-2025-06,
+  maduro-capture-2026-01, us-israel-strikes-iran-2026-02-28]; (B) all others. Within each stratum sort case ids
+  by sha256(id) and assign dev to even positions, holdout to odd. Cases sharing a wallet/account inherit the split
+  of their linked case: iran-strike-markets-2026-01 <- israel-strikes-iran-2025-06 (0x0afc...), gemini-3-release-2025-11
+  <- google-year-in-search-2025-12 (AlphaRaccoon). Assigned 2026-10-11 at spec commit 7fc4c32, before any wallet
+  was examined beyond a presence count.'
+holdout_rule: Holdout cases are not opened, queried, or inspected until the scorer amendment is signed off (spec,
+  "Scorer").
+corpus_notes: Slugs under corpus_markets were verified against corpus_markets on the desktop corpus (5,460 markets,
+  >= $1M lifetime volume, trades 2022-11-21 .. 2026-05-26). corpus_trade_count on a wallet is a presence count only.
+  Markets marked "truncated" hit the trade-backfill offset cap and may be missing early trades.
+cases:
+- id: maduro-capture-2026-01
+  name: Maduro capture / Operation Absolute Resolve (Venezuela)
+  confidence: confirmed
+  split: holdout
+  analyzable: true
+  event_date: 2026-01-03
+  news_ts_utc: '2026-01-03T06:00:00Z'
+  news_ts_precision: hour
+  news_ts_notes: 'Explosions began in Caracas about 1:00 AM ET Jan 3 (06:00 UTC) per We Are The Mighty''s reconstruction;
+    operation over ~3:30 AM ET; Trump Truth Social announcement "less than an hour" later. The New Republic/WSJ
+    reconstruction puts Trump''s strike order at 10:46 PM ET Jan 2 (03:46 UTC Jan 3). Lookonchain dated the news
+    Jan 4 in some outlets (Asia time).
+
+    '
+  winning_side: 'YES (Maduro out; US forces in Venezuela). NOTE: the ''invade Venezuela'' / ''military engagement''
+    siblings were resolved NO by Polymarket (snatch-and-extract did not count), so some insider legs lost.'
+  corpus_markets:
+  - market_slug: maduro-out-by-january-31-2026-318
+    winning_side: 'YES'
+    role: primary
+  - market_slug: us-forces-in-venezuela-by-january-31-2026
+    winning_side: 'YES'
+    role: primary
+  - market_slug: us-x-venezuela-military-engagement-by-january-15-2026-392
+    winning_side: 'YES'
+    role: sibling; corpus shows YES resolution
+  markets:
+  - title: Maduro out by January 31, 2026?
+    event_slug: maduro-out-in-2025
+    market_slug: maduro-out-by-january-31-2026-318
+    slug_confidence: high
+    source: https://cryptoslate.com/another-shady-polymarket-account-turned-30k-into-400k-moments-before-the-us-captured-maduro/
+      (URL quoted in article)
+  - title: U.S. Forces in Venezuela by January 31, 2026?
+    market_slug: us-forces-in-venezuela-by-january-31
+    slug_confidence: low
+    source: DOJ press release names the market title; slug guessed
+  - title: Will the U.S. invade Venezuela by January 31?
+    market_slug: will-the-us-invade-venezuela-by-january-31
+    slug_confidence: low
+  - title: Trump invokes War Powers against Venezuela by January 31?
+    market_slug: trump-invokes-war-powers-against-venezuela-by-january-31
+    slug_confidence: low
+  - title: US military engagement / invasion of Venezuela by January 31 (sibling markets Polymarket refused to pay
+      out; see notes)
+    slug_confidence: low
+  suspicious_window: 'Account created Dec 26/27 2025; ~13 YES bets Dec 27 - evening Jan 2. Final tranche ($20k+)
+    placed 8:38-9:58 PM ET Jan 2 (01:38-02:58 UTC Jan 3), i.e. ~1 hour before the strike order and ~3-5 hours before
+    the first explosions. Lookonchain: three wallets created/pre-funded days earlier, large YES buys "hours before"
+    the arrest; entry odds 5.5-8%.
+
+    '
+  wallets:
+  - address: '0x31a56e9e690c621ed21de08cb559e9524cdb8ed9'
+    username: Burdensome-Mix (per CFTC civil complaint); default username at time of trades
+    stake_usd: 33034
+    profit_usd: 409881
+    identity: Gannon Ken Van Dyke, US Army Special Operations master sergeant, Fort Bragg (indicted SDNY 2026-04-23;
+      pleaded not guilty 2026-04-28)
+    sources:
+    - https://cryptoslate.com/another-shady-polymarket-account-turned-30k-into-400k-moments-before-the-us-captured-maduro/
+    - https://fortune.com/2026/01/05/polymarket-user-400k-maduro-capture-bets-insider-trading-suspicion
+    - https://www.justice.gov/opa/pr/us-soldier-charged-using-classified-information-profit-prediction-market-bets
+    corpus_trade_count: 9
+  - address: 0xa72DB1749e9... (TRUNCATED in all sources; Lookonchain profile link polymarket.com/@0xa72DB1749e9...)
+    stake_usd: 5800
+    profit_usd: 75000
+    sources:
+    - https://x.com/lookonchain/status/2007639475497881625
+    - https://www.chaincatcher.com/en/article/2234498
+  - address: null
+    username: SBet365
+    stake_usd: 25000
+    profit_usd: 145600
+    sources:
+    - https://x.com/lookonchain/status/2007639475497881625
+    - https://www.cryptoninjas.net/news/630k-insider-bet-exposed-as-polymarket-wallets-predicted-maduros-fall-hours-before-arrest/
+  detection_method: 'Fresh wallet + single-topic betting + timing, flagged by Lookonchain on X (Jan 4) and by Andrey
+    ''10 GWEI''; amplified by Fortune/NPR/WSJ. Polymarket referred the account to DOJ; FBI traced withdrawals through
+    a foreign crypto vault to a new brokerage account.
+
+    '
+  sources:
+  - url: https://x.com/lookonchain/status/2007639475497881625
+    date: 2026-01-04
+  - url: https://fortune.com/2026/01/05/polymarket-user-400k-maduro-capture-bets-insider-trading-suspicion
+    date: 2026-01-05
+  - url: https://npr.org/2026/01/05/nx-s1-5667232/polymarket-maduro-bet-insider-trading
+    date: 2026-01-05
+  - url: https://www.wearethemighty.com/military-news/polymarket-insider-venezuela/
+    date: 2026-01-09
+  - url: https://newrepublic.com/post/204885/insider-trading-trump-attack-venezuela-maduro-polymarket
+    date: 2026-01
+  - url: https://www.justice.gov/usao-sdny/pr/us-soldier-charged-using-classified-information-profit-prediction-market-bets
+    date: 2026-04-23
+  - url: https://www.cnbc.com/2026/04/23/doj-soldier-polymarket-bets-venezuela-maduro.html
+    date: 2026-04-23
+  - url: https://courthousenews.com/army-soldier-who-placed-insider-bets-on-maduro-capture-asks-for-pretrial-dismissal
+    date: 2026-10-07
+  notes: 'First US criminal prediction-market insider case. DOJ: account created ~Dec 26 2025; withdrew most proceeds
+    Jan 3; asked Polymarket to delete account ~Jan 6. CFTC parallel civil complaint says >436,000 YES shares bought
+    Dec 30 - Jan 2. Polymarket statement: "Insider trading has no place on Polymarket". Van Dyke''s Oct 2026 motion
+    to dismiss argues event contracts are not "swaps". The other two Lookonchain wallets were never publicly identified.
+    Rep. Torres introduced the Public Integrity in Financial Prediction Markets Act (Jan 5 2026) in response.
+
+    '
+- id: israel-strikes-iran-2025-06
+  name: Israel opening strike on Iran, Operation Rising Lion (12-day war)
+  confidence: confirmed
+  split: dev
+  analyzable: true
+  event_date: 2025-06-13
+  news_ts_utc: '2025-06-13T00:00:00Z'
+  news_ts_precision: hour
+  news_ts_notes: Strikes began ~03:00 Israel time (IDT, UTC+3) on June 13 2025; Defense Minister Katz declared emergency
+    shortly after.
+  winning_side: true
+  corpus_markets:
+  - market_slug: israel-military-action-against-iran-before-july
+    winning_side: 'YES'
+    role: primary
+  - market_slug: israel-military-action-against-iran-by-friday-477
+    winning_side: 'YES'
+    role: 'primary (Kan: >$128.7k won here)'
+  - market_slug: israel-strike-on-iran-on-june-24
+    winning_side: 'YES'
+    role: war-end leg
+  - market_slug: israel-strike-on-iran-on-june-22
+    winning_side: 'YES'
+    role: sibling
+  markets:
+  - title: Israeli military action against Iran before July?
+    market_slug: israel-military-action-against-iran-before-july
+    slug_confidence: low
+    source: Title quoted in Israeli indictment coverage (casino.org / Times of Israel); slug by analogy to israel-military-action-against-iran-before-june
+      (which exists, resolved No)
+  - title: 'Israel military action against Iran by Friday [June 13]? (Kan: won >$128,700)'
+    slug_confidence: low
+  - title: Israel strikes Iran on ...? (multi-outcome, day markets; e.g. June 24 leg)
+    event_slug: israel-strike-on-iran-on
+    slug_confidence: high
+    source: https://polymarket.com/event/israel-strike-on-iran-on
+  - title: Israel announces end of Iran operation before July? (war end-date market; title paraphrased)
+    slug_confidence: low
+  suspicious_window: 'Per indictment: IAF reserve major briefed on the operation June 12; told civilian over WhatsApp;
+    bet placed "when Israeli warplanes were en route" (minutes-to-hours before). Kan: account opened June 13 2025
+    and bet tens of thousands at ~14% implied odds.
+
+    '
+  wallets:
+  - address: '0x0afc7ce56285bde1fbe3a75efaffdfc86d6530b2'
+    username: ricosuave666 (later renamed Rundeep)
+    profit_usd: 152300
+    notes: Kan-identified account; 100% win rate on Israel-related positions; reactivated Jan 7 2026 (see case iran-strike-markets-2026-01).
+      It is NOT publicly confirmed that this is Omer Ziv's account (Cointelegraph caveat), though the amounts match
+      closely.
+    sources:
+    - https://dyutam.com/news/polymarket-israel-iran-conflict-insider-trading/
+    - https://cointelegraph.com/news/israel-arrests-two-polymarket-trades-militiary-strikes
+    - https://corpgov.law.harvard.edu/2026/03/25/from-iran-to-taylor-swift-informed-trading-in-prediction-markets/
+    corpus_trade_count: 100
+  - address: null
+    username: Skoobidoobnj
+    profit_usd: 100000
+    notes: 'Bubblemaps: ~$100k combined on June 13 (Israel) and June 22 (US) 2025 surprise attacks; linked via shared
+      Binance deposit address to nothingeverhappens911 (Feb 2026) and to two more accounts (one +$65k Feb 28, one
+      +$10k June 13).'
+    sources:
+    - https://ambcrypto.com/bubblemaps-trace-polymarket-accounts-linked-to-iran-strike-bets/
+  - address: null
+    username: four newly created accounts used by Omer Ziv (names not published)
+    profit_usd: 162663
+    notes: Indictment figure for the June 2025 strike-timing bet, split 50/50 with the officer; Haaretz puts total
+      scheme at ~$244k.
+    sources:
+    - https://www.timesofisrael.com/israeli-air-force-major-charged-with-using-classified-info-to-place-bets-on-polymarket/
+  detection_method: 'Username change noticed by an IAF reservist; Kan News report (Jan 2026) on ricosuave666; IDF/Shin
+    Bet investigation; arrests late Jan 2026; indictment Feb 2026 (Tel Aviv District Court); identity of civilian
+    (Omer Ziv, 30, iGaming marketer) released March 2026.
+
+    '
+  sources:
+  - url: https://www.jpost.com/israel-news/crime-in-israel/article-884318
+    date: 2026-01
+  - url: https://www.israelhayom.com/2026/01/31/polymarket-israel-iran-classified-betting-scandal/
+    date: 2026-01-31
+  - url: https://www.npr.org/2026/02/12/nx-s1-5712801/polymarket-bets-traders-israel-military
+    date: 2026-02-12
+  - url: https://www.timesofisrael.com/two-indicted-for-using-classified-info-to-place-online-bets-on-military-operations/
+    date: 2026-02
+  - url: https://www.timesofisrael.com/israeli-air-force-major-charged-with-using-classified-info-to-place-bets-on-polymarket/
+    date: 2026-03-27
+  - url: https://www.casino.org/news/igaming-marketing-professional-accused-of-insider-polymarket-trades-on-iran-conflict/
+    date: 2026-03
+  - url: https://www.jns.org/news/world/polymarket-leads-to-whole-new-category-of-insider-trading
+    date: 2026
+  notes: 'Same pair also won on the war end-date market (June 24), a Sept 2025 Yemen/Houthi strike (~$5k), and prepared
+    a Jan 2026 Iran bet but cancelled after seeing social-media posts about the account. Charges: severe security
+    offences, bribery, obstruction. Officer later claimed "everyone in the air force" bets on prediction markets
+    (casinobeats, May 2026).
+
+    '
+- id: us-strikes-iran-2025-06
+  name: US strikes on Fordow/Natanz/Isfahan, Operation Midnight Hammer
+  confidence: alleged
+  split: holdout
+  analyzable: true
+  event_date: 2025-06-21
+  news_ts_utc: '2025-06-21T22:40:00Z'
+  news_ts_precision: minute
+  news_ts_notes: 'ACDC: strike at 18:40 ET June 21 (22:40 UTC). Trump announced on Truth Social ~19:50 ET (23:50
+    UTC).'
+  winning_side: true
+  corpus_markets:
+  - market_slug: us-military-action-against-iran-before-july
+    winning_side: 'YES'
+    role: primary
+  - market_slug: us-military-action-against-iran-by-saturday
+    winning_side: 'YES'
+    role: primary (June 21 leg)
+  - market_slug: us-military-action-against-iran-by-sunday-225
+    winning_side: 'YES'
+    role: primary
+  - market_slug: fordow-nuclear-facility-destroyed-before-july
+    winning_side: 'YES'
+    role: primary
+  - market_slug: us-military-action-against-iran-before-august
+    winning_side: 'YES'
+    role: sibling
+  - market_slug: us-military-action-against-iran-by-friday
+    winning_side: 'NO'
+    role: decoy leg, expired NO
+  markets:
+  - title: 'Day-specific ''US strikes Iran on June 21 / by June 22'' contracts (ACDC: markets tied to June 19 and
+      20 expired No)'
+    slug_confidence: low
+  - title: Fordow nuclear facility destroyed before July?
+    event_slug: fordow-nuclear-facility-destroyed-before-july
+    slug_confidence: high
+  - title: Will the U.S. strike Fordow nuclear facility before July?
+    event_slug: will-the-us-strike-fordow-nuclear-facility-before-july
+    slug_confidence: high
+  suspicious_window: 'ACDC: 19 longshot bets totalling $164,292 placed in the hours before the strike on the contracts
+    that resolved YES. Skoobidoobnj bet ~$9k roughly 10 hours before (odds ~1:10). Account 0x88e6 placed its first
+    longshot that day, last one ~1 hour before the bombs. CNN: Magamyman also bet hours before.
+
+    '
+  wallets:
+  - address: null
+    username: Skoobidoobnj
+    stake_usd: 9000
+    profit_usd: 100000
+    notes: Profit figure is Bubblemaps' combined June 13 + June 22 figure.
+    sources:
+    - https://acdatacollective.org/work/profiting-from-war-mysterious-bets-on-polymarket/
+    - https://ambcrypto.com/bubblemaps-trace-polymarket-accounts-linked-to-iran-strike-bets/
+  - address: 0x88e6... (TRUNCATED prefix only)
+    profit_usd: 33000
+    notes: '>$20k on the strike plus >$13k on Fordow ''destroyed''.'
+    sources:
+    - https://acdatacollective.org/work/profiting-from-war-mysterious-bets-on-polymarket/
+  - address: null
+    username: Magamyman
+    notes: See case magamyman-israel-strike-2024-10; CNN says it bet hours before this strike too.
+    sources:
+    - https://www.cnn.com/2026/03/24/politics/iran-war-bets-prediction-markets
+  - address: null
+    username: eight wallets (ACDC aggregate)
+    profit_usd: 1800000
+    notes: One wallet took nearly $500k. ACDC also documented copycat bets of $200k (bot) and $100k (whale) following
+      the first longshot.
+  detection_method: Retrospective on-chain screening (ACDC longshot filter, Bubblemaps deposit-address clustering,
+    CNN/Polymarket History account review).
+  sources:
+  - url: https://acdatacollective.org/work/profiting-from-war-mysterious-bets-on-polymarket/
+    date: 2026
+  - url: https://acdatacollective.org/work/insider-risks-in-polymarket-political-markets/
+    date: 2026-04-30
+  - url: https://www.coindesk.com/markets/2026/04/30/polymarket-s-military-markets-show-signs-of-insider-edge-report-suggests
+    date: 2026-04-30
+  - url: https://ambcrypto.com/bubblemaps-trace-polymarket-accounts-linked-to-iran-strike-bets/
+    date: 2026-03
+  notes: No official action tied specifically to this event. Fordow 'destroyed' market was itself contested on resolution.
+- id: magamyman-israel-strike-2024-10
+  name: Israeli retaliatory strike on Iran, Oct 26 2024 (Magamyman account)
+  confidence: suspected
+  split: dev
+  analyzable: true
+  event_date: 2024-10-26
+  news_ts_utc: '2024-10-25T23:15:00Z'
+  news_ts_precision: hour
+  news_ts_notes: Israeli strikes began ~02:15 local time Oct 26 (IDT UTC+3 = 23:15 UTC Oct 25). JPost text misdescribes
+    it as 'the Iranian attack in October 2024'.
+  winning_side: YES on the exact date; NO on surrounding days
+  corpus_markets:
+  - market_slug: israel-military-response-against-iran-in-october
+    winning_side: 'YES'
+    role: primary; backfill truncated at offset cap
+  - market_slug: israel-strike-on-iranian-nuclear-facility-in-2024
+    winning_side: 'YES'
+    role: related; backfill truncated
+  markets:
+  - title: Day-specific Israel-strikes-Iran markets, October 2024 (exact title not published)
+    slug_confidence: low
+    notes: The 2025 slug israel-strikes-iran-by-october-31 is a DIFFERENT (2025) market. A sibling 'another-iran-strike-on-israel-in-2024'
+      exists but is the reverse direction.
+  suspicious_window: 'Israeli security sources: the Oct 26 date was fixed several days in advance; the account bet
+    on the exact date and against adjacent days. CNN: bets placed ''hours before'' the strike.'
+  wallets:
+  - address: null
+    username: Magamyman (changed name after the 2024 wins; earlier name not published)
+    profit_usd: 670000
+    notes: 'JPost: 2.5 million shekels profit on the 2024 bets (~$670k at ~3.7 ILS/USD, my conversion). CNN: $967k
+      lifetime profit, 83% accuracy across Oct 2024, June 2025 and Feb 2026 bets. Also bet correctly on an Israeli
+      move into Syria after Assad''s fall (Dec 2024). Feb 2026: ~$553k on Khamenei-out + ~$431k on the strike market,
+      first trade 71 minutes before news broke (Rep. Mike Levin).'
+    sources:
+    - https://www.jpost.com/israel-news/article-888562
+    - https://www.cnn.com/2026/03/24/politics/iran-war-bets-prediction-markets
+    - https://www.npr.org/2026/03/01/nx-s1-5731568/polymarket-trade-iran-supreme-leader-killing
+  detection_method: IAF reservist 'Y.D.' noticed the username change after a string of wins on Israeli attack dates;
+    reported to Israeli press; later CNN profile.
+  sources:
+  - url: https://www.jpost.com/israel-news/article-888562
+    date: 2026-03-02
+  - url: https://www.cnn.com/2026/03/24/politics/iran-war-bets-prediction-markets
+    date: 2026-03-24
+  - url: https://finance.yahoo.com/news/polymarket-under-fire-lawmaker-demands-033019283.html
+    date: 2026-03-03
+  notes: Earliest documented episode in the set (Oct 2024). Israeli Defense Ministry did not comment; no charges
+    reported as of Oct 2026. CNN URL returned HTTP 451 to the fetcher; details come from search summaries and JPost.
+- id: us-israel-strikes-iran-2026-02-28
+  name: US-Israel opening strikes on Iran and killing of Khamenei
+  confidence: alleged
+  split: dev
+  analyzable: true
+  event_date: 2026-02-28
+  news_ts_utc: '2026-02-28T06:15:00Z'
+  news_ts_precision: minute
+  news_ts_notes: 'AOAV/Byline Times: first strikes 06:15 UTC; Xinhua: explosions heard in Tehran ~06:20 UTC; Katz
+    confirmed ~06:30 UTC; Trump statement ~07:30 UTC. Polymarket resolved the Israel market 09:14:55 UTC and the
+    US market 09:30:47 UTC. Khamenei death officially announced by Iranian state TV March 1.'
+  winning_side: true
+  corpus_markets:
+  - market_slug: us-strikes-iran-by-february-28-2026-227-967-547-688-589-491-592-418-452-924-384-915-464-672-196-157-993-596-269-535-381-391-471-256-988-997-296-225-762-973-292-827-345-182-558-215-794-879-189-761
+    winning_side: 'YES'
+    role: primary
+  - market_slug: us-strikes-iran-by-march-1-2026-492
+    winning_side: 'YES'
+    role: primary (Roeyha2026)
+  - market_slug: israel-strikes-iran-by-march-31-2026
+    winning_side: 'YES'
+    role: primary (ricosuave666)
+  - market_slug: us-strikes-iran-by-march-15-2026-176-537-334-314-311-563-139-841-296-929-674-361-128-125-587-277-713-864-314-272-772-416-338-683-554-682-743-939-378-887-219-419-692-473-532-837-119-848-847-469
+    winning_side: 'YES'
+    role: sibling
+  - market_slug: khamenei-out-as-supreme-leader-of-iran-by-march-31
+    winning_side: 'YES'
+    role: Khamenei leg (Magamyman); by-february-28 leg not in corpus
+  - market_slug: us-strikes-iran-by-february-27-2026
+    winning_side: 'NO'
+    role: decoy leg, expired NO
+  markets:
+  - title: US strikes Iran by February 28, 2026?
+    market_slug: us-strikes-iran-by-february-28-2026
+    slug_confidence: medium
+    source: Title per The Block/Bloomberg; slug by analogy with israel-strikes-iran-by-february-28-2026
+  - title: Israel strikes Iran by February 28, 2026?
+    event_slug: israel-strikes-iran-by-february-28-2026
+    slug_confidence: high
+  - title: Khamenei out as Supreme Leader of Iran by February 28?
+    event_slug: khamenei-out-as-supreme-leader-of-iran-by-february-28
+    slug_confidence: high
+  - title: US strikes Iran by March 1, 2026?
+    market_slug: us-strikes-iran-by-march-1-2026
+    slug_confidence: low
+  - title: US strikes Iran by February 27 / daily 'next strike' Feb 19, Feb 20 contracts (some used for small decoy
+      losses)
+    slug_confidence: low
+  - title: Israel strikes Iran by March 31, 2026? (ricosuave666's reactivated position; resolved Yes)
+    event_slug: israel-strikes-iran-by-march-31-2026
+    slug_confidence: high
+  suspicious_window: 'Hours: AOAV found the YES surge 05:00-06:00 UTC (US market +313%, Israel market +1600% vs
+    prior hour); 0x4564 bought 03:11-05:20 UTC; Aaamsaasa and SemiconductorIT 05:18-05:30 UTC. Bloomberg: seven
+    wallets bought within minutes of each other on Feb 28 at very low odds; a 10-day-old wallet made five large
+    buys Feb 26-28 at ~16%. Magamyman first trade 71 minutes before news broke. ~1 day: the 38-account cluster bet
+    within one hour on Feb 27 11:00-12:00 GMT after funding on Feb 22. Bubblemaps'' nine-account cluster made small
+    losing bets Feb 20 to "avoid attention".
+
+    '
+  wallets:
+  - address: '0x1caa6a7ad0c6916aef7b67946de2e57ad24846a0'
+    stake_usd: 60816
+    profit_usd: 494375
+    notes: 560,680 YES shares at 10.8c on the Feb 28 market; $499,864 on Feb 28, $494,375 net over four predictions.
+      Largest of Bubblemaps' six fresh wallets.
+    sources:
+    - https://www.theblock.co/post/391650/fresh-accounts-netted-1-million-on-polymarket-hours-before-us-airstrikes-on-iran-bubblemaps
+    corpus_trade_count: 80
+  - address: null
+    username: Planktonbets
+    profit_usd: 173907
+    notes: 200,747 shares at 13.2c.
+    sources:
+    - https://www.theblock.co/post/391650/fresh-accounts-netted-1-million-on-polymarket-hours-before-us-airstrikes-on-iran-bubblemaps
+  - address: null
+    username: Dicedicedice
+    profit_usd: 119964
+    notes: 149,955 shares at 20c; ~$30k position.
+    sources:
+    - https://www.theblock.co/post/391650/fresh-accounts-netted-1-million-on-polymarket-hours-before-us-airstrikes-on-iran-bubblemaps
+  - address: null
+    username: Neodbs
+    stake_usd: 9884
+    profit_usd: 88954
+    sources:
+    - https://www.theblock.co/post/391650/fresh-accounts-netted-1-million-on-polymarket-hours-before-us-airstrikes-on-iran-bubblemaps
+  - address: 0xa4eb... (TRUNCATED prefix only)
+    username: nothingeverhappens911
+    profit_usd: 66436
+    notes: 40,000 shares Feb 28 at 19c + 45,320 shares Mar 1 at 24.9c. Linked by shared Binance deposit address
+      to Skoobidoobnj (Bubblemaps, Mar 5 2026).
+    sources:
+    - https://www.theblock.co/post/391650/fresh-accounts-netted-1-million-on-polymarket-hours-before-us-airstrikes-on-iran-bubblemaps
+    - https://ambcrypto.com/bubblemaps-trace-polymarket-accounts-linked-to-iran-strike-bets/
+  - address: null
+    username: Anon (Bubblemaps' sixth wallet)
+    profit_usd: 45556
+    notes: 55,556 shares at 18c.
+    sources:
+    - https://www.theblock.co/post/391650/fresh-accounts-netted-1-million-on-polymarket-hours-before-us-airstrikes-on-iran-bubblemaps
+  - address: '0x45647817f1e2f706748da27ed717ecae9b674a11'
+    username: 0x4564 (account later deleted; shows as 'Anon')
+    profit_usd: 90771
+    notes: 109,512 YES shares on the US market 03:11-05:20 UTC; only prior bet was $952 on Harris 2024 (lost). Cashed
+      out 19:22 UTC. Possibly the same wallet The Block labels 'Anon' (unverified).
+    sources:
+    - https://bylinetimes.com/2026/10/07/why-did-polymarket-trading-surge-an-hour-before-the-iran-war-started
+    corpus_trade_count: 27
+  - address: null
+    username: Aaamsaasa and SemiconductorIT
+    profit_usd: 59567
+    notes: Bought 05:18-05:30 UTC; both cashed out 16:17-16:20 UTC to the same Solana wallet 4dLZQynk9SZJf6PC...
+      (TRUNCATED) created 14:37 UTC that day.
+    sources:
+    - https://bylinetimes.com/2026/10/07/why-did-polymarket-trading-surge-an-hour-before-the-iran-war-started
+  - address: null
+    username: Magamyman
+    stake_usd: 235947
+    profit_usd: 553000
+    notes: '~$553k on Khamenei-out market and ~$431k payout on $235,947 at 27c on the strike market (figures vary
+      by outlet: ''turned ~$87k into >$500k'' per Rep. Levin; ''$515k in a day'' per Benzinga). First trade 71 minutes
+      before news broke. See magamyman-israel-strike-2024-10.'
+    sources:
+    - https://www.npr.org/2026/03/01/nx-s1-5731568/polymarket-trade-iran-supreme-leader-killing
+    - https://finance.yahoo.com/news/polymarket-under-fire-lawmaker-demands-033019283.html
+  - address: null
+    username: Roeyha2026
+    stake_usd: 50000
+    profit_usd: 97000
+    notes: Funded 11 hours before a $50k YES on 'US strikes Iran by March 1, 2026'; drained afterwards (Lookonchain).
+    sources:
+    - https://aljazeera.com/news/2026/3/25/large-polymarket-wall-street-bets-on-trumps-war-news-under-scrutiny
+  - address: null
+    username: 38-account cluster (Andrew 10 GWEI / NY Post)
+    profit_usd: 2140000
+    notes: Per-account PnL $30k-$230k, 4-10 military bets each, ~100% win rate; all funded Feb 22 and all withdrew
+      to the same Coinbase deposit address. Individual account names not published in sources read.
+    sources:
+    - https://aljazeera.com/news/2026/3/25/large-polymarket-wall-street-bets-on-trumps-war-news-under-scrutiny
+    - https://www.aol.com/articles/polymarket-trader-making-millions-iran-201354353.html
+  - address: null
+    username: nine-account cluster (Bubblemaps, 60 Minutes)
+    profit_usd: 2400000
+    notes: '>80 bets, 98% win rate across Feb 28 strikes, Khamenei removal and the April ceasefire; four wallets
+      ~$400k each on the Feb 28 strike; funded via centralized exchanges in a tight window; small losing decoy bets
+      Feb 20.'
+    sources:
+    - https://www.cbsnews.com/news/betting-on-iran-war-insider-trading-concerns-prediction-markets-60-minutes/
+    - https://www.tradingview.com/news/cointelegraph:cb2c207b8094b:0-wallet-cluster-earned-2-4m-with-98-win-rate-on-polymarket-military-bets-bubblemaps/
+  - address: null
+    username: anoin123 (counter-example)
+    profit_usd: -6500000
+    notes: Had built ~$2M betting NO on strikes; lost $6.5M in one day (Lookonchain). Useful negative control for
+      'large position' heuristics.
+    sources:
+    - https://www.theblock.co/post/391650/fresh-accounts-netted-1-million-on-polymarket-hours-before-us-airstrikes-on-iran-bubblemaps
+  detection_method: 'Fresh wallets funded <24h before (Bubblemaps, Mar 1-2); deposit-address clustering (Bubblemaps,
+    Andrew 10 GWEI); hourly volume anomaly (AOAV/Byline Times); Polysights/Bloomberg flagged-trade dataset; Rep.
+    Levin and Rep. Torres public letters; CFTC opened an Iran-related probe end of May 2026 (WIRED FOIA).
+
+    '
+  sources:
+  - url: https://www.forbes.com/sites/boazsobrado/2026/03/02/fresh-wallets-made-12m-on-polymarket-hours-before-iran-airstrikes/
+    date: 2026-03-02
+  - url: https://www.theblock.co/post/391650/fresh-accounts-netted-1-million-on-polymarket-hours-before-us-airstrikes-on-iran-bubblemaps
+    date: 2026-02-28
+  - url: https://www.snopes.com/news/2026/03/03/polymarket-bets-iran-strikes/
+    date: 2026-03-03
+  - url: https://www.npr.org/2026/03/01/nx-s1-5731568/polymarket-trade-iran-supreme-leader-killing
+    date: 2026-03-01
+  - url: https://ambcrypto.com/bubblemaps-trace-polymarket-accounts-linked-to-iran-strike-bets/
+    date: 2026-03-05
+  - url: https://aljazeera.com/news/2026/3/25/large-polymarket-wall-street-bets-on-trumps-war-news-under-scrutiny
+    date: 2026-03-25
+  - url: https://www.cbsnews.com/news/betting-on-iran-war-insider-trading-concerns-prediction-markets-60-minutes/
+    date: 2026-05
+  - url: https://www.bloomberg.com/graphics/2026-polymarket-bets-iran-war-insider-trading/
+    date: 2026-06-17
+  - url: https://bylinetimes.com/2026/10/07/why-did-polymarket-trading-surge-an-hour-before-the-iran-war-started
+    date: 2026-10-07
+  - url: https://english.news.cn/20260302/fece74cf56de4f92896876eec5799887/c.html
+    date: 2026-03-02
+  notes: 'Largest single episode by flagged volume. ''US strikes Iran by ...?'' family had >$529M volume. CFTC advisory
+    on event-contract insider trading published Feb 25 2026, three days before. Snopes confirmed the six fresh wallets
+    but could not confirm an administration link. Ex-Polymarket whale Ryan Kirkley (Forbes, May 11) cites an "$800,000
+    bet placed two hours before the strike" not otherwise identified. Polymarket told Bloomberg it has made ~100
+    wallet referrals to law enforcement.
+
+    '
+- id: us-iran-ceasefire-2026-04-07
+  name: US-Iran two-week ceasefire announcement
+  confidence: alleged
+  split: dev
+  analyzable: false
+  not_analyzable_reason: no us-x-iran ceasefire market found in corpus_markets despite $162M reported volume; event
+    may have been held as disputed at enumeration time
+  event_date: 2026-04-07
+  news_ts_utc: '2026-04-07T22:32:00Z'
+  news_ts_precision: minute
+  news_ts_notes: Trump Truth Social post confirming the ceasefire at 10:32 PM UTC (Cointelegraph/Lookonchain); AP
+    says 'around 6:30 pm ET'. Earlier that day Trump had set an 8 PM ET Hormuz deadline and warned 'a whole civilization
+    will die tonight'.
+  winning_side: true
+  markets:
+  - title: US x Iran ceasefire by April 7?
+    market_slug: us-x-iran-ceasefire-by-april-7
+    slug_confidence: medium
+    source: Title quoted by Cointelegraph/Lookonchain
+  - title: US x Iran ceasefire by April 15?
+    market_slug: us-x-iran-ceasefire-by-april-15
+    slug_confidence: medium
+  - title: US x Iran ceasefire by March 31? (resolved No; the same clusters lost ~$50k here)
+    market_slug: us-x-iran-ceasefire-by-march-31
+    slug_confidence: medium
+  suspicious_window: 'Lookonchain''s three wallets: first trades 2026-04-06 20:50 UTC, 2026-04-07 10:01 UTC and
+    2026-04-07 13:59 UTC (26h to 8.5h before), entry 2.9-10.3%. AP/Dune: at least 50 wallets placed their first-ever
+    bets as YES buys that day; one created ~10 AM ET bought ~$72k at 8.8c; one created 12 minutes before the post
+    bought $31,908 at 33.7c.
+
+    '
+  wallets:
+  - address: null
+    username: three fresh wallets (Lookonchain; addresses only in image)
+    profit_usd: 484575
+    notes: $200,525 / $158,600 / $125,450. Lookonchain later updated to four wallets, $663k.
+    sources:
+    - https://cointelegraph.com/news/3-polymarket-traders-made-a-timely-bet-on-a-us-iran-ceasefire
+  - address: null
+    username: Fernandoinfante
+    stake_usd: 13200
+    profit_usd: 467515
+    sources:
+    - https://finance.yahoo.com/markets/crypto/articles/cftc-quietly-opened-three-polymarket-095710457.html
+  - address: null
+    username: djijaij83jdo4jdlwjflsg, Elonfax89678, Skoobidoobnj (Bubblemaps cluster)
+    profit_usd: 611000
+    notes: Same cluster that made ~$1.2M on the Feb 28 strikes; 'betting and winning on military markets since 2024
+      using multiple accounts'.
+    sources:
+    - https://finance.yahoo.com/markets/crypto/articles/potential-insiders-made-600k-predicting-171731685.html
+  - address: null
+    username: unnamed wallet created 12 minutes before Trump's post
+    stake_usd: 31908
+    profit_usd: 48500
+    sources:
+    - https://www.ksat.com/business/2026/04/08/newly-created-polymarket-accounts-bet-big-on-us-iran-ceasefire-in-hours-before-trumps-announcement/
+  - address: null
+    username: unnamed wallet created ~10 AM ET Apr 7
+    stake_usd: 72000
+    profit_usd: 200000
+    notes: Average price 8.8c (AP). Possibly the same as Lookonchain's $200,525 wallet.
+    sources:
+    - https://www.ksat.com/business/2026/04/08/newly-created-polymarket-accounts-bet-big-on-us-iran-ceasefire-in-hours-before-trumps-announcement/
+  detection_method: Fresh-wallet screening (Lookonchain, Bubblemaps), AP analysis via Dune; Rep. Torres letter to
+    CFTC chair Selig; Sen. Blumenthal letter to Polymarket.
+  sources:
+  - url: https://cointelegraph.com/news/3-polymarket-traders-made-a-timely-bet-on-a-us-iran-ceasefire
+    date: 2026-04-08
+  - url: https://www.ksat.com/business/2026/04/08/newly-created-polymarket-accounts-bet-big-on-us-iran-ceasefire-in-hours-before-trumps-announcement/
+    date: 2026-04-08
+  - url: https://finance.yahoo.com/markets/crypto/articles/potential-insiders-made-600k-predicting-171731685.html
+    date: 2026-04-08
+  - url: https://www.npr.org/2026/04/10/nx-s1-5780569/betting-polymarket-iran-investigation-lawmakers
+    date: 2026-04-10
+  - url: https://ritchietorres.house.gov/posts/rep-torres-calls-on-cftc-to-investigate-suspicious-polymarket-trades-ahead-of-trumps-iran-ceasefire-announcement
+    date: 2026-04-09
+  - url: https://www.blumenthal.senate.gov/newsroom/press/release/blumenthal-demands-answers-from-polymarket-following-suspicious-bets-on-ceasefire
+    date: 2026-04
+  notes: 'Polymarket labelled the ceasefire event "disputed" and held some payouts. AP notes a benign explanation
+    (Pakistan''s late push to extend the deadline; Trump''s habit of backing down). Market had $162.6M total volume.
+
+    '
+- id: us-iran-peace-deal-2026-05
+  name: US-Iran permanent peace deal (tentative agreement news, May 2026)
+  confidence: alleged
+  split: dev
+  analyzable: false
+  not_analyzable_reason: resolved after corpus end (2026-05-26)
+  event_date: 2026-05-23
+  news_ts_utc: '2026-05-23T00:00:00Z'
+  news_ts_precision: day
+  news_ts_notes: Trump posted that a deal was 'largely negotiated' on May 23 2026; market opened May 15; resolved
+    Yes after the June 14-15 MOU (resolution itself contested; signing June 17/19). Resolution falls after the corpus
+    end date 2026-05-26, but the suspicious buys are in May.
+  winning_side: true
+  markets:
+  - title: US x Iran permanent peace deal by June 15, 2026?
+    event_slug: us-x-iran-permanent-peace-deal-by
+    market_slug: us-x-iran-permanent-peace-deal-by-june-15-2026-734-856-129
+    slug_confidence: high
+  suspicious_window: 'Bloomberg: account created two hours before its first trade; accumulated YES ''days before
+    news of the tentative agreement surfaced'' at odds as low as 6%.'
+  wallets:
+  - address: null
+    username: unnamed single-wallet account (Bloomberg)
+    profit_usd: 370000
+    notes: Position paid out ~$1.5M.
+    sources:
+    - https://www.bloomberg.com/graphics/2026-polymarket-bets-iran-war-insider-trading/
+  detection_method: Bloomberg analysis of Polysights flagged-trade dataset (34,000 trades, ~19,000 wallets, July
+    2025 - June 2026).
+  sources:
+  - url: https://www.bloomberg.com/graphics/2026-polymarket-bets-iran-war-insider-trading/
+    date: 2026-06-17
+  - url: https://www.calcalistech.com/ctechnews/article/wgc50wv09
+    date: 2026-06
+  notes: Bloomberg could not be fetched directly (403); details from search excerpts. Exact buy dates not published.
+- id: iran-strike-markets-2026-01
+  name: Fresh wallets and ricosuave666 reactivation on Jan 2026 Iran-strike markets (mostly LOST)
+  confidence: suspected
+  split: dev
+  analyzable: true
+  event_date: 2026-01-31
+  news_ts_utc: '2026-02-28T06:15:00Z'
+  news_ts_precision: minute
+  news_ts_notes: No strike occurred by Jan 31; the eventual strike was Feb 28 (see us-israel-strikes-iran-2026-02-28).
+  winning_side: NO for the Jan 31 markets (insider-suspected YES bets lost); YES for Mar 31
+  corpus_markets:
+  - market_slug: us-strikes-iran-by-january-31-2026-165
+    winning_side: 'NO'
+    role: primary; suspected YES bets lost
+  markets:
+  - title: Israel strikes Iran by January 31, 2026?
+    event_slug: israel-strikes-iran-by-january-31-2026
+    slug_confidence: high
+    resolved: 'No'
+  - title: US strikes Iran by January 31, 2026?
+    market_slug: us-strikes-iran-by-january-31-2026
+    slug_confidence: medium
+    resolved: 'No'
+  - title: Israel strikes Iran by March 31, 2026?
+    event_slug: israel-strikes-iran-by-march-31-2026
+    slug_confidence: high
+    resolved: 'Yes'
+  suspicious_window: 'Jan 7 2026: ricosuave666 reactivated after 7 months dormant and bought Israel-by-Jan-31 (~21%)
+    and Israel-by-Mar-31 (~35%); four fresh wallets bought US-by-Jan-31 at <18%.'
+  wallets:
+  - address: '0x0afc7ce56285bde1fbe3a75efaffdfc86d6530b2'
+    username: ricosuave666 / Rundeep
+    stake_usd: 8198
+    sources:
+    - https://dyutam.com/news/polymarket-israel-iran-conflict-insider-trading/
+    - https://beincrypto.com/polymarket-trader-israel-iran-bet-returns/
+    corpus_trade_count: 100
+  - address: '0xefd06d1a6cc221b747890dce15f00bf05742bf24'
+    stake_usd: 2888
+    sources:
+    - https://dyutam.com/news/polymarket-israel-iran-conflict-insider-trading/
+    corpus_trade_count: 67
+  - address: null
+    username: zzx123
+    stake_usd: 3863
+    sources:
+    - https://dyutam.com/news/polymarket-israel-iran-conflict-insider-trading/
+  - address: null
+    username: Memeretirement
+    stake_usd: 1167
+    sources:
+    - https://dyutam.com/news/polymarket-israel-iran-conflict-insider-trading/
+  - address: null
+    username: MrEsma
+    stake_usd: 9933
+    sources:
+    - https://dyutam.com/news/polymarket-israel-iran-conflict-insider-trading/
+  detection_method: Lookonchain flagged the ricosuave666 reactivation on Jan 7 2026; dyutam.com compiled fresh-wallet
+    list.
+  sources:
+  - url: https://beincrypto.com/polymarket-trader-israel-iran-bet-returns/
+    date: 2026-01
+  - url: https://dyutam.com/news/polymarket-israel-iran-conflict-insider-trading/
+    date: 2026-01-11
+  notes: 'Included deliberately as a negative example: wallets with every ''insider'' surface feature whose January
+    legs lost. The Israeli indictment says the Ziv/officer pair prepared a Jan 2026 Iran-timing bet and cancelled
+    it after social-media attention, which may correspond to this reactivation. dyutam.com is a low-tier source;
+    the 0xEFD0 address appears only there.
+
+    '
+- id: nobel-peace-prize-2025-10
+  name: Nobel Peace Prize 2025 (Maria Corina Machado)
+  confidence: alleged
+  split: holdout
+  analyzable: true
+  event_date: 2025-10-10
+  news_ts_utc: '2025-10-10T09:00:00Z'
+  news_ts_precision: minute
+  news_ts_notes: Norwegian Nobel Committee announcement 11:00 CEST = 09:00 UTC. Committee decision was finalized
+    Monday Oct 6.
+  winning_side: Maria Corina Machado (multi-outcome)
+  corpus_markets:
+  - market_slug: will-mara-corina-machado-win-the-nobel-peace-prize-in-2025
+    winning_side: 'YES'
+    role: primary
+  - market_slug: will-donald-trump-win-the-nobel-peace-prize-in-2025
+    winning_side: 'NO'
+    role: sibling
+  - market_slug: will-donald-trump-win-nobel-peace-prize-in-2025-635
+    winning_side: 'NO'
+    role: sibling (separate event)
+  markets:
+  - title: Nobel Peace Prize Winner 2025
+    event_slug: nobel-peace-prize-winner-2025
+    slug_confidence: high
+  suspicious_window: 'Machado''s price went 3.75% (00:40 Oslo, 22:40 UTC Oct 9) to 72.8% (02:00 Oslo, 00:00 UTC
+    Oct 10), roughly 10-11 hours before the announcement. Account 6741 began buying 22:42 UTC Oct 9; dirtycup from
+    03:41 UTC Oct 10. Polymarket''s own X post projecting Machado: 23:46 ET Oct 9.
+
+    '
+  wallets:
+  - address: null
+    username: '6741'
+    stake_usd: 29000
+    profit_usd: 53500
+    notes: Account created for this market; also $14k on Yulia Navalnaya and $30-$400 on others (Thunberg, Assange).
+    sources:
+    - https://protos.com/polymarket-traders-accused-of-insider-trading-nobel-peace-prize/
+    - https://www.forbes.com/sites/brandonkochkodin/2025/10/10/did-the-nobel-peace-prize-expose-insider-trading-on-prediction-market-polymarket/
+  - address: null
+    username: dirtycup
+    stake_usd: 68340
+    profit_usd: 31000
+    notes: Account opened earlier in October with no prior bets; single-outcome exposure.
+    sources:
+    - https://www.coindesk.com/markets/2025/10/11/norwegian-officials-probe-major-polymarket-bets-on-nobel-peace-winner
+    - https://protos.com/polymarket-traders-accused-of-insider-trading-nobel-peace-prize/
+  - address: null
+    username: betmoar
+    profit_usd: 80439
+    notes: $80,439.70 total gains per Cryptopolitan; also traded other markets.
+    sources:
+    - https://www.cryptopolitan.com/polymarket-whale-front-run-nobel-peace-prize/
+  - address: null
+    username: GayPride
+    profit_usd: 85000
+    notes: Reported by some outlets only; treat as unverified.
+    sources:
+    - https://cointelegraph.com/news/nobel-peace-prize-polymarket-investigation
+  detection_method: 'Price spike noticed live on X; Forbes/Protos timeline; Bloomberg report; Norwegian Nobel Institute
+    investigation (Harpviken: ''prey to a criminal actor'').'
+  sources:
+  - url: https://www.forbes.com/sites/brandonkochkodin/2025/10/10/did-the-nobel-peace-prize-expose-insider-trading-on-prediction-market-polymarket/
+    date: 2025-10-10
+  - url: https://www.bloomberg.com/news/articles/2025-10-10/unusual-bets-on-nobel-peace-prize-winner-prompt-probe-into-leaks
+    date: 2025-10-10
+  - url: https://www.coindesk.com/markets/2025/10/11/norwegian-officials-probe-major-polymarket-bets-on-nobel-peace-winner
+    date: 2025-10-11
+  - url: https://protos.com/polymarket-traders-accused-of-insider-trading-nobel-peace-prize/
+    date: 2025-10-10
+  - url: https://time.com/partner-content/prediction-markets/nobel-peace-prize-betting-surges-after-last-years-suspected-breach/
+    date: 2026-10
+  notes: 'In Jan 2026 the Committee chair told TV2 the evidence points to a digital intrusion into Nobel systems
+    (i.e. hacking rather than a committee leak). No 0x addresses were published for any of the named usernames.
+    Polymarket touted "had the news more than 12 hours before". Market volume $21.46M; Machado outcome $2.24M.
+
+    '
+- id: google-year-in-search-2025-12
+  name: 'Google Year in Search 2025 (d4vd #1) - AlphaRaccoon / Michele Spagnuolo'
+  confidence: confirmed
+  split: holdout
+  analyzable: true
+  event_date: 2025-12-04
+  news_ts_utc: '2025-12-04T03:45:00Z'
+  news_ts_precision: hour
+  news_ts_notes: 'Complaint fn.1: Year in Search site went live 5-6 hours early, caught by Google ~03:45 UTC Dec
+    4, taken offline, republished ~08:00 UTC. Polymarket markets resolved Dec 4-10.'
+  winning_side: YES d4vd (#1 and Top 5); NO on Bianca Censori, Pope Leo XIV, Donald Trump, Kendrick Lamar etc. (about
+    25 legs)
+  corpus_markets:
+  - market_slug: will-d4vd-be-the-1-searched-person-on-google-this-year
+    winning_side: 'YES'
+    role: primary
+  - market_slug: will-pope-leo-xiv-rank-in-googles-top-5-most-searched-people-of-2025
+    winning_side: 'YES'
+    role: top-5 leg
+  - market_slug: will-donald-trump-be-the-1-searched-person-on-google-this-year
+    winning_side: 'NO'
+    role: NO leg
+  - market_slug: will-pope-leo-xiv-be-the-1-searched-person-on-google-this-year
+    winning_side: 'NO'
+    role: NO leg
+  - market_slug: will-bianca-censori-be-the-1-searched-person-on-google-this-year
+    winning_side: 'NO'
+    role: NO leg
+  - market_slug: will-kendrick-lamar-be-the-1-searched-person-on-google-this-year
+    winning_side: 'NO'
+    role: NO leg
+  markets:
+  - title: '#1 Searched Person on Google this year?'
+    event_slug: 1-searched-person-on-google-this-year
+    slug_confidence: high
+  - title: Top 5 Most Searched People on Google 2025
+    event_slug: top-5-most-searched-people-on-google-2025
+    market_slug: will-d4vd-rank-in-googles-top-5-most-searched-people-of-2025
+    slug_confidence: high
+  suspicious_window: 'Confidential data accessed 2025-10-15 21:25 UTC; first bets Oct 16 ($403 YES Kendrick at ~3%,
+    $10,807 NO Pope Leo). Data re-accessed 2025-11-27 21:27 UTC (d4vd now #1); ~3 hours later $381.12 YES d4vd Top-5
+    at ~18% and $5 YES d4vd #1 at ~0%. Deposits bridged Oct 13, Oct 27, Nov 11, Nov 29 ($300k, $100k, $999k, $2.4M).
+    Total risked $2,754,092 Oct 15 - Dec 4.
+
+    '
+  wallets:
+  - address: 0xafEe... (TRUNCATED; display handle after username removal). Funding wallet 'Wallet-0xAf6' and intermediary
+      'Wallet-0x3D8' are prefixes only in the complaint.
+    username: AlphaRaccoon (created May 2024; renamed to 0xafEe in early Dec 2025)
+    stake_usd: 2754092
+    profit_usd: 1200000
+    identity: Michele Spagnuolo, 36, Google staff information security engineer (Switzerland); charged SDNY + CFTC
+      2026-05-27; $2.25M bond
+    notes: Account emptied Dec 10 2025 (5.045M USDC.e to Wallet-0xAf6), then swaps and a privacy/mixing service.
+      $149,980 routed Nov 12-13 via a swapping service to a payment-processor account in Spagnuolo's name.
+    sources:
+    - https://www.justice.gov/usao-sdny/media/1442621/dl
+    - https://www.cftc.gov/PressRoom/PressReleases/9237-26
+    - https://www.forbes.com/sites/boazsobrado/2025/12/04/alleged-insider-nets-1-million-on-polymarket-in-24-hours/
+  detection_method: 'Community: X user @JeongHaeju (Meta engineer) and Discord flagged 22/23 record on Dec 4; username
+    then removed. Polymarket cooperated with DOJ/CFTC; FBI traced funding wallet to a KYC''d payment-processor account.'
+  sources:
+  - url: https://www.forbes.com/sites/boazsobrado/2025/12/04/alleged-insider-nets-1-million-on-polymarket-in-24-hours/
+    date: 2025-12-04
+  - url: https://beincrypto.com/alleged-google-insider-trade-polymarket/
+    date: 2025-12
+  - url: https://www.justice.gov/usao-sdny/media/1442621/dl
+    date: 2026-05-27
+  - url: https://www.cftc.gov/PressRoom/PressReleases/9237-26
+    date: 2026-05-27
+  - url: https://www.cnbc.com/2026/05/27/google-employee-polymarket-insider-trading.html
+    date: 2026-05-27
+  - url: https://www.npr.org/2026/05/27/nx-s1-5836659/google-polymarket-insider-trading-doj-charges
+    date: 2026-05-27
+  notes: 'Second US criminal prediction-market insider case; first involving private-sector data. Google: tool was
+    available to all employees but use for betting breaches policy; employee placed on leave. Local text copy of
+    the complaint saved at scratchpad/dl/spagnuolo.txt.
+
+    '
+- id: gemini-3-release-2025-11
+  name: Google Gemini 3.0 release date (same AlphaRaccoon account)
+  confidence: suspected
+  split: holdout
+  analyzable: true
+  event_date: 2025-11-18
+  news_ts_utc: '2025-11-18T00:00:00Z'
+  news_ts_precision: day
+  winning_side: YES on the Nov 18 release-date leg
+  corpus_markets:
+  - market_slug: will-gemini-3pt0-be-released-on-november-18-2025
+    winning_side: 'YES'
+    role: primary
+  - market_slug: will-gemini-3pt0-be-released-by-november-30-643-555
+    winning_side: 'YES'
+    role: sibling
+  - market_slug: will-gemini-3pt0-be-released-by-november-22-442
+    winning_side: 'YES'
+    role: sibling
+  - market_slug: will-gemini-3pt0-be-released-by-november-15
+    winning_side: 'NO'
+    role: sibling
+  markets:
+  - title: Gemini 3.0 released by ...?
+    event_slug: gemini-3pt0-released-by
+    slug_confidence: high
+    source: https://polymarketanalytics.com/event/gemini-3pt0-released-by
+  suspicious_window: Not published precisely; Forbes/BeInCrypto report the account 'nailed the exact launch day'
+    in November 2025 for $150k-$173k.
+  wallets:
+  - address: 0xafEe... (TRUNCATED)
+    username: AlphaRaccoon / 0xafEe
+    profit_usd: 173000
+    notes: Figures range $150k (Forbes) to $173k (BeInCrypto). NOT part of the charged conduct in the May 2026 complaint,
+      which covers only Year in Search.
+    sources:
+    - https://www.forbes.com/sites/boazsobrado/2025/12/04/alleged-insider-nets-1-million-on-polymarket-in-24-hours/
+    - https://beincrypto.com/alleged-google-insider-trade-polymarket/
+  detection_method: Retrospective review of the account's history after the Year in Search flag.
+  sources:
+  - url: https://www.forbes.com/sites/boazsobrado/2025/12/04/alleged-insider-nets-1-million-on-polymarket-in-24-hours/
+    date: 2025-12-04
+  - url: https://beincrypto.com/alleged-google-insider-trade-polymarket/
+    date: 2025-12
+  notes: Account held $3.4M open across 92 predictions concentrated on Google events at the time of the Forbes piece.
+- id: openai-gpt-5-2-release-2025-12
+  name: OpenAI GPT-5.2 release timing
+  confidence: suspected
+  split: dev
+  analyzable: true
+  event_date: 2025-12-11
+  news_ts_utc: '2025-12-11T00:00:00Z'
+  news_ts_precision: day
+  news_ts_notes: GPT-5.2 released Thursday Dec 11 2025 (release was accelerated by an internal 'code red').
+  winning_side: YES (by Dec 13); 'December 11' leg
+  corpus_markets:
+  - market_slug: will-openai-release-a-new-frontier-model-on-december-11
+    winning_side: 'YES'
+    role: primary
+  - market_slug: will-openai-release-a-new-frontier-model-by-december-13-683
+    winning_side: 'YES'
+    role: primary
+  markets:
+  - title: Will OpenAI release a new frontier model by December 13?
+    event_slug: will-openai-release-a-new-frontier-model-by-december-13
+    slug_confidence: high
+  - title: What day will OpenAI next release a new frontier model? (Dec 11 outcome, $10.07M)
+    event_slug: what-day-will-openai-release-a-new-frontier-model
+    slug_confidence: high
+  suspicious_window: 'The Information: a handful of accounts entered positions about a week before release and cashed
+    out immediately after; four accounts made >$13k combined.'
+  wallets: []
+  detection_method: The Information reporting (paywalled); later Wired reported OpenAI fired an employee for using
+    confidential information on prediction markets and Unusual Whales flagged 60 wallets / 77 positions on OpenAI
+    topics (Sora, GPT-5 etc.).
+  sources:
+  - url: https://www.theinformation.com/articles/polymarket-bets-openai-google-raise-insider-trading-suspicions
+    date: 2025-12
+  - url: https://news.futunn.com/en/post/66170852/bets-on-openai-releases-new-model-on-polymarket-raise-market
+    date: 2025-12
+  - url: https://gizmodo.com/the-great-insider-trading-reckoning-reportedly-hits-openai-2000727838
+    date: 2026
+  notes: Small dollar amounts; included because it triggered corporate policy changes (Coinbase, Robinhood) and
+    an OpenAI termination. Polymarket posted 'projects OpenAI will release a new frontier model tomorrow, 80%' on
+    Dec 10.
+- id: zachxbt-axiom-2026-02
+  name: ZachXBT insider-trading expose target (Axiom)
+  confidence: alleged
+  split: holdout
+  analyzable: false
+  not_analyzable_reason: no matching slug in corpus_markets
+  event_date: 2026-02-26
+  news_ts_utc: '2026-02-26T00:00:00Z'
+  news_ts_precision: day
+  news_ts_notes: ZachXBT published Thursday morning Feb 26 2026 (ET). Odds swung to Axiom late Wednesday Feb 25
+    after a denial by another candidate; Meteora had led >50% most of the week.
+  winning_side: Axiom (multi-outcome, 28 options)
+  markets:
+  - title: Which crypto company will ZachXBT expose for insider trading?
+    event_slug: which-crypto-company-will-zachxbt-expose-for-insider-trading
+    slug_confidence: high
+  suspicious_window: Window between the late-Feb-25 swing and the Feb 26 publication; two fresh wallets bought $59.8k
+    of Axiom ~3 hours before the reveal (returned $109k); predictorxyz bought when Axiom was 13.8-15%.
+  wallets:
+  - address: null
+    username: predictorxyz
+    stake_usd: 65800
+    profit_usd: 411000
+    notes: 477,415 shares at avg $0.14; $70k USDC deposit into a newly created account; ZachXBT traced the user
+      to Axiom handle 'JustADegen'.
+    sources:
+    - https://www.coindesk.com/markets/2026/02/27/polymarket-bettors-appear-to-have-insider-traded-on-a-market-designed-to-catch-insider-traders
+    - https://ambcrypto.com/insider-bet-wallet-linked-to-axiom-user-profits-after-zachxbt-names-exchange/
+  - address: null
+    username: 12 suspected insider wallets (Lookonchain)
+    stake_usd: 400000
+    profit_usd: 1020000
+    notes: Returns ~$1.42M on ~$400k; 256% avg ROI. Addresses in Lookonchain's X post, not in text sources read.
+    sources:
+    - https://forklog.com/en/insiders-net-over-1m-from-zachxbt-investigation/
+  - address: null
+    username: 5 wallets (Polysights)
+    stake_usd: 50000
+    profit_usd: 216000
+    notes: Wagered ~$50k, received ~$266k.
+    sources:
+    - https://www.coindesk.com/markets/2026/02/27/polymarket-bettors-appear-to-have-insider-traded-on-a-market-designed-to-catch-insider-traders
+  detection_method: On-chain sleuths (Lookonchain, Polysights, defioasis.eth) and ZachXBT himself; ZachXBT noted
+    a leak was 'probably inevitable' since he had contacted Axiom and interviewees before publishing.
+  sources:
+  - url: https://www.coindesk.com/markets/2026/02/27/polymarket-bettors-appear-to-have-insider-traded-on-a-market-designed-to-catch-insider-traders
+    date: 2026-02-27
+  - url: https://forklog.com/en/insiders-net-over-1m-from-zachxbt-investigation/
+    date: 2026-02-27
+  - url: https://www.thecoinrepublic.com/2026/02/28/zachxbt-axiom-expose-sparked-411-polymarket-returns-as-an-insider-bet-at-13-8-odds/
+    date: 2026-02-28
+  notes: Market volume ~$38-40M. Non-government, non-corporate 'event owner' leak (journalist's sources). No official
+    action.
+- id: warsh-fed-chair-2026-01
+  name: Fed chair nomination (Kevin Warsh) - 'quant42'
+  confidence: suspected
+  split: dev
+  analyzable: true
+  event_date: 2026-01-30
+  news_ts_utc: '2026-01-30T00:00:00Z'
+  news_ts_precision: day
+  news_ts_notes: Trump announced Friday morning Jan 30 2026; media reports the evening of Jan 29 moved Warsh to
+    93% (Polymarket) / 94% (Kalshi). Formal nomination transmitted March 4.
+  winning_side: Kevin Warsh (multi-outcome)
+  corpus_markets:
+  - market_slug: will-trump-nominate-kevin-warsh-as-the-next-fed-chair
+    winning_side: 'YES'
+    role: primary
+  - market_slug: will-trump-nominate-kevin-hassett-as-the-next-fed-chair
+    winning_side: 'NO'
+    role: sibling
+  markets:
+  - title: Who will Trump nominate as Fed Chair?
+    event_slug: who-will-trump-nominate-as-fed-chair
+    slug_confidence: high
+  suspicious_window: Multiple buys ~9 days before the Jan 30 IBTimes piece (i.e. ~Jan 21 2026), position ~$150k.
+  wallets:
+  - address: null
+    username: quant42
+    notes: Position valued near $150,000 on Jan 30; stake and profit not published.
+    sources:
+    - https://www.ibtimes.co.uk/someone-bet-kevin-warsh-fed-chair-9-days-ago-before-everyone-else-started-paying-attention-1775072
+  detection_method: Social-media (X) allegations only.
+  sources:
+  - url: https://www.ibtimes.co.uk/someone-bet-kevin-warsh-fed-chair-9-days-ago-before-everyone-else-started-paying-attention-1775072
+    date: 2026-01-30
+  - url: https://www.theblock.co/post/387788/kevin-warsh-polymarket-odds-fed-chair
+    date: 2026-01-29
+  notes: 'Weak case: Warsh had been a public front-runner (Polymarket odds surged 75% on Jan 10 per FX Leaders).
+    No follow-up identification or probe found. Market volume $597M on Polymarket. Warsh''s later disclosure shows
+    a Polymarket stake.'
+- id: biden-pardons-2025-01
+  name: Biden final-hour preemptive pardons (and Hunter Biden pardon)
+  confidence: alleged
+  split: holdout
+  analyzable: true
+  event_date: 2025-01-20
+  news_ts_utc: '2025-01-20T16:38:00Z'
+  news_ts_precision: hour
+  news_ts_notes: 'Family pardons (incl. James Biden) announced ~11:38 AM ET Jan 20 (22 minutes before noon); Fauci/Milley/J6
+    committee pardons announced early morning ET the same day (~06:15 ET per contemporaneous reports; not verified
+    here). Hunter Biden pardon announced evening ET Dec 1 2024 (precision: day).'
+  winning_side: YES on Jim Biden, Liz Cheney, Adam Schiff, Adam Kinzinger; YES Hunter Biden
+  corpus_markets:
+  - market_slug: will-biden-pardon-jim-biden
+    winning_side: 'YES'
+    role: primary; backfill truncated
+  - market_slug: will-biden-pardon-liz-cheney
+    winning_side: 'YES'
+    role: primary; truncated
+  - market_slug: will-biden-pardon-anthony-fauci
+    winning_side: 'YES'
+    role: primary; truncated
+  - market_slug: will-joe-pardon-hunter-biden
+    winning_side: 'YES'
+    role: Dec 2024 leg; truncated
+  - market_slug: will-biden-pardon-sbf-this-term
+    winning_side: 'NO'
+    role: sibling; truncated
+  - market_slug: will-biden-pardon-trump
+    winning_side: 'NO'
+    role: sibling; truncated
+  markets:
+  - title: Who will Biden pardon?
+    event_slug: who-will-biden-pardon
+    slug_confidence: high
+  - title: Hunter Biden pardon market (Dec 1 2024; exact title/slug not published)
+    slug_confidence: low
+  suspicious_window: Not published precisely; NPR/Bubblemaps describe bets in the 'final hours' of the term and
+    a 'well-timed' Hunter bet a month earlier.
+  wallets:
+  - address: null
+    username: two accounts sharing a Kraken deposit wallet (Bubblemaps; names not published)
+    stake_usd: 64000
+    profit_usd: 316346
+    notes: $21k on Jim Biden returned ~800% ($176k). Perfect record on pardon markets.
+    sources:
+    - https://www.npr.org/2026/04/16/nx-s1-5786580/a-polymarket-trader-made-300-000-betting-on-bidens-pardons
+  detection_method: Bubblemaps pattern-matching plus shared exchange deposit address; reported exclusively to NPR.
+    CFTC approved a pardon-market insider probe in early May 2026 (WIRED FOIA records).
+  sources:
+  - url: https://www.npr.org/2026/04/16/nx-s1-5786580/a-polymarket-trader-made-300-000-betting-on-bidens-pardons
+    date: 2026-04-16
+  - url: https://www.ccn.com/news/crypto/cftc-polymarket-insider-trading-probes-foia/
+    date: 2026-09
+  notes: Earliest US-government-information episode (pre-dates Trump second term). NPR page timed out for the fetcher;
+    details from syndicated copies/search excerpts. Pardon announcement minute-timestamps should be verified against
+    White House releases.
+- id: taylor-swift-engagement-2025-08
+  name: Taylor Swift / Travis Kelce engagement
+  confidence: suspected
+  split: holdout
+  analyzable: false
+  not_analyzable_reason: market volume ~$385k, below the corpus $1M floor
+  event_date: 2025-08-26
+  news_ts_utc: '2025-08-26T17:00:35Z'
+  news_ts_precision: minute
+  news_ts_notes: Joint Instagram post at 1:00:35 PM ET (Business Insider).
+  winning_side: true
+  markets:
+  - title: Taylor Swift and Travis Kelce Engaged in 2025?
+    market_slug: taylor-swift-and-travis-kelce-engaged-in-2025
+    slug_confidence: low
+  suspicious_window: romanticpaul first bought Jul 31; buying spree from ~3 PM ET Aug 25 (~22 hours before), 1,708
+    shares that day mostly <$0.40, moving price 25c -> 40c.
+  wallets:
+  - address: null
+    username: romanticpaul
+    stake_usd: 2046
+    profit_usd: 3134
+    notes: 5,180 YES shares total. X users speculated about guitarist Paul Sidoti; no evidence.
+    sources:
+    - https://www.yahoo.com/entertainment/music/articles/romantic-polymarket-user-correctly-predicted-012319416.html
+  - address: null
+    username: unnamed user
+    stake_usd: 12000
+    profit_usd: 52173
+    notes: $52,173.91 win reported by Parade; not timed in sources.
+    sources:
+    - https://parade.com/news/taylor-swift-engagement-bet-50000
+  detection_method: Username + timing noticed by X users and Business Insider.
+  sources:
+  - url: https://www.yahoo.com/entertainment/music/articles/romantic-polymarket-user-correctly-predicted-012319416.html
+    date: 2025-08-27
+  - url: https://parade.com/news/taylor-swift-engagement-bet-50000
+    date: 2025-08
+  - url: https://corpgov.law.harvard.edu/2026/03/25/from-iran-to-taylor-swift-informed-trading-in-prediction-markets/
+    date: 2026-03-25
+  notes: Tiny stakes; included as the canonical culture-market example cited by the Mitts/Ofir paper. Market volume
+    ~$385k.
+- id: beast-games-s2-2026-02
+  name: Beast Games Season 2 winner (MrBeast / Amazon)
+  confidence: suspected
+  split: dev
+  analyzable: false
+  not_analyzable_reason: no matching slug in corpus_markets
+  event_date: 2026-02-25
+  news_ts_utc: '2026-02-25T00:00:00Z'
+  news_ts_precision: day
+  news_ts_notes: Finale aired Feb 25 2026; season premiered Jan 7 2026 (pre-recorded show, so hundreds of contestants/crew
+    knew the result).
+  winning_side: Player 167 (Tyler Lucas)
+  markets:
+  - title: Who will win Beast Games Season 2?
+    market_slug: who-will-win-beast-games-season-2
+    slug_confidence: low
+  suspicious_window: Player 167 at 84% by Feb 4 (three weeks before finale) and >94% by Feb 18; largest volume day
+    Jan 27 ($44,547); two addresses sold in the same minute Jan 30 09:41 for identical $3,542 profits.
+  wallets:
+  - address: '0xa1f3cf8ba7410956a2955d5300a9be7ff1dbc07e'
+    profit_usd: 3237
+    notes: PANews' 'most suspicious' address; three Beast Games trades, 100% win rate. Profile suffix -1767992471439
+      in source.
+    sources:
+    - https://panews.io/articles/019c9d67-fe62-7162-9514-032b0a261049
+    corpus_trade_count: 0
+  - address: null
+    username: 147 suspicious addresses (16 trading only Beast Games)
+    notes: 795 addresses traded only Player 167; one address did 12 trades in 17 minutes on Jan 27 for $11,830;
+      top suspects >$100k combined.
+    sources:
+    - https://panews.io/articles/019c9d67-fe62-7162-9514-032b0a261049
+  detection_method: PANews on-chain analysis of 111,000 transactions / 2,640 addresses.
+  sources:
+  - url: https://panews.io/articles/019c9d67-fe62-7162-9514-032b0a261049
+    date: 2026-02
+  notes: Distinct from the Kalshi enforcement against MrBeast editor Artem Kaptur (Feb 2026, Kalshi only). Polymarket
+    took no public action.
+- id: kpmg-earnings-cluster-2026-02
+  name: Corporate earnings markets - KPMG-audited companies cluster
+  confidence: alleged
+  split: dev
+  analyzable: false
+  not_analyzable_reason: no earnings markets in corpus; individual markets below volume floor
+  event_date: 2026-02-24
+  news_ts_utc: '2026-02-24T00:00:00Z'
+  news_ts_precision: day
+  news_ts_notes: Date given is Home Depot's Q4 FY2025 report; the cluster spans multiple earnings dates. Later reporting
+    (Sept 2026) describes 42 bets on 18 companies, all but one winning.
+  winning_side: Varies per market (cluster took 'max conviction' positions that won)
+  markets:
+  - title: Earnings beat/miss markets for Home Depot, DoorDash, CarMax, Thor Industries, StoneX (Q4 2025 / early
+      2026 reports); exact slugs not published
+    slug_confidence: low
+  suspicious_window: Large late entries 'right before the official reports drop'.
+  wallets: []
+  detection_method: Independent analyst Matt Lamers (EventWaves Substack) noticed his model was consistently wrong
+    in the same direction; wallets cycled usernames and placed small decoy bets on non-KPMG names; viral X post
+    by @itslirrato.
+  sources:
+  - url: https://x.com/itslirrato/status/2027291968158539914
+    date: 2026-02
+  - url: https://gamingamerica.com/news/polymarket-earnings-bets-trigger-insider-trading-rumors-linked-to-kpmg
+    date: 2026-03
+  - url: https://www.casino.org/news/polymarket-trader-accused-of-using-inside-kpmg-knowledge/
+    date: 2026-09
+  - url: https://www.fintechbrainfood.com/p/the-everywhere-insider
+    date: 2026-03
+  notes: 'casino.org (Sept 2026) reports federal authorities preparing charges against a KPMG employee; no charge
+    filed as of Oct 2026 in sources read. KPMG: ''zero tolerance''. Wallet names not captured (gamingamerica returned
+    403).'
+research_notes:
+  summary_counts:
+    confirmed: 3
+    alleged: 8
+    suspected: 7
+    total: 18
+    cases_with_full_0x_address: 5
+    unique_full_0x_addresses: 6
+    truncated_prefixes_only: '0xa72D (Maduro #2), 0xa4eb (nothingeverhappens911), 0x88e6 (June 2025), 0xafEe/0xAf6/0x3D8
+      (Spagnuolo)'
+    date_range: 2024-10-26 (Magamyman / Israeli strike) to 2026-05-23 (peace-deal buys); 14 of 18 are 2025-10 or
+      later
+  searches_with_no_usable_result:
+  - 'Epstein files markets: no outlet names a suspicious wallet; only odds coverage. Rejected.'
+  - 'Ethereum ETF approval (May 2024): coverage is a resolution dispute (19b-4 vs S-1); odds moved on public Bloomberg-analyst
+    reports. No insider allegation. Rejected.'
+  - 'Zelenskyy suit (June-July 2025): UMA oracle/whale-vote manipulation dispute, not pre-news insider trading.
+    Rejected (could be a separate ''oracle manipulation'' gold set).'
+  - 'Walz VP pick (Aug 2024): odds moved after a public X post about vehicles at Walz''s house; markets lagged PredictIt.
+    No insider wallet. Rejected.'
+  - 'Sinwar killing, Assad fall, Trump cabinet picks (Nov 2024): nothing beyond Magamyman''s Syria bet (no market/time
+    detail).'
+  - 'UFC / sports injury / esports: no documented Polymarket case in window. World Cup wallets (mintblade etc.,
+    $24M) are June-July 2026, outside corpus. Terry Rozier case is sportsbooks, not Polymarket.'
+  - 'TIME Person of the Year 2025: resolution/''rug pull'' controversy, no wallet. Companion ''will it be leaked?''
+    market resolved Yes after dispute.'
+  - 'Google Pixel: no case; Google episodes are Year in Search and Gemini 3.'
+  - 'GTA 6 delay: only odds coverage.'
+  - 'Polymarket employee trading own markets: nothing. Closest is a report that staff delisted a Drake album market
+    after a pre-release listening session. Coinbase/Robinhood appear only as firms updating employee policies.'
+  - 'May 7 2026 US strikes on Iran: no wallet-level reporting found.'
+  - 'Gaza ceasefire Oct 2025: one self-reported $167k payout screenshot (net ~$15k); no insider allegation.'
+  considered_and_rejected:
+  - name: Theo / Fredi9999 French whale (Nov 2024 election)
+    why: 'WSJ interview + Polymarket statement: private neighbor-polls and public data, ~$79M profit (Chainalysis).
+      No insider information alleged by any outlet. Suggest using as a NEGATIVE CONTROL for ''single large directional
+      bettor'' heuristics. Markets: presidential-election-winner-2024, popular-vote, PA/MI/WI state markets.'
+  - name: Kalshi cases (MrBeast editor Artem Kaptur, Katie Zacharia press-secretary pick)
+    why: Kalshi, not Polymarket.
+  - name: '''Polymarket History'' cluster: ~$2M on no-ceasefire-by-Mar-31 / no-US-ground-entry-by-Mar-31 / US-forces-enter-by-Apr-30
+      (March 2026)'
+    why: No wallet names, outcome of the Apr-30 leg not verified; the Mar-31 'no ceasefire' legs won trivially.
+      Could be folded into the Feb-28/ceasefire cases.
+  - name: Trump's Mar 23 2026 delay of Iran energy-infrastructure strikes
+    why: Al Jazeera coverage is about oil/S&P futures (~$580M notional), not Polymarket wallets.
+  - name: Sept 2025 Israeli strike in Yemen (Ziv/officer, ~$5k)
+    why: Confirmed conduct but tiny and no market identified; mentioned in israel-strikes-iran-2025-06 notes.
+  aggregate_datasets_worth_pulling:
+  - 'Mitts & Ofir, ''From Iran to Taylor Swift: Informed Trading in Prediction Markets'' (Harvard Corp Gov Forum,
+    2026-03-25): 210k suspicious transactions 2024-2026, $143M anomalous profit; five timing/size screens. Possible
+    source of many more episodes.'
+  - 'ACDC ''Insider Risks in Polymarket Political Markets'' (2026-04-30) and ''Profiting from War'' : longshot =
+    >=$2,500 at <=35c; 556 ''Orca'' wallets, 152 in military markets, 97.2% win rate, $8M; data through 2026-05-05
+    (Reuters, Aug 20 2026 follow-up).'
+  - 'Bloomberg/Polysights flagged-trade dataset: 34k trades, ~19k wallets, ~4k markets, Jul 2025-Jun 2026; ~$200M
+    flagged in H1 2026; 57% of top wallets created <24h before the trade.'
+  - 'CFTC FOIA (WIRED/CCN, Sept 2026): three Polymarket insider probes approved May-July 2026 covering Biden pardons,
+    Iran contracts, Google Year in Search.'
+  - 'CNN 2026-08-21: Polymarket referred ''dozens'' of military-insider accounts to DOJ.'
+  ambiguities:
+  - 'Slugs: only those marked high were seen on polymarket.com or in a quoted URL. Polymarket appends numeric suffixes
+    to some market slugs (e.g. -318, -734-856-129); event slugs are more stable for lookups.'
+  - 'Maduro wallet #2 address is truncated (0xa72DB1749e9...) in every text source; full address is only in Lookonchain''s
+    X post link. Lookonchain ceasefire addresses are only in a screenshot.'
+  - Whether ricosuave666 (0x0afc...) is one of Omer Ziv's four accounts is not officially confirmed; Kan's $152,300
+    and the indictment's $162,663 may be the same bet.
+  - Magamyman's Oct 2024 market is unidentified; JPost's wording ('the Iranian attack in October 2024') conflicts
+    with the date (Oct 26 was Israel's strike).
+  - Feb 28 2026 'US strikes Iran by February 28' slug is inferred; The Block's 'Anon' wallet may be the same as
+    Byline Times' 0x4564.
+  - Biden pardon announcement minute-level times are from memory of contemporaneous reporting, not verified in this
+    session.
+  - 'Several key pages were unreadable (403/451/timeout): Bloomberg graphics, CNN Mar 24 2026, Forbes Mar 2 2026,
+    Protos, Barchart, NPR pardons/Magamyman, gamingamerica. Their details come from search-engine excerpts or syndicated
+    copies and should be spot-checked.'
