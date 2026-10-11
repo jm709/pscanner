@@ -79,12 +79,15 @@ cases:
     - https://fortune.com/2026/01/05/polymarket-user-400k-maduro-capture-bets-insider-trading-suspicion
     - https://www.justice.gov/opa/pr/us-soldier-charged-using-classified-information-profit-prediction-market-bets
     corpus_trade_count: 9
-  - address: 0xa72DB1749e9... (TRUNCATED in all sources; Lookonchain profile link polymarket.com/@0xa72DB1749e9...)
+  - address: '0xa72db1749e9ac2379d49a3c12708325ed17febd4'
     stake_usd: 5800
     profit_usd: 75000
     sources:
     - https://x.com/lookonchain/status/2007639475497881625
     - https://www.chaincatcher.com/en/article/2234498
+    corpus_trade_count: 1
+    address_recovery: prefix 0xa72DB1749e9... from Lookonchain matched a single corpus wallet by prefix lookup (count
+      only) 2026-10-11; holdout case, not inspected further
   - address: null
     username: SBet365
     stake_usd: 25000
@@ -432,7 +435,7 @@ cases:
     profit_usd: 88954
     sources:
     - https://www.theblock.co/post/391650/fresh-accounts-netted-1-million-on-polymarket-hours-before-us-airstrikes-on-iran-bubblemaps
-  - address: 0xa4eb... (TRUNCATED prefix only)
+  - address: '0xa4eb52229991c074bc560f825bf2776d77acd010'
     username: nothingeverhappens911
     profit_usd: 66436
     notes: 40,000 shares Feb 28 at 19c + 45,320 shares Mar 1 at 24.9c. Linked by shared Binance deposit address
@@ -440,6 +443,9 @@ cases:
     sources:
     - https://www.theblock.co/post/391650/fresh-accounts-netted-1-million-on-polymarket-hours-before-us-airstrikes-on-iran-bubblemaps
     - https://ambcrypto.com/bubblemaps-trace-polymarket-accounts-linked-to-iran-strike-bets/
+    corpus_trade_count: 37
+    address_recovery: prefix 0xa4eb... from The Block matched a single corpus wallet first seen 2026-02-28 00:55
+      on us-strikes-iran-by-march-1; recovered 2026-10-11 (dev case)
   - address: null
     username: Anon (Bubblemaps' sixth wallet)
     profit_usd: 45556
