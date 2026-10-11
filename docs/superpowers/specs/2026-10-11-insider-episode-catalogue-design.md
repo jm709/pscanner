@@ -349,3 +349,63 @@ follow-up.
 - **Polygon enrichment**: USDC deposit timing and funding-source address for
   the top-ranked wallets only; enables funding-source clustering.
 - **Live detector**: only if the holdout blind test passes.
+
+## Amendment 1: scorer (2026-10-11, signed off by operator)
+
+Derived from `docs/research/insider-episodes/dev-profile.md`. Freezes the
+scorer before any holdout case is opened.
+
+### Inputs per candidate wallet
+
+A candidate is any wallet with at least one BUY of the winning outcome token
+on the case's **primary market** inside `(anchor − window, anchor]`.
+
+| symbol | definition | source |
+|---|---|---|
+| `N_w` | sum of winning-side BUY notional (USD) in the window on the primary market | corpus |
+| `age_d` | days from the wallet's first activity to its first window buy; first activity = data-api `first_activity_ts`, falling back to the wallet's first `corpus_trades` row when the API has no answer | data-api, corpus |
+| `B` | lifetime distinct `condition_id`s traded, from the corpus, counted up to the anchor | corpus |
+| `N_life` | lifetime corpus notional up to the anchor | corpus |
+| `flip` | 1 if the wallet SOLD the opposing outcome token on the primary market inside the window, at a time earlier than its first winning-side buy in the window; else 0 | corpus |
+
+Lifetime quantities are computed with `ts <= anchor` so the scorer sees
+nothing after the anchor.
+
+### Score
+
+```
+fresh(age_d) = 1                          if age_d <= 10
+             = max(0.1, 1 - (age_d - 10)/60)   otherwise   (floors at 0.1 at 64+ days)
+conc         = N_w / N_life                (in (0, 1]; 1 when the window is the wallet's whole life)
+score        = log10(1 + N_w) * fresh(age_d) * (0.5 + 0.5*conc) / log10(2 + B) + 0.5 * flip
+```
+
+Rationale, from the profile: notional in log space so clip-accumulators and
+single-order bettors compare on scale, not count; freshness as a multiplier
+that leaves wallets under ten days untouched and decays rather than cuts, so
+the nine-day-old dev wallet is not thrown away; concentration blended at half
+weight so a fresh wallet whose whole life is this window scores up to 2×
+a diversified one; breadth in the denominator so market-makers with hundreds
+of markets fall below fresh single-market wallets at equal notional; the flip
+bonus is additive and sized so that, among wallets of similar notional, a
+flipper ranks above non-flippers but a $200 flipper does not outrank a
+$50,000 fresh buyer.
+
+### Ranking and ties
+
+Candidates are ordered by `score` descending, then by `N_w` descending, then
+by earliest first window buy, then by wallet address. The comparator's
+published-wallet rank is the 1-based position in this order.
+
+### Excluded on purpose
+
+Entry price, post-entry drift, single-bet size, conviction fraction, and
+anything observed after the anchor. Secondary markets are reported in the
+per-case report with the same per-wallet features but are never pooled into
+the primary-market rank.
+
+### No tuning after this point
+
+The constants above (10-day plateau, 60-day decay, 0.1 floor, 0.5 blend,
+0.5 flip bonus) are fixed. The holdout run uses them unchanged. Any later
+change is a new amendment and invalidates the holdout result.
