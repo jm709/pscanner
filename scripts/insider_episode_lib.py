@@ -303,3 +303,39 @@ def compare_published(
         best_rank=best,
         passed=None if best is None else best <= pass_rank,
     )
+
+
+_CONTROL_VOLUME_FACTOR = 3.0
+_CONTROL_ERA_SECONDS = 180 * _SECONDS_PER_DAY
+
+
+@dataclass(frozen=True, slots=True)
+class MarketRow:
+    """A resolved corpus market, for control matching and coverage diagnosis."""
+
+    condition_id: str
+    slug: str
+    category: str | None
+    volume: float
+    resolved_at: int
+    yes_won: int
+    truncated: bool
+
+
+def match_controls(
+    case: MarketRow, universe: list[MarketRow], excluded: set[str], *, k: int = 5
+) -> list[MarketRow]:
+    """Up to ``k`` control markets matched on category, volume band, era, and side."""
+    lo, hi = case.volume / _CONTROL_VOLUME_FACTOR, case.volume * _CONTROL_VOLUME_FACTOR
+    pool = [
+        m
+        for m in universe
+        if m.condition_id != case.condition_id
+        and m.condition_id not in excluded
+        and m.category == case.category
+        and lo <= m.volume <= hi
+        and abs(m.resolved_at - case.resolved_at) <= _CONTROL_ERA_SECONDS
+        and m.yes_won == case.yes_won
+    ]
+    pool.sort(key=lambda m: (abs(math.log(m.volume / case.volume)), m.slug))
+    return pool[:k]

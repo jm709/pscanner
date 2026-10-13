@@ -255,3 +255,19 @@ async def test_fetch_provenance_api_pages_and_takes_min_timestamp() -> None:
 async def test_fetch_provenance_api_empty_wallet() -> None:
     p = await fetch_provenance_api(_EmptyClient(), "0xnone")  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
     assert p == Provenance(wallet="0xnone", first_activity_ts=None, n_events=0)
+
+
+from scripts.insider_episodes import load_market_rows  # noqa: E402
+
+
+def test_load_market_rows_joins_resolutions(corpus_factory) -> None:
+    conn = open_corpus(_window_db(corpus_factory))
+    try:
+        rows = {r.condition_id: r for r in load_market_rows(conn)}
+    finally:
+        conn.close()
+    assert rows["m1"].slug == "slug-m1"
+    assert rows["m1"].category == "geopolitics"
+    assert rows["m1"].yes_won == 1
+    assert rows["m1"].resolved_at == ANCHOR + 3 * H
+    assert rows["m1"].truncated is False

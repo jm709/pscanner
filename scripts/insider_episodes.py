@@ -31,6 +31,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from scripts.insider_episode_lib import (  # noqa: E402  (after sys.path bootstrap)
     MarketRef,
+    MarketRow,
     Provenance,
     PublicCase,
     SealedCase,
@@ -297,3 +298,24 @@ async def fetch_provenance_api(client: DataClient, wallet: str) -> Provenance:
             break
         offset += _ACTIVITY_PAGE
     return Provenance(wallet=wallet, first_activity_ts=earliest, n_events=n)
+
+
+def load_market_rows(conn: sqlite3.Connection) -> list[MarketRow]:
+    """Every resolved corpus market (the control universe)."""
+    rows = conn.execute(
+        "SELECT m.condition_id, m.market_slug, m.category, m.total_volume_usd,"
+        " r.resolved_at, r.outcome_yes_won, m.truncated_at_offset_cap"
+        " FROM corpus_markets m JOIN market_resolutions r ON r.condition_id = m.condition_id"
+    ).fetchall()
+    return [
+        MarketRow(
+            condition_id=str(r[0]),
+            slug=str(r[1] or ""),
+            category=None if r[2] is None else str(r[2]),
+            volume=float(r[3]),
+            resolved_at=int(r[4]),
+            yes_won=int(r[5]),
+            truncated=bool(r[6]),
+        )
+        for r in rows
+    ]

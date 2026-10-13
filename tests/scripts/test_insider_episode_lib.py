@@ -277,3 +277,50 @@ def test_compare_published_is_case_insensitive_on_addresses() -> None:
     ranked = rank_wallets([_f("0xabc", n_w=1.0)], {})
     res = compare_published("c", "news", ranked, SealedCase(id="c", wallets=("0xABC",)))
     assert res.ranks == {"0xabc": 1}
+
+
+from scripts.insider_episode_lib import MarketRow, match_controls  # noqa: E402
+
+
+def _m(
+    cid: str, *, cat: str = "geo", vol: float = 10e6, res: int = 1_000 * DAY, yes: int = 1
+) -> MarketRow:
+    return MarketRow(
+        condition_id=cid,
+        slug=f"slug-{cid}",
+        category=cat,
+        volume=vol,
+        resolved_at=res,
+        yes_won=yes,
+        truncated=False,
+    )
+
+
+def test_match_controls_filters_and_orders() -> None:
+    case = _m("case")
+    universe = [
+        case,
+        _m("c_close", vol=11e6),
+        _m("c_far", vol=29e6),
+        _m("c_too_big", vol=31e6),
+        _m("c_too_small", vol=3e6),
+        _m("c_cat", cat="sports"),
+        _m("c_era", res=1_000 * DAY + 181 * DAY),
+        _m("c_side", yes=0),
+        _m("c_registry"),
+        _m("c_exact", vol=10e6),
+    ]
+    out = match_controls(case, universe, excluded={"c_registry"}, k=5)
+    assert [m.condition_id for m in out] == ["c_exact", "c_close", "c_far"]
+
+
+def test_match_controls_respects_k_and_is_deterministic() -> None:
+    case = _m("case")
+    universe = [case] + [_m(f"c{i}", vol=10e6) for i in range(9)]
+    out = match_controls(case, universe, excluded=set(), k=3)
+    assert [m.condition_id for m in out] == ["c0", "c1", "c2"]
+
+
+def test_match_controls_empty_when_nothing_matches() -> None:
+    case = _m("case")
+    assert match_controls(case, [case], excluded=set()) == []
