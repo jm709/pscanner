@@ -30,6 +30,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from scripts.insider_episode_lib import (  # noqa: E402  (after sys.path bootstrap)
+    CoverageRow,
     MarketRef,
     MarketRow,
     Provenance,
@@ -319,3 +320,36 @@ def load_market_rows(conn: sqlite3.Connection) -> list[MarketRow]:
         )
         for r in rows
     ]
+
+
+def diagnose_missing(
+    conn: sqlite3.Connection,
+    case: PublicCase,
+    wallet: str,
+    anchor: int,
+    window_hours: int,
+    market_row: MarketRow | None,
+) -> CoverageRow | None:
+    """Explain why ``wallet`` is not a candidate on the primary market; ``None`` if it is."""
+    primary = case.primary
+    if primary is None or primary.condition_id is None or market_row is None:
+        return CoverageRow(case.id, wallet, "market_below_volume_floor", "primary market absent")
+    rows = conn.execute(
+        "SELECT ts, outcome_side, bs FROM corpus_trades"
+        " WHERE wallet_address = ? AND condition_id = ? ORDER BY ts",
+        (wallet, primary.condition_id),
+    ).fetchall()
+    if not rows:
+        reason = "backfill_truncated" if market_row.truncated else "no_trades_in_market"
+        return CoverageRow(case.id, wallet, reason, "no corpus trades on the primary market")
+    lo = anchor - window_hours * 3600
+    in_window = [r for r in rows if lo < int(r[0]) <= anchor]
+    if not in_window:
+        first_h = (int(rows[0][0]) - anchor) / 3600
+        last_h = (int(rows[-1][0]) - anchor) / 3600
+        detail = f"first {first_h:+.1f}h / last {last_h:+.1f}h vs anchor"
+        return CoverageRow(case.id, wallet, "outside_window", detail)
+    if any(str(r[2]) == "BUY" and str(r[1]) == primary.winning_side for r in in_window):
+        return None
+    detail = f"{len(in_window)} window trades, none buying {primary.winning_side}"
+    return CoverageRow(case.id, wallet, "losing_side_only", detail)

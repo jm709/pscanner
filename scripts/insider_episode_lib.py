@@ -339,3 +339,13 @@ def match_controls(
     ]
     pool.sort(key=lambda m: (abs(math.log(m.volume / case.volume)), m.slug))
     return pool[:k]
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageRow:
+    """Why a published wallet is absent from a case's candidate ranking."""
+
+    case_id: str
+    wallet: str
+    reason: str
+    detail: str

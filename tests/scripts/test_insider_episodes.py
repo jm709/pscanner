@@ -271,3 +271,54 @@ def test_load_market_rows_joins_resolutions(corpus_factory) -> None:
     assert rows["m1"].yes_won == 1
     assert rows["m1"].resolved_at == ANCHOR + 3 * H
     assert rows["m1"].truncated is False
+
+
+from scripts.insider_episode_lib import MarketRow, PublicCase  # noqa: E402
+from scripts.insider_episodes import diagnose_missing  # noqa: E402
+
+
+def _pcase(slug: str, side: str = "YES", cid: str | None = "m1") -> PublicCase:
+    return PublicCase(
+        id="c",
+        name="c",
+        split="dev",
+        confidence="alleged",
+        analyzable=cid is not None,
+        news_ts=ANCHOR,
+        news_precision="minute",
+        markets=(MarketRef(slug=slug, winning_side=side, role="primary", condition_id=cid),),
+    )
+
+
+def _mrow(truncated: bool = False) -> MarketRow:
+    return MarketRow("m1", "slug-m1", "geopolitics", 5e6, ANCHOR + 3 * H, 1, truncated)
+
+
+def test_diagnose_missing_reasons(corpus_factory) -> None:
+    conn = open_corpus(_window_db(corpus_factory))
+    try:
+        # a wallet that IS a candidate yields no coverage row
+        assert diagnose_missing(conn, _pcase("slug-m1"), "w_in", ANCHOR, 72, _mrow()) is None
+        # no trades at all on the market
+        r = diagnose_missing(conn, _pcase("slug-m1"), "w_ghost", ANCHOR, 72, _mrow())
+        assert r is not None
+        assert r.reason == "no_trades_in_market"
+        # same, but the market's backfill was truncated
+        r = diagnose_missing(conn, _pcase("slug-m1"), "w_ghost", ANCHOR, 72, _mrow(truncated=True))
+        assert r is not None
+        assert r.reason == "backfill_truncated"
+        # traded the market, but outside the window
+        r = diagnose_missing(conn, _pcase("slug-m1"), "w_early", ANCHOR, 72, _mrow())
+        assert r is not None
+        assert r.reason == "outside_window"
+        assert "-80.0h" in r.detail
+        # in window, but only on the losing side
+        r = diagnose_missing(conn, _pcase("slug-m1"), "w_no", ANCHOR, 72, _mrow())
+        assert r is not None
+        assert r.reason == "losing_side_only"
+        # market not in corpus
+        r = diagnose_missing(conn, _pcase("gone", cid=None), "w_in", ANCHOR, 72, None)
+        assert r is not None
+        assert r.reason == "market_below_volume_floor"
+    finally:
+        conn.close()
