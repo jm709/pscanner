@@ -166,3 +166,114 @@ def test_window_features_flip_requires_opposing_sell_before_first_buy() -> None:
         _tr("g", 200, "NO", "SELL", 0.90, 500.0),  # after the buy: not a flip
     ]
     assert window_features(late_sell, "g", "YES")[4] is False
+
+
+import math  # noqa: E402
+
+from scripts.insider_episode_lib import (  # noqa: E402
+    Provenance,
+    SealedCase,
+    WalletFeatures,
+    age_days,
+    compare_published,
+    freshness,
+    rank_wallets,
+    score,
+)
+
+DAY = 86_400
+
+
+def _f(
+    wallet: str,
+    *,
+    n_w: float,
+    breadth: int = 1,
+    n_life: float | None = None,
+    flip: bool = False,
+    first_buy_ts: int = 100 * DAY,
+    corpus_first_ts: int = 99 * DAY,
+) -> WalletFeatures:
+    return WalletFeatures(
+        wallet=wallet,
+        n_w=n_w,
+        n_buys=1,
+        first_buy_ts=first_buy_ts,
+        last_buy_ts=first_buy_ts,
+        flip=flip,
+        breadth=breadth,
+        n_life=n_w if n_life is None else n_life,
+        corpus_first_ts=corpus_first_ts,
+    )
+
+
+def test_freshness_plateau_decay_floor() -> None:
+    assert freshness(0) == 1.0
+    assert freshness(10) == 1.0
+    assert math.isclose(freshness(40), 0.5)
+    assert math.isclose(freshness(64), 0.1)
+    assert freshness(400) == 0.1
+
+
+def test_age_days_prefers_api_then_corpus_and_never_negative() -> None:
+    f = _f("w", n_w=100.0, first_buy_ts=100 * DAY, corpus_first_ts=98 * DAY)
+    assert math.isclose(age_days(f, Provenance("w", first_activity_ts=90 * DAY, n_events=1)), 10.0)
+    assert math.isclose(age_days(f, Provenance("w", first_activity_ts=None, n_events=0)), 2.0)
+    assert math.isclose(age_days(f, None), 2.0)
+    api_after_buy = Provenance("w", first_activity_ts=101 * DAY, n_events=1)
+    assert age_days(f, api_after_buy) == 0.0
+
+
+def test_score_matches_amendment_formula() -> None:
+    f = _f("w", n_w=9_999.0, breadth=8, n_life=19_998.0, flip=True)  # conc = 0.5
+    p = Provenance("w", first_activity_ts=100 * DAY - 40 * DAY, n_events=1)  # age 40 -> 0.5
+    expected = math.log10(1 + 9_999.0) * 0.5 * (0.5 + 0.5 * 0.5) / math.log10(2 + 8) + 0.5
+    assert math.isclose(score(f, p), expected)
+
+
+def test_score_concentration_exactly_one_when_window_is_whole_life() -> None:
+    f = _f("w", n_w=1_000.0, n_life=1_000.0)
+    assert math.isclose(score(f, None), math.log10(1_001.0) * 1.0 * 1.0 / math.log10(3))
+
+
+def test_rank_wallets_order_and_tiebreaks() -> None:
+    feats = [
+        _f("0xbb", n_w=1_000.0),
+        _f("0xaa", n_w=1_000.0),  # identical score, n_w, first_buy: wallet asc wins
+        _f("0xmm", n_w=50_000.0, breadth=900, n_life=5_000_000.0),  # market-maker, low score
+        _f("0xff", n_w=200.0, flip=True),
+    ]
+    ranked = rank_wallets(feats, {})
+    order = [r.features.wallet for r in ranked]
+    assert order[:2] == ["0xaa", "0xbb"]
+    assert [r.rank for r in ranked] == [1, 2, 3, 4]
+    assert order.index("0xmm") > order.index("0xaa")
+
+
+def test_rank_wallets_fresh_single_market_beats_market_maker_at_equal_notional() -> None:
+    fresh = _f("0xfresh", n_w=20_000.0, breadth=1, n_life=20_000.0)
+    mm = _f("0xmm", n_w=20_000.0, breadth=800, n_life=30_000_000.0, corpus_first_ts=0)
+    ranked = rank_wallets([mm, fresh], {})
+    assert ranked[0].features.wallet == "0xfresh"
+
+
+def test_compare_published_ranks_and_pass() -> None:
+    feats = [_f(f"0x{i:02d}", n_w=float(1_000 - i)) for i in range(15)]
+    ranked = rank_wallets(feats, {})
+    sealed = SealedCase(id="c", wallets=("0x03", "0x12", "0xzz"))
+    res = compare_published("c", "news", ranked, sealed)
+    assert res.n_candidates == 15
+    assert res.ranks == {"0x03": 4, "0x12": 13, "0xzz": None}
+    assert res.best_rank == 4
+    assert res.passed is True
+    res2 = compare_published("c", "news", ranked, SealedCase(id="c", wallets=("0x12",)))
+    assert res2.passed is False
+    res3 = compare_published("c", "news", ranked, SealedCase(id="c", wallets=("0xzz",)))
+    assert res3.best_rank is None
+    assert res3.passed is None
+
+
+def test_compare_published_is_case_insensitive_on_addresses() -> None:
+    ranked = rank_wallets([_f("0xabc", n_w=1.0)], {})
+    res = compare_published("c", "news", ranked, SealedCase(id="c", wallets=("0xABC",)))
+    assert res.ranks == {"0xabc": 1}

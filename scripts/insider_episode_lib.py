@@ -9,6 +9,7 @@ Spec: docs/superpowers/specs/2026-10-11-insider-episode-catalogue-design.md
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 
@@ -212,3 +213,93 @@ class Provenance:
     wallet: str
     first_activity_ts: int | None
     n_events: int | None
+
+
+_FRESH_PLATEAU_DAYS = 10.0
+_FRESH_DECAY_DAYS = 60.0
+_FRESH_FLOOR = 0.1
+_CONC_BLEND = 0.5
+_FLIP_BONUS = 0.5
+_SECONDS_PER_DAY = 86_400
+
+
+def age_days(f: WalletFeatures, p: Provenance | None) -> float:
+    """Wallet age at its first window buy, in days; data-api first, corpus fallback."""
+    if p is not None and p.first_activity_ts is not None:
+        first = p.first_activity_ts
+    else:
+        first = f.corpus_first_ts
+    return max(0.0, (f.first_buy_ts - first) / _SECONDS_PER_DAY)
+
+
+def freshness(age: float) -> float:
+    """1 up to the plateau, then linear decay to a floor (spec Amendment 1)."""
+    if age <= _FRESH_PLATEAU_DAYS:
+        return 1.0
+    return max(_FRESH_FLOOR, 1.0 - (age - _FRESH_PLATEAU_DAYS) / _FRESH_DECAY_DAYS)
+
+
+def score(f: WalletFeatures, p: Provenance | None) -> float:
+    """The frozen composite from spec Amendment 1."""
+    conc = min(f.n_w / f.n_life, 1.0) if f.n_life > 0 else 1.0
+    base = math.log10(1.0 + f.n_w) * freshness(age_days(f, p)) * (_CONC_BLEND + _CONC_BLEND * conc)
+    return base / math.log10(2.0 + f.breadth) + (_FLIP_BONUS if f.flip else 0.0)
+
+
+@dataclass(frozen=True, slots=True)
+class ScoredWallet:
+    """A candidate with its score and 1-based rank within its market."""
+
+    features: WalletFeatures
+    provenance: Provenance | None
+    age: float
+    score: float
+    rank: int
+
+
+def rank_wallets(feats: list[WalletFeatures], prov: dict[str, Provenance]) -> list[ScoredWallet]:
+    """Score and order candidates: score desc, notional desc, earliest buy, wallet."""
+    scored = [
+        (f, prov.get(f.wallet), age_days(f, prov.get(f.wallet)), score(f, prov.get(f.wallet)))
+        for f in feats
+    ]
+    scored.sort(key=lambda t: (-t[3], -t[0].n_w, t[0].first_buy_ts, t[0].wallet))
+    return [
+        ScoredWallet(features=f, provenance=p, age=a, score=s, rank=i)
+        for i, (f, p, a, s) in enumerate(scored, 1)
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class BlindResult:
+    """Where the published wallets landed in a ranking they were hidden from."""
+
+    case_id: str
+    anchor_kind: str
+    n_candidates: int
+    ranks: dict[str, int | None]
+    best_rank: int | None
+    passed: bool | None
+
+
+def compare_published(
+    case_id: str,
+    anchor_kind: str,
+    ranked: list[ScoredWallet],
+    sealed: SealedCase,
+    *,
+    pass_rank: int = 10,
+) -> BlindResult:
+    """Look up each published wallet's rank. ``passed`` is None if none are candidates."""
+    by_wallet = {r.features.wallet.lower(): r.rank for r in ranked}
+    ranks = {w.lower(): by_wallet.get(w.lower()) for w in sealed.wallets}
+    found = [r for r in ranks.values() if r is not None]
+    best = min(found) if found else None
+    return BlindResult(
+        case_id=case_id,
+        anchor_kind=anchor_kind,
+        n_candidates=len(ranked),
+        ranks=ranks,
+        best_rank=best,
+        passed=None if best is None else best <= pass_rank,
+    )
