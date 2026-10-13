@@ -178,3 +178,80 @@ def test_build_features_joins_window_and_lifetime(corpus_factory) -> None:
     assert w_in.n_life == 500.0
     assert w_in.corpus_first_ts == ANCHOR - 10 * H
     assert w_in.flip is False
+
+
+import httpx  # noqa: E402
+from scripts.insider_episode_lib import Provenance  # noqa: E402
+from scripts.insider_episodes import (  # noqa: E402
+    ProvenanceCache,
+    enrich_provenance,
+    fetch_provenance_api,
+)
+
+
+async def test_enrich_provenance_uses_cache_and_skips_failures(tmp_path: Path) -> None:
+    cache = ProvenanceCache(tmp_path / "prov.sqlite3")
+    cache.put(Provenance(wallet="0xcached", first_activity_ts=111, n_events=5))
+    calls: list[str] = []
+
+    async def fetch(wallet: str) -> Provenance:
+        calls.append(wallet)
+        if wallet == "0xbad":
+            request = httpx.Request("GET", "https://data-api.polymarket.com/activity")
+            response = httpx.Response(408, request=request)
+            raise httpx.HTTPStatusError("408", request=request, response=response)
+        return Provenance(wallet=wallet, first_activity_ts=222, n_events=1)
+
+    try:
+        out = await enrich_provenance(cache, ["0xcached", "0xnew", "0xbad"], fetch)
+        assert calls == ["0xnew", "0xbad"]
+        assert out["0xcached"].first_activity_ts == 111
+        assert out["0xnew"].first_activity_ts == 222
+        assert "0xbad" not in out
+        assert cache.get("0xnew") is not None
+        assert cache.get("0xbad") is None  # failure leaves no row
+    finally:
+        cache.close()
+
+
+class _PagingClient:
+    def __init__(self) -> None:
+        self.offsets: list[int] = []
+
+    async def get_activity(
+        self,
+        address: str,
+        *,
+        limit: int = 500,
+        offset: int = 0,
+        type: str | None = None,  # noqa: A002
+    ) -> list[dict[str, object]]:
+        self.offsets.append(offset)
+        if offset == 0:
+            return [{"timestamp": 900 + i, "type": "TRADE"} for i in range(500)]
+        return [{"timestamp": 50, "type": "TRADE"}, {"type": "REWARD"}]  # short page ends it
+
+
+class _EmptyClient:
+    async def get_activity(
+        self,
+        address: str,
+        *,
+        limit: int = 500,
+        offset: int = 0,
+        type: str | None = None,  # noqa: A002
+    ) -> list[dict[str, object]]:
+        return []
+
+
+async def test_fetch_provenance_api_pages_and_takes_min_timestamp() -> None:
+    client = _PagingClient()
+    p = await fetch_provenance_api(client, "0xabc")  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    assert client.offsets == [0, 500]
+    assert p.first_activity_ts == 50
+    assert p.n_events == 502
+
+
+async def test_fetch_provenance_api_empty_wallet() -> None:
+    p = await fetch_provenance_api(_EmptyClient(), "0xnone")  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    assert p == Provenance(wallet="0xnone", first_activity_ts=None, n_events=0)

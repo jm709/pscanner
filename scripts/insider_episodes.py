@@ -7,6 +7,7 @@ blind-tests published wallets on holdout cases, and writes markdown reports.
 
 Spec: docs/superpowers/specs/2026-10-11-insider-episode-catalogue-design.md
 """
+# ruff: noqa: T201  # script prints progress to stdout by design
 
 from __future__ import annotations
 
@@ -14,10 +15,15 @@ import datetime as dt
 import re
 import sqlite3
 import sys
+import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+import httpx
 import yaml
+
+from pscanner.poly.data import DataClient
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -25,6 +31,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from scripts.insider_episode_lib import (  # noqa: E402  (after sys.path bootstrap)
     MarketRef,
+    Provenance,
     PublicCase,
     SealedCase,
     WalletFeatures,
@@ -171,7 +178,7 @@ def candidate_wallets(trades: list[WindowTrade], winning_side: str) -> list[str]
 
 
 def lifetime_stats(conn: sqlite3.Connection, wallet: str, anchor: int) -> tuple[int, float, int]:
-    """``(distinct markets, total notional, first trade ts)`` for ``wallet`` with ``ts <= anchor``."""
+    """``(distinct markets, total notional, first trade ts)`` for ``wallet``, ``ts <= anchor``."""
     row = conn.execute(
         "SELECT count(DISTINCT condition_id), coalesce(sum(notional_usd), 0), min(ts) "
         "FROM corpus_trades WHERE wallet_address = ? AND ts <= ?",
@@ -206,3 +213,87 @@ def build_features(
             )
         )
     return out
+
+
+_ACTIVITY_PAGE = 500
+_ACTIVITY_OFFSET_CAP = 10_000
+
+
+class ProvenanceCache:
+    """SQLite cache of data-api provenance keyed by wallet. Failed fetches are never stored."""
+
+    def __init__(self, path: Path) -> None:
+        """Open (and create) the cache at ``path``."""
+        self._conn = sqlite3.connect(path)
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS wallet_provenance ("
+            " wallet TEXT PRIMARY KEY, first_activity_ts INTEGER, n_events INTEGER,"
+            " fetched_at INTEGER NOT NULL)"
+        )
+        self._conn.commit()
+
+    def get(self, wallet: str) -> Provenance | None:
+        """Return the cached row for ``wallet`` or ``None``."""
+        row = self._conn.execute(
+            "SELECT first_activity_ts, n_events FROM wallet_provenance WHERE wallet = ?", (wallet,)
+        ).fetchone()
+        if row is None:
+            return None
+        return Provenance(wallet=wallet, first_activity_ts=row[0], n_events=row[1])
+
+    def put(self, p: Provenance) -> None:
+        """Insert or replace ``p``."""
+        self._conn.execute(
+            "INSERT OR REPLACE INTO wallet_provenance VALUES (?,?,?,?)",
+            (p.wallet, p.first_activity_ts, p.n_events, int(time.time())),
+        )
+        self._conn.commit()
+
+    def close(self) -> None:
+        """Close the underlying connection."""
+        self._conn.close()
+
+
+async def enrich_provenance(
+    cache: ProvenanceCache,
+    wallets: list[str],
+    fetch: Callable[[str], Awaitable[Provenance]],
+) -> dict[str, Provenance]:
+    """Resolve provenance for ``wallets`` through the cache, fetching misses.
+
+    A fetch that raises ``httpx.HTTPError`` or ``ValueError`` is printed and
+    skipped; the wallet is absent from the result and nothing is cached, so a
+    later run retries it.
+    """
+    out: dict[str, Provenance] = {}
+    for i, w in enumerate(wallets, 1):
+        hit = cache.get(w)
+        if hit is not None:
+            out[w] = hit
+            continue
+        try:
+            p = await fetch(w)
+        except (httpx.HTTPError, ValueError) as exc:
+            print(f"[provenance {i}/{len(wallets)}] {w} ERR {exc}")
+            continue
+        cache.put(p)
+        out[w] = p
+    return out
+
+
+async def fetch_provenance_api(client: DataClient, wallet: str) -> Provenance:
+    """Page ``/activity`` for ``wallet`` and return first-activity ts and event count."""
+    offset = 0
+    n = 0
+    earliest: int | None = None
+    while offset < _ACTIVITY_OFFSET_CAP:
+        page = await client.get_activity(wallet, limit=_ACTIVITY_PAGE, offset=offset)
+        for e in page:
+            n += 1
+            ts = e.get("timestamp")
+            if isinstance(ts, int) and (earliest is None or ts < earliest):
+                earliest = ts
+        if len(page) < _ACTIVITY_PAGE:
+            break
+        offset += _ACTIVITY_PAGE
+    return Provenance(wallet=wallet, first_activity_ts=earliest, n_events=n)

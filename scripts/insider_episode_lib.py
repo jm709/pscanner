@@ -203,3 +203,12 @@ def window_features(
         for t in trades
     )
     return sum(t.notional for t in buys), len(buys), first_buy, last_buy, flip
+
+
+@dataclass(frozen=True, slots=True)
+class Provenance:
+    """Wallet age signal from the Polymarket data-api."""
+
+    wallet: str
+    first_activity_ts: int | None
+    n_events: int | None
