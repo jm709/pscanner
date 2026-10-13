@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ from scripts.insider_episode_lib import (  # noqa: E402  (after sys.path bootstr
     MarketRef,
     PublicCase,
     SealedCase,
+    WindowTrade,
 )
 
 _FULL_ADDRESS = re.compile(r"^0x[0-9a-f]{40}$")
@@ -89,3 +91,78 @@ def load_registry(path: Path) -> tuple[list[PublicCase], dict[str, SealedCase]]:
         )
         sealed[cid] = SealedCase(id=cid, wallets=_published_wallets(raw.get("wallets") or []))
     return public, sealed
+
+
+def open_corpus(path: Path) -> sqlite3.Connection:
+    """Open the corpus read-only. Never writes; safe against a running backfill."""
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def resolve_market(conn: sqlite3.Connection, ref: MarketRef) -> MarketRef:
+    """Return ``ref`` with ``condition_id`` filled from ``corpus_markets``.
+
+    Raises:
+        LookupError: the slug is not in the corpus.
+    """
+    row = conn.execute(
+        "SELECT condition_id FROM corpus_markets WHERE market_slug = ?", (ref.slug,)
+    ).fetchone()
+    if row is None:
+        msg = f"market slug not in corpus: {ref.slug}"
+        raise LookupError(msg)
+    return MarketRef(
+        slug=ref.slug,
+        winning_side=ref.winning_side,
+        role=ref.role,
+        condition_id=str(row["condition_id"]),
+    )
+
+
+_TRADE_COLS = "wallet_address, ts, outcome_side, bs, price, notional_usd"
+
+
+def _to_trades(rows: list[sqlite3.Row]) -> list[WindowTrade]:
+    return [
+        WindowTrade(
+            wallet=str(r["wallet_address"]),
+            ts=int(r["ts"]),
+            outcome_side=str(r["outcome_side"]),
+            bs=str(r["bs"]),
+            price=float(r["price"]),
+            notional=float(r["notional_usd"]),
+        )
+        for r in rows
+    ]
+
+
+def extract_window(
+    conn: sqlite3.Connection, condition_id: str, anchor: int, window_hours: int
+) -> list[WindowTrade]:
+    """Every trade on ``condition_id`` with ``anchor - window < ts <= anchor``."""
+    lo = anchor - window_hours * 3600
+    rows = conn.execute(
+        f"SELECT {_TRADE_COLS} FROM corpus_trades "  # noqa: S608  (constant column list)
+        "WHERE condition_id = ? AND ts > ? AND ts <= ? ORDER BY ts, rowid",
+        (condition_id, lo, anchor),
+    ).fetchall()
+    return _to_trades(rows)
+
+
+def market_trades(conn: sqlite3.Connection, condition_id: str) -> list[WindowTrade]:
+    """The market's whole trade history, oldest first (for the auto anchor)."""
+    rows = conn.execute(
+        f"SELECT {_TRADE_COLS} FROM corpus_trades WHERE condition_id = ? ORDER BY ts, rowid",  # noqa: S608
+        (condition_id,),
+    ).fetchall()
+    return _to_trades(rows)
+
+
+def candidate_wallets(trades: list[WindowTrade], winning_side: str) -> list[str]:
+    """Distinct wallets with at least one BUY of ``winning_side``, by first such buy."""
+    seen: dict[str, None] = {}
+    for t in trades:
+        if t.bs == "BUY" and t.outcome_side == winning_side and t.wallet not in seen:
+            seen[t.wallet] = None
+    return list(seen)

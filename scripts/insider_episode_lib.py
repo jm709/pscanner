@@ -83,3 +83,15 @@ def select_cases(cases: list[PublicCase], split: str, *, scorer_frozen: bool) ->
     if split == "all":
         return list(cases)
     return [c for c in cases if c.split == split]
+
+
+@dataclass(frozen=True, slots=True)
+class WindowTrade:
+    """One corpus trade inside an analysis window."""
+
+    wallet: str
+    ts: int
+    outcome_side: str
+    bs: str
+    price: float
+    notional: float
