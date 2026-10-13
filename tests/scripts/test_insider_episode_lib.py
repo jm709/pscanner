@@ -324,3 +324,83 @@ def test_match_controls_respects_k_and_is_deterministic() -> None:
 def test_match_controls_empty_when_nothing_matches() -> None:
     case = _m("case")
     assert match_controls(case, [case], excluded=set()) == []
+
+
+from scripts.insider_episode_lib import (  # noqa: E402
+    BlindResult,
+    CaseReport,
+    ControlResult,
+    CoverageRow,
+    MarketResult,
+    csv_rows,
+    fingerprint_table,
+    render_case_report,
+    render_summary,
+)
+
+
+def _ranked(prefix: str, n: int, *, n_w: float = 1_000.0) -> list:
+    return rank_wallets([_f(f"0x{prefix}{i:02d}", n_w=n_w - i) for i in range(n)], {})
+
+
+def _report(*, with_controls: bool, holdout: bool) -> CaseReport:
+    case = PublicCase(
+        id="case-x",
+        name="Case X",
+        split="holdout" if holdout else "dev",
+        confidence="alleged",
+        analyzable=True,
+        news_ts=1_700_000_000,
+        news_precision="minute",
+        markets=(MarketRef("slug-x", "YES", "primary", "cidx"),),
+    )
+    primary = MarketResult(case.markets[0], "news", 1_700_000_000, _ranked("p", 12), 40, 12_345.0)
+    controls = (
+        [ControlResult(_m("ctl1"), 999, _ranked("c", 12, n_w=100.0))] if with_controls else []
+    )
+    blind = [BlindResult("case-x", "news", 12, {"0xp03": 4}, 4, True)] if holdout else []
+    return CaseReport(case, [primary], controls, blind, auto_anchor_ts=1_700_000_000 - 7_200)
+
+
+def test_fingerprint_table_empty_without_controls() -> None:
+    r = _report(with_controls=False, holdout=False)
+    assert fingerprint_table(r.results[0].ranked, r.controls) == []
+
+
+def test_fingerprint_table_has_five_features_with_controls() -> None:
+    r = _report(with_controls=True, holdout=False)
+    rows = fingerprint_table(r.results[0].ranked, r.controls)
+    assert [x[0] for x in rows] == ["age", "log10_n_w", "breadth", "concentration", "flip"]
+    log_row = rows[1]
+    assert log_row[1] > log_row[2]  # case top-10 has larger notional than control top-10
+
+
+def test_render_case_report_mentions_no_controls() -> None:
+    text = render_case_report(_report(with_controls=False, holdout=False))
+    assert "# Case X" in text
+    assert "no controls" in text.lower()
+    assert "Blind test" not in text  # dev case
+
+
+def test_render_case_report_holdout_includes_blind_result() -> None:
+    text = render_case_report(_report(with_controls=True, holdout=True))
+    assert "Blind test" in text
+    assert "0xp03" in text
+    assert "4 / 12" in text
+    assert "PASS" in text
+
+
+def test_render_summary_and_csv_rows() -> None:
+    reports = [
+        _report(with_controls=True, holdout=True),
+        _report(with_controls=False, holdout=False),
+    ]
+    cov = [CoverageRow("case-x", "0xmissing", "outside_window", "first -90.0h")]
+    text = render_summary(reports, cov)
+    assert "Median best rank" in text
+    assert "0xmissing" in text
+    assert "outside_window" in text
+    rows = csv_rows(reports)
+    assert len(rows) == 12 + 12 + 12  # primary + control (holdout report) + primary (dev report)
+    assert {r["is_control"] for r in rows} == {False, True}
+    assert set(rows[0]) >= {"case_id", "market_slug", "rank", "wallet", "score", "age_days", "flip"}

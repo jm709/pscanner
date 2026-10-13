@@ -9,7 +9,9 @@ Spec: docs/superpowers/specs/2026-10-11-insider-episode-catalogue-design.md
 
 from __future__ import annotations
 
+import datetime as dt
 import math
+import statistics
 from dataclasses import dataclass, field
 
 
@@ -349,3 +351,288 @@ class CoverageRow:
     wallet: str
     reason: str
     detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class MarketResult:
+    """Ranking on one case market under one anchor."""
+
+    ref: MarketRef
+    anchor_kind: str
+    anchor_ts: int
+    ranked: list[ScoredWallet]
+    n_window_trades: int
+    window_volume: float
+
+
+@dataclass(frozen=True, slots=True)
+class ControlResult:
+    """Ranking on one control market under its auto anchor."""
+
+    market: MarketRow
+    anchor_ts: int | None
+    ranked: list[ScoredWallet]
+
+
+@dataclass(frozen=True, slots=True)
+class CaseReport:
+    """Everything the reporter needs for one case."""
+
+    case: PublicCase
+    results: list[MarketResult]
+    controls: list[ControlResult]
+    blind: list[BlindResult]
+    auto_anchor_ts: int | None
+
+
+_FEATURES = ("age", "log10_n_w", "breadth", "concentration", "flip")
+_TOP_N = 10
+_MIN_VARIANCE_N = 2
+
+
+def _concentration(f: WalletFeatures) -> float:
+    return min(1.0, f.n_w / f.n_life) if f.n_life else 1.0
+
+
+def _feature_values(ranked: list[ScoredWallet], name: str) -> list[float]:
+    top = ranked[:_TOP_N]
+    if name == "age":
+        return [r.age for r in top]
+    if name == "log10_n_w":
+        return [math.log10(1.0 + r.features.n_w) for r in top]
+    if name == "breadth":
+        return [float(r.features.breadth) for r in top]
+    if name == "concentration":
+        return [_concentration(r.features) for r in top]
+    return [1.0 if r.features.flip else 0.0 for r in top]
+
+
+def _cohen_d(a: list[float], b: list[float]) -> float:
+    if len(a) < _MIN_VARIANCE_N or len(b) < _MIN_VARIANCE_N:
+        return 0.0
+    va, vb = statistics.variance(a), statistics.variance(b)
+    pooled = math.sqrt(((len(a) - 1) * va + (len(b) - 1) * vb) / (len(a) + len(b) - 2))
+    if pooled == 0:
+        return 0.0
+    return (statistics.mean(a) - statistics.mean(b)) / pooled
+
+
+def fingerprint_table(
+    primary: list[ScoredWallet], controls: list[ControlResult]
+) -> list[tuple[str, float, float, float]]:
+    """Top-10 feature means for the case versus pooled control top-10s, with Cohen's d."""
+    if not controls or not primary:
+        return []
+    rows: list[tuple[str, float, float, float]] = []
+    for name in _FEATURES:
+        case_vals = _feature_values(primary, name)
+        ctl_vals = [v for c in controls for v in _feature_values(c.ranked, name)]
+        if not case_vals or not ctl_vals:
+            continue
+        rows.append(
+            (
+                name,
+                statistics.mean(case_vals),
+                statistics.mean(ctl_vals),
+                _cohen_d(case_vals, ctl_vals),
+            )
+        )
+    return rows
+
+
+def _iso(ts: int | None) -> str:
+    if ts is None:
+        return "n/a"
+    return dt.datetime.fromtimestamp(ts, dt.UTC).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _ranked_table(ranked: list[ScoredWallet], anchor: int, limit: int = 25) -> list[str]:
+    lines = [
+        "| Rank | Wallet | Score | Age (d) | Window $ | Buys | First buy | Last buy |"
+        " Markets | Conc | Flip |",
+        "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|:-:|",
+    ]
+    for r in ranked[:limit]:
+        f = r.features
+        first_h = (f.first_buy_ts - anchor) / 3600
+        last_h = (f.last_buy_ts - anchor) / 3600
+        lines.append(
+            f"| {r.rank} | `{f.wallet}` | {r.score:.3f} | {r.age:.1f} | {f.n_w:,.0f} | {f.n_buys} |"
+            f" {first_h:+.1f}h | {last_h:+.1f}h | {f.breadth} | {_concentration(f):.2f} |"
+            f" {'yes' if f.flip else ''} |"
+        )
+    return lines
+
+
+def _primary_news_ranking(r: CaseReport) -> list[ScoredWallet]:
+    for x in r.results:
+        if x.ref.role.startswith("primary") and x.anchor_kind == "news":
+            return x.ranked
+    return []
+
+
+def _render_controls(r: CaseReport) -> list[str]:
+    out = ["## Controls", ""]
+    if not r.controls:
+        return [*out, "No controls matched; fingerprint unavailable.", ""]
+    for ctl in r.controls:
+        out.append(
+            f"- `{ctl.market.slug}` · anchor {_iso(ctl.anchor_ts)} · {len(ctl.ranked)} candidates"
+        )
+    out += [
+        "",
+        "| Feature | Case top-10 mean | Control top-10 mean | Cohen's d |",
+        "|---|---:|---:|---:|",
+    ]
+    for name, a, b, d in fingerprint_table(_primary_news_ranking(r), r.controls):
+        out.append(f"| {name} | {a:.3f} | {b:.3f} | {d:+.2f} |")
+    return [*out, ""]
+
+
+def _render_blind(blind: list[BlindResult]) -> list[str]:
+    out = ["## Blind test", ""]
+    for b in blind:
+        if b.passed is None:
+            verdict = "no published wallet among candidates"
+        else:
+            verdict = "PASS" if b.passed else "FAIL"
+        out.append(f"- {b.anchor_kind} anchor: {verdict}; {b.n_candidates} candidates")
+        for w, rank in b.ranks.items():
+            where = "not a candidate" if rank is None else f"{rank} / {b.n_candidates}"
+            out.append(f"  - `{w}`: {where}")
+    return [*out, ""]
+
+
+def render_case_report(r: CaseReport) -> str:
+    """Markdown report for one case."""
+    c = r.case
+    gap = "n/a" if r.auto_anchor_ts is None else f"{(r.auto_anchor_ts - c.news_ts) / 3600:+.1f}h"
+    out = [
+        f"# {c.name}",
+        "",
+        f"Case `{c.id}` · {c.confidence} · split {c.split}",
+        "",
+        f"News anchor: {_iso(c.news_ts)} (precision: {c.news_precision})",
+        f"Auto anchor: {_iso(r.auto_anchor_ts)} (gap to news: {gap})",
+        "",
+    ]
+    for res in r.results:
+        out += [
+            f"## {res.ref.slug} ({res.ref.role}, {res.anchor_kind} anchor)",
+            "",
+            f"{res.n_window_trades} window trades, ${res.window_volume:,.0f} volume,"
+            f" {len(res.ranked)} candidates",
+            "",
+            *_ranked_table(res.ranked, res.anchor_ts),
+            "",
+        ]
+    out += _render_controls(r)
+    if r.blind:
+        out += _render_blind(r.blind)
+    return "\n".join(out)
+
+
+def _fmt_blind(b: BlindResult | None) -> str:
+    if b is None:
+        return "—"
+    return "n/a" if b.best_rank is None else str(b.best_rank)
+
+
+def render_summary(reports: list[CaseReport], coverage: list[CoverageRow]) -> str:
+    """Cross-case summary: blind-test medians, anchor gaps, and the coverage audit."""
+    out = ["# Insider-episode catalogue: summary", ""]
+    for kind in ("news", "auto"):
+        best = [
+            b.best_rank
+            for r in reports
+            for b in r.blind
+            if b.anchor_kind == kind and b.best_rank is not None
+        ]
+        med = f"{statistics.median(best):.0f}" if best else "n/a"
+        out.append(f"Median best rank ({kind} anchor, {len(best)} testable holdout cases): {med}")
+    gaps = sorted(
+        (r.auto_anchor_ts - r.case.news_ts) / 3600 for r in reports if r.auto_anchor_ts is not None
+    )
+    gap_text = ", ".join(f"{g:+.1f}" for g in gaps) if gaps else "n/a"
+    out += ["", f"Auto-anchor gap to news, hours (n={len(gaps)}): {gap_text}", ""]
+    out += [
+        "## Cases",
+        "",
+        "| Case | Split | Tier | Candidates (primary) | Blind (news) | Blind (auto) |",
+        "|---|---|---|---:|---|---|",
+    ]
+    for r in reports:
+        n = len(_primary_news_ranking(r))
+        bn = next((b for b in r.blind if b.anchor_kind == "news"), None)
+        ba = next((b for b in r.blind if b.anchor_kind == "auto"), None)
+        out.append(
+            f"| {r.case.id} | {r.case.split} | {r.case.confidence} | {n} |"
+            f" {_fmt_blind(bn)} | {_fmt_blind(ba)} |"
+        )
+    out += [
+        "",
+        "## Published wallets not in corpus",
+        "",
+        "| Case | Wallet | Reason | Detail |",
+        "|---|---|---|---|",
+    ]
+    for cv in coverage:
+        out.append(f"| {cv.case_id} | `{cv.wallet}` | {cv.reason} | {cv.detail} |")
+    return "\n".join(out) + "\n"
+
+
+def _csv_row(
+    case_id: str, slug: str, r: ScoredWallet, *, is_control: bool, kind: str, anchor: int | None
+) -> dict[str, object]:
+    f = r.features
+    return {
+        "case_id": case_id,
+        "market_slug": slug,
+        "is_control": is_control,
+        "anchor_kind": kind,
+        "anchor_ts": anchor,
+        "rank": r.rank,
+        "wallet": f.wallet,
+        "score": round(r.score, 6),
+        "age_days": round(r.age, 3),
+        "n_w": f.n_w,
+        "n_buys": f.n_buys,
+        "first_buy_ts": f.first_buy_ts,
+        "last_buy_ts": f.last_buy_ts,
+        "breadth": f.breadth,
+        "n_life": f.n_life,
+        "concentration": _concentration(f),
+        "flip": f.flip,
+        "first_activity_ts": None if r.provenance is None else r.provenance.first_activity_ts,
+    }
+
+
+def csv_rows(reports: list[CaseReport]) -> list[dict[str, object]]:
+    """Flat rows for every scored wallet across cases and controls."""
+    rows: list[dict[str, object]] = []
+    for rep in reports:
+        for res in rep.results:
+            rows += [
+                _csv_row(
+                    rep.case.id,
+                    res.ref.slug,
+                    r,
+                    is_control=False,
+                    kind=res.anchor_kind,
+                    anchor=res.anchor_ts,
+                )
+                for r in res.ranked
+            ]
+        for ctl in rep.controls:
+            rows += [
+                _csv_row(
+                    rep.case.id,
+                    ctl.market.slug,
+                    r,
+                    is_control=True,
+                    kind="auto",
+                    anchor=ctl.anchor_ts,
+                )
+                for r in ctl.ranked
+            ]
+    return rows
