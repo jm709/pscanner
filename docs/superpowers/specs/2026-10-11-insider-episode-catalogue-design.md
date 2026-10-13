@@ -409,3 +409,40 @@ the primary-market rank.
 The constants above (10-day plateau, 60-day decay, 0.1 floor, 0.5 blend,
 0.5 flip bonus) are fixed. The holdout run uses them unchanged. Any later
 change is a new amendment and invalidates the holdout result.
+
+## Amendment 2: pre-holdout corrections (2026-10-13, from whole-branch review)
+
+Made before any holdout case was opened or run. None change the scorer
+constants in Amendment 1.
+
+1. **Age uses the earliest known activity.** The data-api `/activity` walk is
+   capped at offset 3,000 and so sees only a busy wallet's most recent events;
+   its minimum timestamp can post-date the anchor. Age is therefore computed
+   from `min(api_first_activity, corpus_first_trade)`, both lower bounds on the
+   true first activity. The provenance record carries a `truncated` flag.
+2. **Every primary-role market is blind-tested.** Several registry cases list
+   more than one `primary` market. Each is ranked under the news anchor (and
+   the first primary also under the auto anchor); the comparator reports the
+   published wallets' rank on each, and the summary takes the case's best rank
+   across its primary markets. This loosens the pass criterion in proportion
+   to the number of primaries, which the per-market lines make visible.
+3. **Dev cases are blind-tested too, labelled in-sample**, and the summary
+   falls back to a leave-one-out style median over all testable cases when
+   fewer than three holdout cases are testable, with a banner saying so.
+   Markets with fewer than ten candidates are excluded from medians and listed.
+4. **Negative example re-anchored.** `iran-strike-markets-2026-01` was
+   anchored at the Feb 28 strike, after its primary resolved; it is now
+   anchored at the 2026-01-07 reactivation so its window holds the suspected
+   buying. The script warns when any case's news anchor falls after its
+   primary's resolution.
+5. **Controls exclude event siblings.** Any market sharing an `event_slug`
+   with a registry market is excluded from the control universe, not only the
+   registry markets themselves.
+6. **Coverage lists unpublished wallets.** Published wallets with no full
+   address (usernames, truncated prefixes) appear in the coverage table as
+   `address_not_published`; they never reach the comparator.
+7. **Platform predicate.** Corpus queries filter `platform = 'polymarket'`
+   where the column exists, so non-Polymarket rows cannot become candidates or
+   controls.
+8. **Auto-anchor tie rule.** Among buckets tied for the largest forward move,
+   the latest is the anchor (the last pre-move hour), not the earliest.

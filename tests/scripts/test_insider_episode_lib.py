@@ -215,13 +215,21 @@ def test_freshness_plateau_decay_floor() -> None:
     assert freshness(400) == 0.1
 
 
-def test_age_days_prefers_api_then_corpus_and_never_negative() -> None:
+def test_age_days_takes_earliest_known_activity() -> None:
     f = _f("w", n_w=100.0, first_buy_ts=100 * DAY, corpus_first_ts=98 * DAY)
     assert math.isclose(age_days(f, Provenance("w", first_activity_ts=90 * DAY, n_events=1)), 10.0)
     assert math.isclose(age_days(f, Provenance("w", first_activity_ts=None, n_events=0)), 2.0)
     assert math.isclose(age_days(f, None), 2.0)
-    api_after_buy = Provenance("w", first_activity_ts=101 * DAY, n_events=1)
-    assert age_days(f, api_after_buy) == 0.0
+    # a truncated API walk can only see recent events: the corpus first trade is earlier and wins
+    api_after_buy = Provenance("w", first_activity_ts=101 * DAY, n_events=1, truncated=True)
+    assert math.isclose(age_days(f, api_after_buy), 2.0)
+
+
+def test_auto_anchor_only_scans_within_horizon() -> None:
+    # 20k flat buckets then a jump; must finish quickly (horizon-bounded inner loop)
+    buckets = _flat(20_000, 0.10)
+    buckets[19_990] = _bucket(19_990, 0.60)
+    assert auto_anchor(buckets, resolved_at=30_000 * H) == 19_989 * H
 
 
 def test_score_matches_amendment_formula() -> None:
@@ -279,7 +287,7 @@ def test_compare_published_is_case_insensitive_on_addresses() -> None:
     assert res.ranks == {"0xabc": 1}
 
 
-from scripts.insider_episode_lib import MarketRow, match_controls  # noqa: E402
+from scripts.insider_episode_lib import MarketRow, match_controls, sibling_exclusions  # noqa: E402
 
 
 def _m(
@@ -404,3 +412,62 @@ def test_render_summary_and_csv_rows() -> None:
     assert len(rows) == 12 + 12 + 12  # primary + control (holdout report) + primary (dev report)
     assert {r["is_control"] for r in rows} == {False, True}
     assert set(rows[0]) >= {"case_id", "market_slug", "rank", "wallet", "score", "age_days", "flip"}
+
+
+def test_compare_published_carries_market_and_sample_label() -> None:
+    ranked = rank_wallets([_f("0xabc", n_w=1.0)], {})
+    sealed = SealedCase(id="c", wallets=("0xabc",))
+    res = compare_published("c", "news", ranked, sealed, market_slug="slug-p", in_sample=True)
+    assert res.market_slug == "slug-p"
+    assert res.in_sample is True
+
+
+def _blind(
+    case_id: str, n: int, best: int | None, *, in_sample: bool, kind: str = "news"
+) -> BlindResult:
+    ranks: dict[str, int | None] = {} if best is None else {"0xw": best}
+    passed = None if best is None else best <= 10
+    return BlindResult(case_id, kind, n, ranks, best, passed, market_slug="s", in_sample=in_sample)
+
+
+def _report_with_blind(case_id: str, split: str, blind: list[BlindResult]) -> CaseReport:
+    case = PublicCase(
+        id=case_id, name=case_id, split=split, confidence="alleged", analyzable=True,
+        news_ts=1_700_000_000, news_precision="minute",
+        markets=(MarketRef("s", "YES", "primary", "cid"),),
+    )  # fmt: skip
+    primary = MarketResult(case.markets[0], "news", 1_700_000_000, _ranked("p", 12), 40, 1.0)
+    return CaseReport(case, [primary], [], blind, auto_anchor_ts=None)
+
+
+def test_render_summary_loo_banner_and_small_case_exclusion() -> None:
+    reports = [
+        _report_with_blind("h1", "holdout", [_blind("h1", 500, 3, in_sample=False)]),
+        _report_with_blind("d1", "dev", [_blind("d1", 400, 7, in_sample=True)]),
+        _report_with_blind("d2", "dev", [_blind("d2", 5, 1, in_sample=True)]),  # <10 candidates
+    ]
+    text = render_summary(reports, [])
+    assert "Median best rank (news anchor, holdout, 1 testable" in text
+    assert "fewer than three testable holdout cases" in text.lower()
+    assert "all testable cases" in text.lower()
+    assert "d2" in text
+    assert "excluded" in text.lower()
+
+
+def test_render_case_report_labels_in_sample_blind() -> None:
+    rep = _report_with_blind("d1", "dev", [_blind("d1", 400, 7, in_sample=True)])
+    text = render_case_report(rep)
+    assert "Blind test (in-sample" in text
+    assert "7 / 400" in text
+    assert "top 10" in text
+
+
+def test_sibling_exclusions_by_event_slug() -> None:
+    u = [
+        MarketRow("a", "slug-a", "geo", 1.0, 1, 1, False, event_slug="ev-1"),
+        MarketRow("b", "slug-b", "geo", 1.0, 1, 1, False, event_slug="ev-1"),
+        MarketRow("c", "slug-c", "geo", 1.0, 1, 1, False, event_slug="ev-2"),
+        MarketRow("d", "slug-d", "geo", 1.0, 1, 1, False, event_slug=""),
+        MarketRow("e", "slug-e", "geo", 1.0, 1, 1, False, event_slug=""),
+    ]
+    assert sibling_exclusions(u, {"a", "d"}) == {"a", "b", "d"}

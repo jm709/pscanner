@@ -366,7 +366,15 @@ def _e2e_db(corpus_factory) -> Path:
     bb = "0x00000000000000000000000000000000000000bb"
     trades = [
         # m1: a crowd; published 0x..aa never trades m1 -> no_trades + stake<10
-        ("w1", "m1", "YES", "BUY", 0.10, 500.0, ANCHOR - 10 * H),
+        (
+            "0x00000000000000000000000000000000000000cc",
+            "m1",
+            "YES",
+            "BUY",
+            0.10,
+            500.0,
+            ANCHOR - 10 * H,
+        ),
         ("w2", "m1", "YES", "BUY", 0.10, 100.0, ANCHOR - 9 * H),
         ("w3", "m1", "YES", "BUY", 0.12, 50.0, ANCHOR - 8 * H),
         # m2: published 0x..bb is the biggest fresh buyer -> rank 1
@@ -441,3 +449,112 @@ def test_script_runs_as_subprocess(tmp_path: Path, corpus_factory) -> None:
         cwd=Path(__file__).resolve().parents[2],
     )
     assert proc.returncode == 0, proc.stderr
+
+
+class _CappedClient:
+    """Mimics the data-api: 400 at offset >= 3000, pages of 500 before that."""
+
+    def __init__(self) -> None:
+        self.offsets: list[int] = []
+
+    async def get_activity(
+        self,
+        address: str,
+        *,
+        limit: int = 500,
+        offset: int = 0,
+        type: str | None = None,  # noqa: A002
+    ) -> list[dict[str, object]]:
+        self.offsets.append(offset)
+        if offset >= 3000:
+            request = httpx.Request("GET", "https://data-api.polymarket.com/activity")
+            response = httpx.Response(400, request=request)
+            raise httpx.HTTPStatusError("offset too large", request=request, response=response)
+        return [{"timestamp": 10_000 + offset + i, "type": "TRADE"} for i in range(500)]
+
+
+async def test_fetch_provenance_api_stops_at_offset_cap_and_marks_truncated() -> None:
+    client = _CappedClient()
+    p = await fetch_provenance_api(client, "0xbusy")  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    assert client.offsets[-1] == 3000
+    assert p.n_events == 3000
+    assert p.first_activity_ts == 10_000
+    assert p.truncated is True
+
+
+async def test_fetch_provenance_api_not_truncated_on_short_page() -> None:
+    p = await fetch_provenance_api(_PagingClient(), "0xabc")  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+    assert p.truncated is False
+
+
+def test_provenance_cache_round_trips_truncated(tmp_path: Path) -> None:
+    cache = ProvenanceCache(tmp_path / "prov.sqlite3")
+    try:
+        cache.put(Provenance(wallet="0xt", first_activity_ts=5, n_events=3000, truncated=True))
+        got = cache.get("0xt")
+        assert got is not None
+        assert got.truncated is True
+    finally:
+        cache.close()
+
+
+def test_load_registry_keeps_unpublished_wallet_labels(tmp_path: Path) -> None:
+    path = tmp_path / "r.yaml"
+    path.write_text(_REGISTRY)
+    _, sealed = load_registry(path)
+    assert sealed["case-a"].unpublished == ("0xa72DB1749e9... (TRUNCATED)", "someone")
+
+
+def test_queries_work_without_platform_column(corpus_factory) -> None:
+    trades = [("w", "m1", "YES", "BUY", 0.10, 100.0, ANCHOR - H)]
+    markets = [("m1", "slug-m1", "geopolitics", 5e6, ANCHOR + H, 0)]
+    db = corpus_factory(trades, [("m1", 1, ANCHOR + H)], markets=markets, with_platform=False)
+    conn = open_corpus(db)
+    try:
+        assert [r.wallet for r in extract_window(conn, "m1", ANCHOR, 72)] == ["w"]
+        assert len(market_trades(conn, "m1")) == 1
+        assert lifetime_stats(conn, "w", ANCHOR)[0] == 1
+        assert [m.condition_id for m in load_market_rows(conn)] == ["m1"]
+        assert load_market_rows(conn)[0].event_slug == "slug-m1"
+    finally:
+        conn.close()
+
+
+def test_main_warns_when_news_anchor_is_after_resolution(
+    tmp_path: Path, corpus_factory, capsys
+) -> None:
+    dev_anchor = (
+        'news_ts_utc: "1970-01-12T13:46:40Z"\n    news_ts_precision: minute\n    corpus_markets:\n'
+    )
+    late = _E2E_REGISTRY.replace(dev_anchor, dev_anchor.replace("01-12", "01-13"), 1)
+    assert late != _E2E_REGISTRY
+    reg = tmp_path / "reg.yaml"
+    reg.write_text(late)
+    args = ["--db", str(_e2e_db(corpus_factory)), "--registry", str(reg), "--out-dir",
+            str(tmp_path / "out"), "--provenance-cache", str(tmp_path / "p.sqlite3"),
+            "--skip-provenance"]  # fmt: skip
+    assert main(args) == 0
+    assert "after resolution" in capsys.readouterr().out
+
+
+def test_main_dev_case_gets_in_sample_blind_and_unpublished_coverage(
+    tmp_path: Path, corpus_factory
+) -> None:
+    reg_text = _E2E_REGISTRY.replace(
+        '      - address: "0x00000000000000000000000000000000000000aa"\n        stake_usd: 5\n',
+        '      - address: "0x00000000000000000000000000000000000000aa"\n        stake_usd: 5\n'
+        '      - address: "0x00000000000000000000000000000000000000cc"\n'
+        "      - address: null\n        username: ghostuser\n",
+    )
+    assert reg_text != _E2E_REGISTRY
+    reg = tmp_path / "reg.yaml"
+    reg.write_text(reg_text)
+    args = ["--db", str(_e2e_db(corpus_factory)), "--registry", str(reg), "--out-dir",
+            str(tmp_path / "out"), "--provenance-cache", str(tmp_path / "p.sqlite3"),
+            "--skip-provenance"]  # fmt: skip
+    assert main(args) == 0
+    case_text = (tmp_path / "out" / "dev-case.md").read_text()
+    assert "Blind test (in-sample" in case_text
+    summary = (tmp_path / "out" / "SUMMARY.md").read_text()
+    assert "address_not_published" in summary
+    assert "ghostuser" in summary

@@ -55,6 +55,7 @@ from scripts.insider_episode_lib import (  # noqa: E402  (after sys.path bootstr
     render_case_report,
     render_summary,
     select_cases,
+    sibling_exclusions,
     window_features,
 )
 
@@ -66,17 +67,22 @@ def _parse_ts(value: str) -> int:
     return int(dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
 
 
-def _published_wallets(raw: list[dict[str, Any]]) -> tuple[str, ...]:
-    """Keep only full 42-character addresses, lowercased and stripped."""
-    out: list[str] = []
+def _published_wallets(raw: list[dict[str, Any]]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split registry wallets into full lowercase addresses and unpublished labels.
+
+    A label is the truncated address text, the username, or ``unnamed``.
+    """
+    full: list[str] = []
+    unpublished: list[str] = []
     for w in raw:
         addr = w.get("address")
-        if not isinstance(addr, str):
+        norm = addr.strip().lower() if isinstance(addr, str) else ""
+        if _FULL_ADDRESS.match(norm):
+            full.append(norm)
             continue
-        addr = addr.strip().lower()
-        if _FULL_ADDRESS.match(addr):
-            out.append(addr)
-    return tuple(out)
+        label = addr if isinstance(addr, str) and addr.strip() else w.get("username")
+        unpublished.append(str(label) if label else "unnamed")
+    return tuple(full), tuple(unpublished)
 
 
 def _market_refs(raw: list[dict[str, Any]]) -> tuple[MarketRef, ...]:
@@ -117,7 +123,8 @@ def load_registry(path: Path) -> tuple[list[PublicCase], dict[str, SealedCase]]:
                 markets=_market_refs(raw.get("corpus_markets") or []),
             )
         )
-        sealed[cid] = SealedCase(id=cid, wallets=_published_wallets(raw.get("wallets") or []))
+        full, unpublished = _published_wallets(raw.get("wallets") or [])
+        sealed[cid] = SealedCase(id=cid, wallets=full, unpublished=unpublished)
     return public, sealed
 
 
@@ -128,6 +135,19 @@ def open_corpus(path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _has_platform(conn: sqlite3.Connection, table: str) -> bool:
+    cols = [str(r[1]) for r in conn.execute(f"PRAGMA table_info({table})")]
+    return "platform" in cols
+
+
+def _plat(conn: sqlite3.Connection, table: str, alias: str = "") -> str:
+    """``AND <alias.>platform = 'polymarket'`` when the table carries a platform column."""
+    if not _has_platform(conn, table):
+        return ""
+    prefix = f"{alias}." if alias else ""
+    return f" AND {prefix}platform = 'polymarket'"
+
+
 def resolve_market(conn: sqlite3.Connection, ref: MarketRef) -> MarketRef:
     """Return ``ref`` with ``condition_id`` filled from ``corpus_markets``.
 
@@ -135,7 +155,9 @@ def resolve_market(conn: sqlite3.Connection, ref: MarketRef) -> MarketRef:
         LookupError: the slug is not in the corpus.
     """
     row = conn.execute(
-        "SELECT condition_id FROM corpus_markets WHERE market_slug = ?", (ref.slug,)
+        "SELECT condition_id FROM corpus_markets WHERE market_slug = ?"  # noqa: S608
+        f"{_plat(conn, 'corpus_markets')}",
+        (ref.slug,),
     ).fetchone()
     if row is None:
         msg = f"market slug not in corpus: {ref.slug}"
@@ -172,7 +194,8 @@ def extract_window(
     lo = anchor - window_hours * 3600
     rows = conn.execute(
         f"SELECT {_TRADE_COLS} FROM corpus_trades "  # noqa: S608  (constant column list)
-        "WHERE condition_id = ? AND ts > ? AND ts <= ? ORDER BY ts, rowid",
+        f"WHERE condition_id = ? AND ts > ? AND ts <= ?{_plat(conn, 'corpus_trades')}"
+        " ORDER BY ts, rowid",
         (condition_id, lo, anchor),
     ).fetchall()
     return _to_trades(rows)
@@ -181,7 +204,8 @@ def extract_window(
 def market_trades(conn: sqlite3.Connection, condition_id: str) -> list[WindowTrade]:
     """The market's whole trade history, oldest first (for the auto anchor)."""
     rows = conn.execute(
-        f"SELECT {_TRADE_COLS} FROM corpus_trades WHERE condition_id = ? ORDER BY ts, rowid",  # noqa: S608
+        f"SELECT {_TRADE_COLS} FROM corpus_trades WHERE condition_id = ?"  # noqa: S608
+        f"{_plat(conn, 'corpus_trades')} ORDER BY ts, rowid",
         (condition_id,),
     ).fetchall()
     return _to_trades(rows)
@@ -199,8 +223,8 @@ def candidate_wallets(trades: list[WindowTrade], winning_side: str) -> list[str]
 def lifetime_stats(conn: sqlite3.Connection, wallet: str, anchor: int) -> tuple[int, float, int]:
     """``(distinct markets, total notional, first trade ts)`` for ``wallet``, ``ts <= anchor``."""
     row = conn.execute(
-        "SELECT count(DISTINCT condition_id), coalesce(sum(notional_usd), 0), min(ts) "
-        "FROM corpus_trades WHERE wallet_address = ? AND ts <= ?",
+        "SELECT count(DISTINCT condition_id), coalesce(sum(notional_usd), 0), min(ts) "  # noqa: S608
+        f"FROM corpus_trades WHERE wallet_address = ? AND ts <= ?{_plat(conn, 'corpus_trades')}",
         (wallet, anchor),
     ).fetchone()
     return int(row[0]), float(row[1]), int(row[2])
@@ -235,7 +259,9 @@ def build_features(
 
 
 _ACTIVITY_PAGE = 500
-_ACTIVITY_OFFSET_CAP = 10_000
+# Polymarket rejects /activity pagination at this offset with HTTP 400 (see poly/data.py).
+_ACTIVITY_OFFSET_CAP = 3_000
+_HTTP_BAD_REQUEST = 400
 
 
 class ProvenanceCache:
@@ -247,24 +273,27 @@ class ProvenanceCache:
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS wallet_provenance ("
             " wallet TEXT PRIMARY KEY, first_activity_ts INTEGER, n_events INTEGER,"
-            " fetched_at INTEGER NOT NULL)"
+            " truncated INTEGER NOT NULL DEFAULT 0, fetched_at INTEGER NOT NULL)"
         )
         self._conn.commit()
 
     def get(self, wallet: str) -> Provenance | None:
         """Return the cached row for ``wallet`` or ``None``."""
         row = self._conn.execute(
-            "SELECT first_activity_ts, n_events FROM wallet_provenance WHERE wallet = ?", (wallet,)
+            "SELECT first_activity_ts, n_events, truncated FROM wallet_provenance WHERE wallet = ?",
+            (wallet,),
         ).fetchone()
         if row is None:
             return None
-        return Provenance(wallet=wallet, first_activity_ts=row[0], n_events=row[1])
+        return Provenance(
+            wallet=wallet, first_activity_ts=row[0], n_events=row[1], truncated=bool(row[2])
+        )
 
     def put(self, p: Provenance) -> None:
         """Insert or replace ``p``."""
         self._conn.execute(
-            "INSERT OR REPLACE INTO wallet_provenance VALUES (?,?,?,?)",
-            (p.wallet, p.first_activity_ts, p.n_events, int(time.time())),
+            "INSERT OR REPLACE INTO wallet_provenance VALUES (?,?,?,?,?)",
+            (p.wallet, p.first_activity_ts, p.n_events, int(p.truncated), int(time.time())),
         )
         self._conn.commit()
 
@@ -305,8 +334,16 @@ async def fetch_provenance_api(client: DataClient, wallet: str) -> Provenance:
     offset = 0
     n = 0
     earliest: int | None = None
-    while offset < _ACTIVITY_OFFSET_CAP:
-        page = await client.get_activity(wallet, limit=_ACTIVITY_PAGE, offset=offset)
+    truncated = False
+    while True:
+        try:
+            page = await client.get_activity(wallet, limit=_ACTIVITY_PAGE, offset=offset)
+        except httpx.HTTPStatusError as exc:
+            capped = exc.response.status_code == _HTTP_BAD_REQUEST
+            if capped and offset >= _ACTIVITY_OFFSET_CAP:
+                truncated = True
+                break
+            raise
         for e in page:
             n += 1
             ts = e.get("timestamp")
@@ -315,15 +352,17 @@ async def fetch_provenance_api(client: DataClient, wallet: str) -> Provenance:
         if len(page) < _ACTIVITY_PAGE:
             break
         offset += _ACTIVITY_PAGE
-    return Provenance(wallet=wallet, first_activity_ts=earliest, n_events=n)
+    return Provenance(wallet=wallet, first_activity_ts=earliest, n_events=n, truncated=truncated)
 
 
 def load_market_rows(conn: sqlite3.Connection) -> list[MarketRow]:
     """Every resolved corpus market (the control universe)."""
+    join_plat = " AND r.platform = m.platform" if _has_platform(conn, "market_resolutions") else ""
     rows = conn.execute(
-        "SELECT m.condition_id, m.market_slug, m.category, m.total_volume_usd,"
-        " r.resolved_at, r.outcome_yes_won, m.truncated_at_offset_cap"
+        "SELECT m.condition_id, m.market_slug, m.category, m.total_volume_usd,"  # noqa: S608
+        " r.resolved_at, r.outcome_yes_won, m.truncated_at_offset_cap, m.event_slug"
         " FROM corpus_markets m JOIN market_resolutions r ON r.condition_id = m.condition_id"
+        f"{join_plat} WHERE 1 = 1{_plat(conn, 'corpus_markets', 'm')}"
     ).fetchall()
     return [
         MarketRow(
@@ -334,6 +373,7 @@ def load_market_rows(conn: sqlite3.Connection) -> list[MarketRow]:
             resolved_at=int(r[4]),
             yes_won=int(r[5]),
             truncated=bool(r[6]),
+            event_slug=str(r[7] or ""),
         )
         for r in rows
     ]
@@ -352,8 +392,8 @@ def diagnose_missing(
     if primary is None or primary.condition_id is None or market_row is None:
         return CoverageRow(case.id, wallet, "market_below_volume_floor", "primary market absent")
     rows = conn.execute(
-        "SELECT ts, outcome_side, bs FROM corpus_trades"
-        " WHERE wallet_address = ? AND condition_id = ? ORDER BY ts",
+        "SELECT ts, outcome_side, bs FROM corpus_trades"  # noqa: S608
+        f" WHERE wallet_address = ? AND condition_id = ?{_plat(conn, 'corpus_trades')} ORDER BY ts",
         (wallet, primary.condition_id),
     ).fetchall()
     if not rows:
@@ -407,36 +447,55 @@ def _side(m: MarketRow) -> str:
     return "YES" if m.yes_won else "NO"
 
 
-def _control_anchors(
-    conn: sqlite3.Connection, controls: list[MarketRow]
-) -> list[tuple[MarketRow, int]]:
-    """Controls paired with their auto anchor; controls without one are dropped."""
-    out: list[tuple[MarketRow, int]] = []
-    for ctl in controls:
-        anchor = _auto_anchor_for(conn, ctl.condition_id, _side(ctl), ctl.resolved_at)
-        if anchor is not None:
-            out.append((ctl, anchor))
-    return out
-
-
 def _window_candidates(
     conn: sqlite3.Connection, condition_id: str, side: str, anchor: int, window_hours: int
 ) -> list[str]:
     return candidate_wallets(extract_window(conn, condition_id, anchor, window_hours), side)
 
 
+ControlPlan = dict[str, list[tuple[MarketRow, int]]]
+
+
+def plan_controls(
+    conn: sqlite3.Connection,
+    cases: list[PublicCase],
+    universe: list[MarketRow],
+    excluded: set[str],
+    *,
+    k: int,
+) -> ControlPlan:
+    """Match controls per case and compute each control's auto anchor exactly once."""
+    rows = {m.condition_id: m for m in universe}
+    anchor_memo: dict[str, int | None] = {}
+    plan: ControlPlan = {}
+    for case in cases:
+        primary = case.primary
+        prow = rows.get(primary.condition_id) if primary and primary.condition_id else None
+        if prow is None:
+            plan[case.id] = []
+            continue
+        pairs: list[tuple[MarketRow, int]] = []
+        for ctl in match_controls(prow, universe, excluded, k=k):
+            if ctl.condition_id not in anchor_memo:
+                anchor_memo[ctl.condition_id] = _auto_anchor_for(
+                    conn, ctl.condition_id, _side(ctl), ctl.resolved_at
+                )
+            anchor = anchor_memo[ctl.condition_id]
+            if anchor is not None:
+                pairs.append((ctl, anchor))
+        plan[case.id] = pairs
+    return plan
+
+
 def collect_candidates(
     conn: sqlite3.Connection,
     cases: list[PublicCase],
     window_hours: int,
-    universe: list[MarketRow],
     *,
-    excluded: set[str],
-    controls_per_case: int,
+    controls: ControlPlan,
     auto_anchors: dict[str, int | None],
 ) -> set[str]:
     """Every wallet that scoring will touch, so provenance is fetched once up front."""
-    rows = {m.condition_id: m for m in universe}
     out: set[str] = set()
     for case in cases:
         for ref in case.markets:
@@ -447,37 +506,27 @@ def collect_candidates(
                     )
                 )
         primary = case.primary
-        if primary is None or primary.condition_id is None:
-            continue
         aa = auto_anchors.get(case.id)
-        if aa is not None:
+        if primary is not None and primary.condition_id is not None and aa is not None:
             out.update(
                 _window_candidates(
                     conn, primary.condition_id, primary.winning_side, aa, window_hours
                 )
             )
-        prow = rows.get(primary.condition_id)
-        if prow is None:
-            continue
-        controls = match_controls(prow, universe, excluded, k=controls_per_case)
-        for ctl, anchor in _control_anchors(conn, controls):
+        for ctl, anchor in controls.get(case.id, []):
             out.update(_window_candidates(conn, ctl.condition_id, _side(ctl), anchor, window_hours))
     return out
 
 
 def _run_controls(
     conn: sqlite3.Connection,
-    prow: MarketRow,
-    universe: list[MarketRow],
-    excluded: set[str],
+    controls: list[tuple[MarketRow, int]],
     *,
-    k: int,
     window_hours: int,
     prov: dict[str, Provenance],
 ) -> list[ControlResult]:
     out: list[ControlResult] = []
-    controls = match_controls(prow, universe, excluded, k=k)
-    for ctl, anchor in _control_anchors(conn, controls):
+    for ctl, anchor in controls:
         ref = MarketRef(
             slug=ctl.slug, winning_side=_side(ctl), role="control", condition_id=ctl.condition_id
         )
@@ -492,44 +541,46 @@ def run_case(
     sealed: SealedCase | None,
     *,
     window_hours: int,
-    universe: list[MarketRow],
-    excluded: set[str],
-    controls_per_case: int,
+    controls: list[tuple[MarketRow, int]],
     prov: dict[str, Provenance],
     auto_anchor_ts: int | None,
 ) -> CaseReport:
-    """Rank every resolved market of ``case``, its controls, and blind-test if holdout."""
-    rows = {m.condition_id: m for m in universe}
+    """Rank every resolved market of ``case`` and its controls; blind-test published wallets.
+
+    Every primary-role market is compared under every anchor it was ranked
+    under. Dev cases are labelled in-sample.
+    """
     results = [
         run_market(conn, ref, "news", case.news_ts, window_hours, prov)
         for ref in case.markets
         if ref.condition_id is not None
     ]
-    controls: list[ControlResult] = []
+    control_results: list[ControlResult] = []
     blind: list[BlindResult] = []
     primary = case.primary
     if primary is not None and primary.condition_id is not None:
         if auto_anchor_ts is not None:
             results.append(run_market(conn, primary, "auto", auto_anchor_ts, window_hours, prov))
-        prow = rows.get(primary.condition_id)
-        if prow is not None:
-            controls = _run_controls(
-                conn,
-                prow,
-                universe,
-                excluded,
-                k=controls_per_case,
-                window_hours=window_hours,
-                prov=prov,
+        control_results = _run_controls(conn, controls, window_hours=window_hours, prov=prov)
+    if sealed is not None and sealed.wallets:
+        blind = [
+            compare_published(
+                case.id,
+                res.anchor_kind,
+                res.ranked,
+                sealed,
+                market_slug=res.ref.slug,
+                in_sample=case.split != "holdout",
             )
-        if case.split == "holdout" and sealed is not None and sealed.wallets:
-            blind = [
-                compare_published(case.id, res.anchor_kind, res.ranked, sealed)
-                for res in results
-                if res.ref.condition_id == primary.condition_id
-            ]
+            for res in results
+            if res.ref.role.startswith("primary")
+        ]
     return CaseReport(
-        case=case, results=results, controls=controls, blind=blind, auto_anchor_ts=auto_anchor_ts
+        case=case,
+        results=results,
+        controls=control_results,
+        blind=blind,
+        auto_anchor_ts=auto_anchor_ts,
     )
 
 
@@ -580,7 +631,12 @@ def _coverage(
     for case in cases:
         primary = case.primary
         prow = rows.get(primary.condition_id) if primary and primary.condition_id else None
-        for w in sealed.get(case.id, SealedCase(case.id, ())).wallets:
+        sealed_case = sealed.get(case.id, SealedCase(case.id, ()))
+        out += [
+            CoverageRow(case.id, label, "address_not_published", "no full address in sources")
+            for label in sealed_case.unpublished
+        ]
+        for w in sealed_case.wallets:
             row = diagnose_missing(conn, case, w, case.news_ts, window_hours, prow)
             if row is None:
                 continue
@@ -634,6 +690,21 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def _warn_late_anchors(cases: list[PublicCase], rows: dict[str, MarketRow]) -> None:
+    """Print a warning for any case whose news anchor falls after its primary resolved."""
+    for c in cases:
+        p = c.primary
+        if p is None or p.condition_id is None or p.condition_id not in rows:
+            continue
+        resolved = rows[p.condition_id].resolved_at
+        if c.news_ts > resolved:
+            hours = (c.news_ts - resolved) / 3600
+            print(
+                f"[{c.id}] WARNING: news anchor is {hours:.1f}h after resolution of {p.slug};"
+                " the pre-news window is empty"
+            )
+
+
 def _auto_anchors(
     conn: sqlite3.Connection, cases: list[PublicCase], rows: dict[str, MarketRow]
 ) -> dict[str, int | None]:
@@ -676,22 +747,19 @@ def _run(
     cases = [_resolve_case(conn, c) for c in selected if c.analyzable]
     universe = load_market_rows(conn)
     rows = {m.condition_id: m for m in universe}
-    excluded = {
+    registry_cids = {
         m.condition_id
         for c in (_resolve_case(conn, x) for x in public if x.analyzable)
         for m in c.markets
         if m.condition_id
     }
+    excluded = sibling_exclusions(universe, registry_cids)
+    _warn_late_anchors(cases, rows)
     auto_anchors = _auto_anchors(conn, cases, rows)
+    controls = plan_controls(conn, cases, universe, excluded, k=args.controls_per_case)
     wanted = sorted(
         collect_candidates(
-            conn,
-            cases,
-            args.window_hours,
-            universe,
-            excluded=excluded,
-            controls_per_case=args.controls_per_case,
-            auto_anchors=auto_anchors,
+            conn, cases, args.window_hours, controls=controls, auto_anchors=auto_anchors
         )
     )
     print(f"{len(cases)} cases, {len(wanted)} wallets need provenance")
@@ -702,9 +770,7 @@ def _run(
             c,
             sealed.get(c.id),
             window_hours=args.window_hours,
-            universe=universe,
-            excluded=excluded,
-            controls_per_case=args.controls_per_case,
+            controls=controls.get(c.id, []),
             prov=prov,
             auto_anchor_ts=auto_anchors.get(c.id),
         )

@@ -53,10 +53,15 @@ class PublicCase:
 
 @dataclass(frozen=True, slots=True)
 class SealedCase:
-    """Published wallet addresses. Read only by the blind-test comparator."""
+    """Published wallet addresses. Read only by the blind-test comparator and coverage audit.
+
+    ``unpublished`` holds labels (usernames, truncated prefixes) of published
+    wallets that have no full address and so can never be ranked.
+    """
 
     id: str
     wallets: tuple[str, ...]
+    unpublished: tuple[str, ...] = ()
 
 
 def select_cases(cases: list[PublicCase], split: str, *, scorer_frozen: bool) -> list[PublicCase]:
@@ -156,10 +161,15 @@ def auto_anchor(
     best_start: int | None = None
     horizon = horizon_hours * 3600
     for i, b in enumerate(pre):
-        later = [x.side_prob_vwap for x in pre[i + 1 :] if x.hour_start <= b.hour_start + horizon]
-        if not later:
+        limit = b.hour_start + horizon
+        peak: float | None = None
+        for x in pre[i + 1 :]:
+            if x.hour_start > limit:
+                break
+            peak = x.side_prob_vwap if peak is None else max(peak, x.side_prob_vwap)
+        if peak is None:
             continue
-        move = max(later) - b.side_prob_vwap
+        move = peak - b.side_prob_vwap
         if move >= best_move and move > 0:
             best_move = move
             best_start = b.hour_start
@@ -215,6 +225,7 @@ class Provenance:
     wallet: str
     first_activity_ts: int | None
     n_events: int | None
+    truncated: bool = False
 
 
 _FRESH_PLATEAU_DAYS = 10.0
@@ -226,11 +237,15 @@ _SECONDS_PER_DAY = 86_400
 
 
 def age_days(f: WalletFeatures, p: Provenance | None) -> float:
-    """Wallet age at its first window buy, in days; data-api first, corpus fallback."""
+    """Wallet age at its first window buy, in days.
+
+    Both the data-api first activity and the corpus first trade are lower
+    bounds on the wallet's true first activity (the API walk may be truncated
+    to recent events), so the earlier of the two is used.
+    """
+    first = f.corpus_first_ts
     if p is not None and p.first_activity_ts is not None:
-        first = p.first_activity_ts
-    else:
-        first = f.corpus_first_ts
+        first = min(first, p.first_activity_ts)
     return max(0.0, (f.first_buy_ts - first) / _SECONDS_PER_DAY)
 
 
@@ -282,6 +297,8 @@ class BlindResult:
     ranks: dict[str, int | None]
     best_rank: int | None
     passed: bool | None
+    market_slug: str = ""
+    in_sample: bool = False
 
 
 def compare_published(
@@ -290,9 +307,14 @@ def compare_published(
     ranked: list[ScoredWallet],
     sealed: SealedCase,
     *,
+    market_slug: str = "",
+    in_sample: bool = False,
     pass_rank: int = 10,
 ) -> BlindResult:
-    """Look up each published wallet's rank. ``passed`` is None if none are candidates."""
+    """Look up each published wallet's rank. ``passed`` is None if none are candidates.
+
+    ``in_sample`` marks dev-split cases, whose wallets informed the scorer design.
+    """
     by_wallet = {r.features.wallet.lower(): r.rank for r in ranked}
     ranks = {w.lower(): by_wallet.get(w.lower()) for w in sealed.wallets}
     found = [r for r in ranks.values() if r is not None]
@@ -304,6 +326,8 @@ def compare_published(
         ranks=ranks,
         best_rank=best,
         passed=None if best is None else best <= pass_rank,
+        market_slug=market_slug,
+        in_sample=in_sample,
     )
 
 
@@ -322,6 +346,19 @@ class MarketRow:
     resolved_at: int
     yes_won: int
     truncated: bool
+    event_slug: str = ""
+
+
+def sibling_exclusions(universe: list[MarketRow], registry_cids: set[str]) -> set[str]:
+    """Registry markets plus every market sharing an ``event_slug`` with one of them.
+
+    Siblings of a case event (date ladders, adjacent deadlines) carry the same
+    news and the same insiders, so they must never serve as controls.
+    """
+    slugs = {m.event_slug for m in universe if m.condition_id in registry_cids and m.event_slug}
+    out = set(registry_cids)
+    out.update(m.condition_id for m in universe if m.event_slug and m.event_slug in slugs)
+    return out
 
 
 def match_controls(
@@ -489,17 +526,32 @@ def _render_controls(r: CaseReport) -> list[str]:
     return [*out, ""]
 
 
+_MIN_CANDIDATES_FOR_MEDIAN = 10
+_TOP_FLAGS = (5, 10, 25)
+
+
+def _rank_text(rank: int | None, n: int) -> str:
+    if rank is None:
+        return "not a candidate"
+    pct = 100.0 * rank / n if n else 0.0
+    tops = [f"top {k}" for k in _TOP_FLAGS if rank <= k]
+    flag = f"; {', '.join(tops)}" if tops else ""
+    return f"{rank} / {n} (top {pct:.1f}%{flag})"
+
+
 def _render_blind(blind: list[BlindResult]) -> list[str]:
-    out = ["## Blind test", ""]
+    label = " (in-sample: dev split)" if all(b.in_sample for b in blind) else ""
+    out = [f"## Blind test{label}", ""]
     for b in blind:
         if b.passed is None:
             verdict = "no published wallet among candidates"
         else:
             verdict = "PASS" if b.passed else "FAIL"
-        out.append(f"- {b.anchor_kind} anchor: {verdict}; {b.n_candidates} candidates")
+        out.append(
+            f"- `{b.market_slug}` · {b.anchor_kind} anchor: {verdict}; {b.n_candidates} candidates"
+        )
         for w, rank in b.ranks.items():
-            where = "not a candidate" if rank is None else f"{rank} / {b.n_candidates}"
-            out.append(f"  - `{w}`: {where}")
+            out.append(f"  - `{w}`: {_rank_text(rank, b.n_candidates)}")
     return [*out, ""]
 
 
@@ -532,24 +584,65 @@ def render_case_report(r: CaseReport) -> str:
     return "\n".join(out)
 
 
-def _fmt_blind(b: BlindResult | None) -> str:
-    if b is None:
-        return "—"
-    return "n/a" if b.best_rank is None else str(b.best_rank)
+def _fmt_rank(best: int | None) -> str:
+    return "—" if best is None else str(best)
+
+
+def case_best_rank(r: CaseReport, kind: str) -> tuple[int | None, list[str]]:
+    """Best published-wallet rank across the case's primary markets under ``kind``.
+
+    Markets with fewer than ten candidates are excluded from the best rank
+    and returned as the second element so the summary can say so.
+    """
+    best: int | None = None
+    small: list[str] = []
+    for b in r.blind:
+        if b.anchor_kind != kind or b.best_rank is None:
+            continue
+        if b.n_candidates < _MIN_CANDIDATES_FOR_MEDIAN:
+            small.append(b.market_slug)
+            continue
+        best = b.best_rank if best is None else min(best, b.best_rank)
+    return best, small
+
+
+def _median_lines(reports: list[CaseReport], kind: str) -> list[str]:
+    holdout: list[int] = []
+    everyone: list[int] = []
+    for r in reports:
+        best, _ = case_best_rank(r, kind)
+        if best is None:
+            continue
+        everyone.append(best)
+        if r.case.split == "holdout":
+            holdout.append(best)
+    med_h = f"{statistics.median(holdout):.0f}" if holdout else "n/a"
+    lines = [f"Median best rank ({kind} anchor, holdout, {len(holdout)} testable cases): {med_h}"]
+    if len(holdout) < _LOO_THRESHOLD:
+        med_a = f"{statistics.median(everyone):.0f}" if everyone else "n/a"
+        lines.append(
+            f"  Fewer than three testable holdout cases: leave-one-out fallback reports the median"
+            f" over all testable cases, {len(everyone)}: {med_a}. Dev cases are in-sample"
+            " (their wallets informed the scorer design) and the scorer has no fitted"
+            " parameters, so this is weaker than a true held-out result."
+        )
+    small = [(r.case.id, s) for r in reports for s in case_best_rank(r, kind)[1]]
+    if small:
+        lines.append(
+            "  Excluded from the median (fewer than 10 candidates): "
+            + ", ".join(f"{cid} `{s}`" for cid, s in small)
+        )
+    return lines
+
+
+_LOO_THRESHOLD = 3
 
 
 def render_summary(reports: list[CaseReport], coverage: list[CoverageRow]) -> str:
     """Cross-case summary: blind-test medians, anchor gaps, and the coverage audit."""
     out = ["# Insider-episode catalogue: summary", ""]
     for kind in ("news", "auto"):
-        best = [
-            b.best_rank
-            for r in reports
-            for b in r.blind
-            if b.anchor_kind == kind and b.best_rank is not None
-        ]
-        med = f"{statistics.median(best):.0f}" if best else "n/a"
-        out.append(f"Median best rank ({kind} anchor, {len(best)} testable holdout cases): {med}")
+        out += _median_lines(reports, kind)
     gaps = sorted(
         (r.auto_anchor_ts - r.case.news_ts) / 3600 for r in reports if r.auto_anchor_ts is not None
     )
@@ -563,11 +656,12 @@ def render_summary(reports: list[CaseReport], coverage: list[CoverageRow]) -> st
     ]
     for r in reports:
         n = len(_primary_news_ranking(r))
-        bn = next((b for b in r.blind if b.anchor_kind == "news"), None)
-        ba = next((b for b in r.blind if b.anchor_kind == "auto"), None)
+        bn, _ = case_best_rank(r, "news")
+        ba, _ = case_best_rank(r, "auto")
+        tag = " (in-sample)" if r.case.split != "holdout" and bn is not None else ""
         out.append(
             f"| {r.case.id} | {r.case.split} | {r.case.confidence} | {n} |"
-            f" {_fmt_blind(bn)} | {_fmt_blind(ba)} |"
+            f" {_fmt_rank(bn)}{tag} | {_fmt_rank(ba)} |"
         )
     out += [
         "",

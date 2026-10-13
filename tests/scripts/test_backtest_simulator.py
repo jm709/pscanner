@@ -649,15 +649,30 @@ def test_main_causal_select_top_frac_policy(corpus_factory, capsys, tmp_path) ->
         ("B", "n2", "YES", "BUY", 0.50, 100.0, day + 110),
     ]
     resolutions = [
-        ("h1", 1, 50), ("h2", 1, 60), ("h3", 0, 50), ("h4", 0, 60),
-        ("n1", 1, day + 300), ("n2", 1, day + 300),
+        ("h1", 1, 50),
+        ("h2", 1, 60),
+        ("h3", 0, 50),
+        ("h4", 0, 60),
+        ("n1", 1, day + 300),
+        ("n2", 1, day + 300),
     ]
     db = corpus_factory(trades, resolutions)
     csv_path = tmp_path / "frac.csv"
-    rc = main([
-        "--db", str(db), "--causal-select", "--min-resolved", "2",
-        "--rebalance-days", "1", "--copy-top-frac", "1.0", "--csv", str(csv_path),
-    ])
+    rc = main(
+        [
+            "--db",
+            str(db),
+            "--causal-select",
+            "--min-resolved",
+            "2",
+            "--rebalance-days",
+            "1",
+            "--copy-top-frac",
+            "1.0",
+            "--csv",
+            str(csv_path),
+        ]
+    )
     out = capsys.readouterr().out
     assert rc == 0
     assert "top_frac=1.0" in out  # policy threaded through to the header

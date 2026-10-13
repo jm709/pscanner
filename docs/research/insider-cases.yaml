@@ -665,9 +665,12 @@ cases:
   split: dev
   analyzable: true
   event_date: 2026-01-31
-  news_ts_utc: '2026-02-28T06:15:00Z'
-  news_ts_precision: minute
-  news_ts_notes: No strike occurred by Jan 31; the eventual strike was Feb 28 (see us-israel-strikes-iran-2026-02-28).
+  news_ts_utc: '2026-01-07T06:00:00Z'
+  news_ts_precision: hour
+  news_ts_notes: 'Negative example: there is no news event. The anchor is the morning of 2026-01-07 (ricosuave666
+    reactivation at 05:42 UTC, flagged by Lookonchain), so the 72h window holds the suspected fresh-wallet YES buying
+    that then lost. Previously anchored at the Feb 28 strike, which is after this market resolved (2026-02-01) and
+    gave an empty window. Changed 2026-10-13, dev split, before the holdout run.'
   winning_side: NO for the Jan 31 markets (insider-suspected YES bets lost); YES for Mar 31
   corpus_markets:
   - market_slug: us-strikes-iran-by-january-31-2026-165
