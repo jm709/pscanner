@@ -11,6 +11,9 @@ Spec: docs/superpowers/specs/2026-10-11-insider-episode-catalogue-design.md
 
 from __future__ import annotations
 
+import argparse
+import asyncio
+import csv
 import datetime as dt
 import re
 import sqlite3
@@ -30,14 +33,28 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from scripts.insider_episode_lib import (  # noqa: E402  (after sys.path bootstrap)
+    BlindResult,
+    CaseReport,
+    ControlResult,
     CoverageRow,
+    HoldoutLockedError,
     MarketRef,
+    MarketResult,
     MarketRow,
     Provenance,
     PublicCase,
     SealedCase,
     WalletFeatures,
     WindowTrade,
+    auto_anchor,
+    compare_published,
+    csv_rows,
+    hourly_buckets,
+    match_controls,
+    rank_wallets,
+    render_case_report,
+    render_summary,
+    select_cases,
     window_features,
 )
 
@@ -353,3 +370,374 @@ def diagnose_missing(
         return None
     detail = f"{len(in_window)} window trades, none buying {primary.winning_side}"
     return CoverageRow(case.id, wallet, "losing_side_only", detail)
+
+
+def run_market(
+    conn: sqlite3.Connection,
+    ref: MarketRef,
+    anchor_kind: str,
+    anchor: int,
+    window_hours: int,
+    prov: dict[str, Provenance],
+) -> MarketResult:
+    """Extract, featurize, and rank one market under one anchor."""
+    if ref.condition_id is None:
+        msg = f"market {ref.slug} was not resolved against the corpus"
+        raise ValueError(msg)
+    trades = extract_window(conn, ref.condition_id, anchor, window_hours)
+    wallets = candidate_wallets(trades, ref.winning_side)
+    feats = build_features(conn, trades, wallets, ref.winning_side, anchor)
+    return MarketResult(
+        ref=ref,
+        anchor_kind=anchor_kind,
+        anchor_ts=anchor,
+        ranked=rank_wallets(feats, prov),
+        n_window_trades=len(trades),
+        window_volume=sum(t.notional for t in trades),
+    )
+
+
+def _auto_anchor_for(
+    conn: sqlite3.Connection, condition_id: str, side: str, resolved_at: int
+) -> int | None:
+    return auto_anchor(hourly_buckets(market_trades(conn, condition_id), side), resolved_at)
+
+
+def _side(m: MarketRow) -> str:
+    return "YES" if m.yes_won else "NO"
+
+
+def _control_anchors(
+    conn: sqlite3.Connection, controls: list[MarketRow]
+) -> list[tuple[MarketRow, int]]:
+    """Controls paired with their auto anchor; controls without one are dropped."""
+    out: list[tuple[MarketRow, int]] = []
+    for ctl in controls:
+        anchor = _auto_anchor_for(conn, ctl.condition_id, _side(ctl), ctl.resolved_at)
+        if anchor is not None:
+            out.append((ctl, anchor))
+    return out
+
+
+def _window_candidates(
+    conn: sqlite3.Connection, condition_id: str, side: str, anchor: int, window_hours: int
+) -> list[str]:
+    return candidate_wallets(extract_window(conn, condition_id, anchor, window_hours), side)
+
+
+def collect_candidates(
+    conn: sqlite3.Connection,
+    cases: list[PublicCase],
+    window_hours: int,
+    universe: list[MarketRow],
+    *,
+    excluded: set[str],
+    controls_per_case: int,
+    auto_anchors: dict[str, int | None],
+) -> set[str]:
+    """Every wallet that scoring will touch, so provenance is fetched once up front."""
+    rows = {m.condition_id: m for m in universe}
+    out: set[str] = set()
+    for case in cases:
+        for ref in case.markets:
+            if ref.condition_id is not None:
+                out.update(
+                    _window_candidates(
+                        conn, ref.condition_id, ref.winning_side, case.news_ts, window_hours
+                    )
+                )
+        primary = case.primary
+        if primary is None or primary.condition_id is None:
+            continue
+        aa = auto_anchors.get(case.id)
+        if aa is not None:
+            out.update(
+                _window_candidates(
+                    conn, primary.condition_id, primary.winning_side, aa, window_hours
+                )
+            )
+        prow = rows.get(primary.condition_id)
+        if prow is None:
+            continue
+        controls = match_controls(prow, universe, excluded, k=controls_per_case)
+        for ctl, anchor in _control_anchors(conn, controls):
+            out.update(_window_candidates(conn, ctl.condition_id, _side(ctl), anchor, window_hours))
+    return out
+
+
+def _run_controls(
+    conn: sqlite3.Connection,
+    prow: MarketRow,
+    universe: list[MarketRow],
+    excluded: set[str],
+    *,
+    k: int,
+    window_hours: int,
+    prov: dict[str, Provenance],
+) -> list[ControlResult]:
+    out: list[ControlResult] = []
+    controls = match_controls(prow, universe, excluded, k=k)
+    for ctl, anchor in _control_anchors(conn, controls):
+        ref = MarketRef(
+            slug=ctl.slug, winning_side=_side(ctl), role="control", condition_id=ctl.condition_id
+        )
+        ranked = run_market(conn, ref, "auto", anchor, window_hours, prov).ranked
+        out.append(ControlResult(ctl, anchor, ranked))
+    return out
+
+
+def run_case(
+    conn: sqlite3.Connection,
+    case: PublicCase,
+    sealed: SealedCase | None,
+    *,
+    window_hours: int,
+    universe: list[MarketRow],
+    excluded: set[str],
+    controls_per_case: int,
+    prov: dict[str, Provenance],
+    auto_anchor_ts: int | None,
+) -> CaseReport:
+    """Rank every resolved market of ``case``, its controls, and blind-test if holdout."""
+    rows = {m.condition_id: m for m in universe}
+    results = [
+        run_market(conn, ref, "news", case.news_ts, window_hours, prov)
+        for ref in case.markets
+        if ref.condition_id is not None
+    ]
+    controls: list[ControlResult] = []
+    blind: list[BlindResult] = []
+    primary = case.primary
+    if primary is not None and primary.condition_id is not None:
+        if auto_anchor_ts is not None:
+            results.append(run_market(conn, primary, "auto", auto_anchor_ts, window_hours, prov))
+        prow = rows.get(primary.condition_id)
+        if prow is not None:
+            controls = _run_controls(
+                conn,
+                prow,
+                universe,
+                excluded,
+                k=controls_per_case,
+                window_hours=window_hours,
+                prov=prov,
+            )
+        if case.split == "holdout" and sealed is not None and sealed.wallets:
+            blind = [
+                compare_published(case.id, res.anchor_kind, res.ranked, sealed)
+                for res in results
+                if res.ref.condition_id == primary.condition_id
+            ]
+    return CaseReport(
+        case=case, results=results, controls=controls, blind=blind, auto_anchor_ts=auto_anchor_ts
+    )
+
+
+def _registry_stakes(path: Path) -> dict[str, dict[str, float]]:
+    """``{case_id: {wallet: stake_usd}}`` for wallets whose stake is recorded in the registry."""
+    doc = yaml.safe_load(path.read_text())
+    out: dict[str, dict[str, float]] = {}
+    for raw in doc["cases"]:
+        for w in raw.get("wallets") or []:
+            addr, stake = w.get("address"), w.get("stake_usd")
+            if isinstance(addr, str) and isinstance(stake, (int, float)):
+                out.setdefault(str(raw["id"]), {})[addr.strip().lower()] = float(stake)
+    return out
+
+
+def _resolve_case(conn: sqlite3.Connection, case: PublicCase) -> PublicCase:
+    resolved: list[MarketRef] = []
+    for ref in case.markets:
+        try:
+            resolved.append(resolve_market(conn, ref))
+        except LookupError as exc:
+            print(f"[{case.id}] {exc}; skipping market")
+    return PublicCase(
+        id=case.id,
+        name=case.name,
+        split=case.split,
+        confidence=case.confidence,
+        analyzable=case.analyzable,
+        news_ts=case.news_ts,
+        news_precision=case.news_precision,
+        markets=tuple(resolved),
+    )
+
+
+_NOTIONAL_FLOOR_USD = 10.0
+
+
+def _coverage(
+    conn: sqlite3.Connection,
+    cases: list[PublicCase],
+    sealed: dict[str, SealedCase],
+    stakes: dict[str, dict[str, float]],
+    *,
+    window_hours: int,
+    rows: dict[str, MarketRow],
+) -> list[CoverageRow]:
+    out: list[CoverageRow] = []
+    for case in cases:
+        primary = case.primary
+        prow = rows.get(primary.condition_id) if primary and primary.condition_id else None
+        for w in sealed.get(case.id, SealedCase(case.id, ())).wallets:
+            row = diagnose_missing(conn, case, w, case.news_ts, window_hours, prow)
+            if row is None:
+                continue
+            stake = stakes.get(case.id, {}).get(w)
+            if (
+                row.reason == "no_trades_in_market"
+                and stake is not None
+                and stake < _NOTIONAL_FLOOR_USD
+            ):
+                detail = "registry stake under the $10 corpus floor (inferred)"
+                row = CoverageRow(row.case_id, row.wallet, "below_notional_floor", detail)
+            out.append(row)
+    return out
+
+
+async def _fetch_all(cache: ProvenanceCache, wallets: list[str], rpm: int) -> dict[str, Provenance]:
+    client = DataClient(rpm=rpm)
+    try:
+        return await enrich_provenance(cache, wallets, lambda w: fetch_provenance_api(client, w))
+    finally:
+        await client.aclose()
+
+
+def _provenance(args: argparse.Namespace, wallets: list[str]) -> dict[str, Provenance]:
+    """Cache-only when ``--skip-provenance``; otherwise fetch misses through the data-api."""
+    cache = ProvenanceCache(Path(args.provenance_cache))
+    try:
+        if args.skip_provenance:
+            return {w: p for w in wallets if (p := cache.get(w)) is not None}
+        return asyncio.run(_fetch_all(cache, wallets, args.provenance_rpm))
+    finally:
+        cache.close()
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument("--db", default="data/corpus.sqlite3")
+    p.add_argument("--registry", default="docs/research/insider-cases.yaml")
+    p.add_argument("--out-dir", default="docs/research/insider-episodes")
+    p.add_argument("--window-hours", type=int, default=72)
+    p.add_argument("--controls-per-case", type=int, default=5)
+    p.add_argument("--split", choices=("dev", "holdout", "all"), default="dev")
+    p.add_argument(
+        "--scorer-frozen", action="store_true", help="attest spec Amendment 1 is signed off"
+    )
+    p.add_argument("--skip-provenance", action="store_true", help="use cached provenance only")
+    p.add_argument("--provenance-cache", default="data/insider_provenance.sqlite3")
+    p.add_argument("--provenance-rpm", type=int, default=60)
+    return p.parse_args(argv)
+
+
+def _auto_anchors(
+    conn: sqlite3.Connection, cases: list[PublicCase], rows: dict[str, MarketRow]
+) -> dict[str, int | None]:
+    out: dict[str, int | None] = {}
+    for c in cases:
+        p = c.primary
+        if p is None or p.condition_id is None or p.condition_id not in rows:
+            continue
+        out[c.id] = _auto_anchor_for(
+            conn, p.condition_id, p.winning_side, rows[p.condition_id].resolved_at
+        )
+    return out
+
+
+def _write_outputs(out_dir: Path, reports: list[CaseReport], coverage: list[CoverageRow]) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for r in reports:
+        (out_dir / f"{r.case.id}.md").write_text(render_case_report(r))
+        prim = [
+            x for x in r.results if x.ref.role.startswith("primary") and x.anchor_kind == "news"
+        ]
+        n = len(prim[0].ranked) if prim else 0
+        best = [b.best_rank for b in r.blind]
+        print(f"[{r.case.id}] {n} candidates, {len(r.controls)} controls, blind={best}")
+    (out_dir / "SUMMARY.md").write_text(render_summary(reports, coverage))
+    rows_csv = csv_rows(reports)
+    with (out_dir / "scored_wallets.csv").open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(rows_csv[0]) if rows_csv else ["case_id"])
+        writer.writeheader()
+        writer.writerows(rows_csv)
+
+
+def _run(
+    conn: sqlite3.Connection,
+    args: argparse.Namespace,
+    public: list[PublicCase],
+    selected: list[PublicCase],
+    sealed: dict[str, SealedCase],
+) -> tuple[list[CaseReport], list[CoverageRow]]:
+    cases = [_resolve_case(conn, c) for c in selected if c.analyzable]
+    universe = load_market_rows(conn)
+    rows = {m.condition_id: m for m in universe}
+    excluded = {
+        m.condition_id
+        for c in (_resolve_case(conn, x) for x in public if x.analyzable)
+        for m in c.markets
+        if m.condition_id
+    }
+    auto_anchors = _auto_anchors(conn, cases, rows)
+    wanted = sorted(
+        collect_candidates(
+            conn,
+            cases,
+            args.window_hours,
+            universe,
+            excluded=excluded,
+            controls_per_case=args.controls_per_case,
+            auto_anchors=auto_anchors,
+        )
+    )
+    print(f"{len(cases)} cases, {len(wanted)} wallets need provenance")
+    prov = _provenance(args, wanted)
+    reports = [
+        run_case(
+            conn,
+            c,
+            sealed.get(c.id),
+            window_hours=args.window_hours,
+            universe=universe,
+            excluded=excluded,
+            controls_per_case=args.controls_per_case,
+            prov=prov,
+            auto_anchor_ts=auto_anchors.get(c.id),
+        )
+        for c in cases
+    ]
+    coverage = _coverage(
+        conn,
+        [_resolve_case(conn, c) for c in selected],
+        sealed,
+        _registry_stakes(Path(args.registry)),
+        window_hours=args.window_hours,
+        rows=rows,
+    )
+    return reports, coverage
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point."""
+    args = _parse_args(argv)
+    public, sealed = load_registry(Path(args.registry))
+    try:
+        selected = select_cases(public, args.split, scorer_frozen=args.scorer_frozen)
+    except HoldoutLockedError as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 2
+    conn = open_corpus(Path(args.db))
+    try:
+        reports, coverage = _run(conn, args, public, selected, sealed)
+    finally:
+        conn.close()
+    _write_outputs(Path(args.out_dir), reports, coverage)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

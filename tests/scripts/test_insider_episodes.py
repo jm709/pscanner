@@ -322,3 +322,122 @@ def test_diagnose_missing_reasons(corpus_factory) -> None:
         assert r.reason == "market_below_volume_floor"
     finally:
         conn.close()
+
+
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+
+from scripts.insider_episodes import main  # noqa: E402
+
+_E2E_REGISTRY = """
+registry_version: 1
+cases:
+  - id: dev-case
+    name: Dev Case
+    confidence: alleged
+    split: dev
+    analyzable: true
+    news_ts_utc: "1970-01-12T13:46:40Z"
+    news_ts_precision: minute
+    corpus_markets:
+      - market_slug: slug-m1
+        winning_side: "YES"
+        role: primary
+    wallets:
+      - address: "0x00000000000000000000000000000000000000aa"
+        stake_usd: 5
+  - id: hold-case
+    name: Hold Case
+    confidence: confirmed
+    split: holdout
+    analyzable: true
+    news_ts_utc: "1970-01-12T13:46:40Z"
+    news_ts_precision: minute
+    corpus_markets:
+      - market_slug: slug-m2
+        winning_side: "YES"
+        role: primary
+    wallets:
+      - address: "0x00000000000000000000000000000000000000bb"
+"""
+
+
+def _e2e_db(corpus_factory) -> Path:
+    bb = "0x00000000000000000000000000000000000000bb"
+    trades = [
+        # m1: a crowd; published 0x..aa never trades m1 -> no_trades + stake<10
+        ("w1", "m1", "YES", "BUY", 0.10, 500.0, ANCHOR - 10 * H),
+        ("w2", "m1", "YES", "BUY", 0.10, 100.0, ANCHOR - 9 * H),
+        ("w3", "m1", "YES", "BUY", 0.12, 50.0, ANCHOR - 8 * H),
+        # m2: published 0x..bb is the biggest fresh buyer -> rank 1
+        (bb, "m2", "YES", "BUY", 0.10, 9_000.0, ANCHOR - 20 * H),
+        ("mm", "m2", "YES", "BUY", 0.10, 9_500.0, ANCHOR - 30 * H),
+        ("mm", "ctl", "YES", "BUY", 0.50, 10.0, ANCHOR - 400 * 24 * H),  # old, broad wallet
+        ("z", "m2", "YES", "BUY", 0.10, 20.0, ANCHOR - 1 * H),
+        # ctl: a control market in the same category/volume band/era with a price jump
+        ("c1", "ctl", "YES", "BUY", 0.10, 100.0, ANCHOR - 50 * H),
+        ("c2", "ctl", "YES", "BUY", 0.40, 100.0, ANCHOR - 40 * H),
+        ("c3", "ctl", "YES", "BUY", 0.45, 100.0, ANCHOR - 30 * H),
+    ]
+    resolutions = [("m1", 1, ANCHOR + H), ("m2", 1, ANCHOR + H), ("ctl", 1, ANCHOR + 2 * H)]
+    markets = [
+        ("m1", "slug-m1", "geopolitics", 5e6, ANCHOR + H, 0),
+        ("m2", "slug-m2", "geopolitics", 5e6, ANCHOR + H, 0),
+        ("ctl", "slug-ctl", "geopolitics", 6e6, ANCHOR + 2 * H, 0),
+    ]
+    return corpus_factory(trades, resolutions, markets=markets)
+
+
+def _e2e_args(tmp_path: Path, db: Path, *extra: str) -> list[str]:
+    reg = tmp_path / "reg.yaml"
+    reg.write_text(_E2E_REGISTRY)
+    return [
+        "--db",
+        str(db),
+        "--registry",
+        str(reg),
+        "--out-dir",
+        str(tmp_path / "out"),
+        "--provenance-cache",
+        str(tmp_path / "prov.sqlite3"),
+        "--skip-provenance",
+        *extra,
+    ]
+
+
+def test_main_dev_run_writes_reports_and_coverage(tmp_path: Path, corpus_factory) -> None:
+    rc = main(_e2e_args(tmp_path, _e2e_db(corpus_factory)))
+    assert rc == 0
+    out = tmp_path / "out"
+    assert (out / "dev-case.md").exists()
+    assert not (out / "hold-case.md").exists()
+    summary = (out / "SUMMARY.md").read_text()
+    assert "below_notional_floor" in summary
+    assert (out / "scored_wallets.csv").read_text().count("\n") >= 4  # header + 3 m1 candidates
+
+
+def test_main_refuses_holdout_without_frozen_flag(tmp_path: Path, corpus_factory) -> None:
+    rc = main(_e2e_args(tmp_path, _e2e_db(corpus_factory), "--split", "holdout"))
+    assert rc == 2
+
+
+def test_main_holdout_blind_test_passes_on_fixture(tmp_path: Path, corpus_factory) -> None:
+    args = _e2e_args(tmp_path, _e2e_db(corpus_factory), "--split", "holdout", "--scorer-frozen")
+    rc = main(args)
+    assert rc == 0
+    text = (tmp_path / "out" / "hold-case.md").read_text()
+    assert "Blind test" in text
+    assert "PASS" in text
+    assert "slug-ctl" in text  # control matched
+
+
+def test_script_runs_as_subprocess(tmp_path: Path, corpus_factory) -> None:
+    args = _e2e_args(tmp_path, _e2e_db(corpus_factory))
+    proc = subprocess.run(  # noqa: S603  (fixed argv, test-controlled paths)
+        [sys.executable, "scripts/insider_episodes.py", *args],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=Path(__file__).resolve().parents[2],
+    )
+    assert proc.returncode == 0, proc.stderr
