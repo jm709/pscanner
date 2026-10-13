@@ -129,3 +129,40 @@ def test_auto_anchor_ignores_buckets_at_or_after_resolution() -> None:
 
 def test_auto_anchor_empty_input() -> None:
     assert auto_anchor([], resolved_at=1) is None
+
+
+from scripts.insider_episode_lib import window_features  # noqa: E402
+
+
+def _tr(wallet: str, ts: int, side: str, bs: str, price: float, notional: float) -> WindowTrade:
+    return WindowTrade(
+        wallet=wallet, ts=ts, outcome_side=side, bs=bs, price=price, notional=notional
+    )
+
+
+def test_window_features_sums_winning_buys_only() -> None:
+    trades = [
+        _tr("a", 100, "YES", "BUY", 0.10, 1000.0),
+        _tr("a", 200, "NO", "BUY", 0.80, 500.0),  # wrong side, ignored for n_w
+        _tr("a", 300, "YES", "SELL", 0.30, 200.0),  # sell, ignored
+        _tr("a", 400, "YES", "BUY", 0.20, 2000.0),
+        _tr("b", 150, "YES", "BUY", 0.10, 50.0),
+    ]
+    n_w, n_buys, first, last, flip = window_features(trades, "a", "YES")
+    assert n_w == 3000.0
+    assert n_buys == 2
+    assert (first, last) == (100, 400)
+    assert flip is False
+
+
+def test_window_features_flip_requires_opposing_sell_before_first_buy() -> None:
+    flipper = [
+        _tr("f", 100, "NO", "SELL", 0.90, 500.0),
+        _tr("f", 200, "YES", "BUY", 0.15, 1000.0),
+    ]
+    assert window_features(flipper, "f", "YES")[4] is True
+    late_sell = [
+        _tr("g", 100, "YES", "BUY", 0.15, 1000.0),
+        _tr("g", 200, "NO", "SELL", 0.90, 500.0),  # after the buy: not a flip
+    ]
+    assert window_features(late_sell, "g", "YES")[4] is False

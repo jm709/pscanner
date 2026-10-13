@@ -144,3 +144,37 @@ def test_market_trades_returns_full_history_in_order(corpus_factory) -> None:
         conn.close()
     assert [r.ts for r in rows] == sorted(r.ts for r in rows)
     assert len(rows) == 8
+
+
+from scripts.insider_episodes import build_features, lifetime_stats  # noqa: E402
+
+
+def test_lifetime_stats_filtered_to_anchor(corpus_factory) -> None:
+    trades = [
+        ("w", "m1", "YES", "BUY", 0.10, 100.0, 500),
+        ("w", "m2", "YES", "BUY", 0.10, 200.0, 600),
+        ("w", "m3", "YES", "BUY", 0.10, 400.0, 2000),  # after anchor: excluded
+    ]
+    db = corpus_factory(trades, [("m1", 1, 3000)])
+    conn = open_corpus(db)
+    try:
+        breadth, n_life, first_ts = lifetime_stats(conn, "w", anchor=1000)
+    finally:
+        conn.close()
+    assert (breadth, n_life, first_ts) == (2, 300.0, 500)
+
+
+def test_build_features_joins_window_and_lifetime(corpus_factory) -> None:
+    conn = open_corpus(_window_db(corpus_factory))
+    try:
+        trades = extract_window(conn, "m1", ANCHOR, 72)
+        feats = {f.wallet: f for f in build_features(conn, trades, ["w_in", "w_at"], "YES", ANCHOR)}
+    finally:
+        conn.close()
+    w_in = feats["w_in"]
+    assert w_in.n_w == 500.0
+    assert w_in.n_buys == 2
+    assert w_in.breadth == 1
+    assert w_in.n_life == 500.0
+    assert w_in.corpus_first_ts == ANCHOR - 10 * H
+    assert w_in.flip is False

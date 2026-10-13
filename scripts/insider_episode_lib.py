@@ -163,3 +163,43 @@ def auto_anchor(
     if best_start is None or best_move < min_move:
         return None
     return best_start
+
+
+@dataclass(frozen=True, slots=True)
+class WalletFeatures:
+    """Scorer inputs for one candidate wallet. Nothing here post-dates the anchor."""
+
+    wallet: str
+    n_w: float
+    n_buys: int
+    first_buy_ts: int
+    last_buy_ts: int
+    flip: bool
+    breadth: int
+    n_life: float
+    corpus_first_ts: int
+
+
+def window_features(
+    trades: list[WindowTrade], wallet: str, winning_side: str
+) -> tuple[float, int, int, int, bool]:
+    """Window-only features: ``(n_w, n_buys, first_buy_ts, last_buy_ts, flip)``.
+
+    ``flip`` is true when the wallet SOLD the opposing outcome inside the
+    window strictly before its first winning-side BUY.
+    """
+    buys = [
+        t for t in trades if t.wallet == wallet and t.bs == "BUY" and t.outcome_side == winning_side
+    ]
+    if not buys:
+        return 0.0, 0, 0, 0, False
+    first_buy = min(t.ts for t in buys)
+    last_buy = max(t.ts for t in buys)
+    flip = any(
+        t.wallet == wallet
+        and t.bs == "SELL"
+        and t.outcome_side != winning_side
+        and t.ts < first_buy
+        for t in trades
+    )
+    return sum(t.notional for t in buys), len(buys), first_buy, last_buy, flip

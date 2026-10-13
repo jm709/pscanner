@@ -27,7 +27,9 @@ from scripts.insider_episode_lib import (  # noqa: E402  (after sys.path bootstr
     MarketRef,
     PublicCase,
     SealedCase,
+    WalletFeatures,
     WindowTrade,
+    window_features,
 )
 
 _FULL_ADDRESS = re.compile(r"^0x[0-9a-f]{40}$")
@@ -166,3 +168,41 @@ def candidate_wallets(trades: list[WindowTrade], winning_side: str) -> list[str]
         if t.bs == "BUY" and t.outcome_side == winning_side and t.wallet not in seen:
             seen[t.wallet] = None
     return list(seen)
+
+
+def lifetime_stats(conn: sqlite3.Connection, wallet: str, anchor: int) -> tuple[int, float, int]:
+    """``(distinct markets, total notional, first trade ts)`` for ``wallet`` with ``ts <= anchor``."""
+    row = conn.execute(
+        "SELECT count(DISTINCT condition_id), coalesce(sum(notional_usd), 0), min(ts) "
+        "FROM corpus_trades WHERE wallet_address = ? AND ts <= ?",
+        (wallet, anchor),
+    ).fetchone()
+    return int(row[0]), float(row[1]), int(row[2])
+
+
+def build_features(
+    conn: sqlite3.Connection,
+    trades: list[WindowTrade],
+    wallets: list[str],
+    winning_side: str,
+    anchor: int,
+) -> list[WalletFeatures]:
+    """Join window features with anchor-bounded lifetime stats for each candidate."""
+    out: list[WalletFeatures] = []
+    for w in wallets:
+        n_w, n_buys, first_buy, last_buy, flip = window_features(trades, w, winning_side)
+        breadth, n_life, first_ts = lifetime_stats(conn, w, anchor)
+        out.append(
+            WalletFeatures(
+                wallet=w,
+                n_w=n_w,
+                n_buys=n_buys,
+                first_buy_ts=first_buy,
+                last_buy_ts=last_buy,
+                flip=flip,
+                breadth=breadth,
+                n_life=n_life,
+                corpus_first_ts=first_ts,
+            )
+        )
+    return out
